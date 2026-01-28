@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Critical Info
 - Use Godot 4.6
 - Always consult documentation, download it if needed
+- Prefer Godot `export` variables over magic numbers or constants
 
 ## Project Overview
 
