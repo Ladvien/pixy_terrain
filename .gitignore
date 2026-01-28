@@ -1,0 +1,18 @@
+# Rust
+rust/target/
+rust/Cargo.lock
+
+# Godot
+godot/.godot/
+godot/*.import
+godot/export_presets.cfg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

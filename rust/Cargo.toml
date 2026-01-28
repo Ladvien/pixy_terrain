@@ -1,0 +1,20 @@
+[package]
+name = "pixy_terrain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = { git = "https://github.com/godot-rust/gdext", branch = "master" }
+
+# For transvoxel algorithm
+# transvoxel = "0.5"  # Uncomment when ready to implement
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

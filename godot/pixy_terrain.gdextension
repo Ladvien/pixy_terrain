@@ -1,0 +1,14 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.1
+reloadable = true
+
+[libraries]
+linux.debug.x86_64 = "res://../rust/target/debug/libpixy_terrain.so"
+linux.release.x86_64 = "res://../rust/target/release/libpixy_terrain.so"
+windows.debug.x86_64 = "res://../rust/target/debug/pixy_terrain.dll"
+windows.release.x86_64 = "res://../rust/target/release/pixy_terrain.dll"
+macos.debug = "res://../rust/target/debug/libpixy_terrain.dylib"
+macos.release = "res://../rust/target/release/libpixy_terrain.dylib"
+macos.debug.arm64 = "res://../rust/target/debug/libpixy_terrain.dylib"
+macos.release.arm64 = "res://../rust/target/release/libpixy_terrain.dylib"
