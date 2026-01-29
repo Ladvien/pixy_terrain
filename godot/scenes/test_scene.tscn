@@ -1,6 +1,6 @@
-[gd_scene load_steps=7 format=3 uid="uid://c1234test"]
+[gd_scene format=3 uid="uid://c1234test"]
 
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="1_orbit"]
+[ext_resource type="Script" uid="uid://bfrw1dqdf2h30" path="res://scripts/orbit_camera.gd" id="1_orbit"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -17,30 +17,30 @@ sky = SubResource("Sky_main")
 ambient_light_source = 2
 ambient_light_color = Color(0.5, 0.5, 0.5, 1)
 
-[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
-size = Vector2(50, 50)
-
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_grid"]
 albedo_color = Color(0.3, 0.3, 0.3, 1)
 
-[node name="TestScene" type="Node3D"]
+[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
+size = Vector2(50, 50)
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="TestScene" type="Node3D" unique_id=1059564556]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1321600982]
 environment = SubResource("Environment_env")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1064348885]
 transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 10, 0)
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="."]
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1223478353]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 15, 25)
 current = true
 fov = 60.0
 script = ExtResource("1_orbit")
 
-[node name="PixyTerrain" type="PixyTerrain" parent="."]
+[node name="PixyTerrain" type="PixyTerrain" parent="." unique_id=284420277]
 
-[node name="GridFloor" type="MeshInstance3D" parent="."]
+[node name="GridFloor" type="MeshInstance3D" parent="." unique_id=2116148011]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.01, 0)
-mesh = SubResource("PlaneMesh_floor")
 material_override = SubResource("StandardMaterial3D_grid")
+mesh = SubResource("PlaneMesh_floor")

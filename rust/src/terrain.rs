@@ -58,8 +58,13 @@ pub struct PixyTerrain {
     #[init(val = false)]
     debug_wireframe: bool,
 
+    // Parallelization
     #[init(val = None)]
     worker_pool: Option<MeshWorkerPool>,
+
+    #[export]
+    #[init(val = 256)]
+    channel_capacity: i32,
 
     #[init(val = None)]
     chunk_manager: Option<ChunkManager>,
@@ -106,7 +111,7 @@ impl PixyTerrain {
         } else {
             self.worker_threads as usize
         };
-        let worker_pool = MeshWorkerPool::new(threads);
+        let worker_pool = MeshWorkerPool::new(threads, self.channel_capacity as usize);
 
         let lod_config = LODConfig::new(self.lod_base_distance, self.max_lod_level.max(0) as u8);
         let chunk_manager = ChunkManager::new(

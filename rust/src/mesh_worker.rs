@@ -5,11 +5,22 @@
 
 use bevy_tasks::{TaskPool, TaskPoolBuilder};
 use crossbeam::channel::{bounded, Receiver, Sender, TrySelectError};
+use godot::prelude::godot_print;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::mesh_extraction::extract_chunk_mesh;
 use crate::noise_field::NoiseField;
+
+// Debug counters
+static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
+static TASKS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+// Track unique thread IDs used
+use std::collections::HashSet;
+use std::sync::Mutex;
+static THREADS_USED: Mutex<Option<HashSet<std::thread::ThreadId>>> = Mutex::new(None);
 
 /// Request sent from main thread to workers
 pub struct MeshRequest {
@@ -31,20 +42,37 @@ pub struct MeshWorkerPool {
 }
 
 impl MeshWorkerPool {
-    pub fn new(num_threads: usize) -> Self {
+    pub fn new(num_threads: usize, channel_capacity: usize) -> Self {
+        let detected_cpus = num_cpus::get();
         let threads = if num_threads == 0 {
-            (num_cpus::get() / 2).max(1)
+            ((detected_cpus * 3) / 4).max(2)
         } else {
             num_threads
         };
+
+        #[cfg(not(test))]
+        godot_print!(
+            "[MeshWorker] CPU detection: {} cores, requested {} threads, using {} threads, channel capacity {}",
+            detected_cpus,
+            num_threads,
+            threads,
+            channel_capacity
+        );
 
         let pool = TaskPoolBuilder::new()
             .num_threads(threads)
             .thread_name(String::from("MeshWorker"))
             .build();
 
-        let (request_tx, request_rx) = bounded(64);
-        let (result_tx, result_rx) = bounded(64);
+        #[cfg(not(test))]
+        godot_print!(
+            "[MeshWorker] TaskPool created with {} threads, rayon has {} threads",
+            pool.thread_num(),
+            rayon::current_num_threads()
+        );
+
+        let (request_tx, request_rx) = bounded(channel_capacity);
+        let (result_tx, result_rx) = bounded(channel_capacity);
 
         Self {
             pool,
@@ -64,22 +92,69 @@ impl MeshWorkerPool {
     }
 
     pub fn process_requests(&self) {
-        let mut requests = Vec::new();
-        while let Ok(req) = self.request_rx.try_recv() {
-            requests.push(req)
+        // Process batch_size requests at a time - use rayon's thread count
+        let batch_size = rayon::current_num_threads().max(16);
+        let mut batch = Vec::with_capacity(batch_size);
+
+        while batch.len() < batch_size {
+            match self.request_rx.try_recv() {
+                Ok(req) => batch.push(req),
+                Err(_) => break,
+            }
         }
 
-        if requests.is_empty() {
+        if batch.is_empty() {
             return;
         }
-        for request in requests {
-            let tx = self.result_tx.clone();
-            self.pool
-                .spawn(async move {
+
+        let count = batch.len();
+        TASKS_SPAWNED.fetch_add(count as u64, Ordering::Relaxed);
+        #[cfg(not(test))]
+        godot_print!(
+            "[MeshWorker] Processing {} of {} batch (rayon threads: {}, spawned: {}, completed: {})",
+            count,
+            batch_size,
+            rayon::current_num_threads(),
+            TASKS_SPAWNED.load(Ordering::Relaxed),
+            TASKS_COMPLETED.load(Ordering::Relaxed)
+        );
+
+        let result_tx = self.result_tx.clone();
+
+        // Reset thread tracking for this batch
+        {
+            let mut guard = THREADS_USED.lock().unwrap();
+            *guard = Some(HashSet::new());
+        }
+
+        // Use rayon for true parallel processing
+        rayon::scope(|scope| {
+            for request in batch {
+                let tx = result_tx.clone();
+                scope.spawn(move |_| {
+                    // Track which thread we're on
+                    let thread_id = std::thread::current().id();
+                    {
+                        let mut guard = THREADS_USED.lock().unwrap();
+                        if let Some(ref mut set) = *guard {
+                            set.insert(thread_id);
+                        }
+                    }
+
                     let mesh = generate_mesh_for_request(&request);
+                    TASKS_COMPLETED.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.try_send(mesh);
-                })
-                .detach();
+                });
+            }
+        });
+
+        // Report how many unique threads were used
+        #[cfg(not(test))]
+        {
+            let guard = THREADS_USED.lock().unwrap();
+            if let Some(ref set) = *guard {
+                godot_print!("[MeshWorker] Batch used {} unique threads", set.len());
+            }
         }
     }
 
@@ -90,7 +165,7 @@ impl MeshWorkerPool {
 
 impl Default for MeshWorkerPool {
     fn default() -> Self {
-        Self::new(0)
+        Self::new(0, 256)
     }
 }
 
@@ -118,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_worker_pool_creation() {
-        let pool = MeshWorkerPool::new(2);
+        let pool = MeshWorkerPool::new(2, 64);
         assert!(pool.thread_count() >= 1);
     }
 
@@ -129,8 +204,39 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_count_matches_requested() {
+        use bevy_tasks::TaskPoolBuilder;
+
+        // Test bevy_tasks directly first
+        let direct_pool = TaskPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(String::from("DirectTest"))
+            .build();
+        println!(
+            "Direct TaskPool: requested 4 threads, got {} threads",
+            direct_pool.thread_num()
+        );
+
+        // Now test through our wrapper
+        let requested = 4;
+        let pool = MeshWorkerPool::new(requested, 64);
+        println!(
+            "MeshWorkerPool: requested {} threads, got {} threads",
+            requested,
+            pool.thread_count()
+        );
+
+        // This assertion may fail - that's what we're investigating
+        assert_eq!(
+            pool.thread_count(),
+            requested,
+            "Thread count should match requested"
+        );
+    }
+
+    #[test]
     fn test_send_and_receive_mesh() {
-        let pool = MeshWorkerPool::new(2);
+        let pool = MeshWorkerPool::new(2, 64);
         let noise = test_noise();
 
         let request = MeshRequest {
@@ -158,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_multiple_requests_parallel() {
-        let pool = MeshWorkerPool::new(4);
+        let pool = MeshWorkerPool::new(4, 64);
         let noise = test_noise();
 
         let coords = [
@@ -191,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_bounded_channels_dont_block() {
-        let pool = MeshWorkerPool::new(1);
+        let pool = MeshWorkerPool::new(1, 64);
         let noise = test_noise();
 
         let mut sent = 0;

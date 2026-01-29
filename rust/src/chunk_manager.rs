@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossbeam::channel::{Receiver, Sender};
+use godot::prelude::godot_print;
 
 use crate::chunk::{self, Chunk, ChunkCoord, ChunkState, MeshResult};
 use crate::lod::LODConfig;
@@ -27,6 +28,14 @@ impl ChunkManager {
         request_tx: Sender<MeshRequest>,
         result_rx: Receiver<MeshResult>,
     ) -> Self {
+        #[cfg(not(test))]
+        godot_print!(
+            "[ChunkManager] Created: base_distance={}, max_lod={}, chunk_size={}, max_view_distance={}",
+            lod_config.base_distance,
+            lod_config.max_lod,
+            base_voxel_size * lod_config.chunk_subdivisions as f32,
+            lod_config.max_view_distance()
+        );
         Self {
             chunks: HashMap::new(),
             lod_config,
@@ -34,7 +43,7 @@ impl ChunkManager {
             request_tx,
             result_rx,
             current_frame: 0,
-            max_results_per_update: 16,
+            max_results_per_update: 64,
         }
     }
 
@@ -50,8 +59,11 @@ impl ChunkManager {
         self.current_frame += 1;
         let desired = self.compute_desired_chunks(camera_pos);
 
+        let mut requests_sent = 0;
         for (coord, desired_lod) in &desired {
-            self.ensure_chunk_requested(*coord, *desired_lod, noise_field);
+            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field) {
+                requests_sent += 1;
+            }
         }
 
         self.mark_distant_for_unload(&desired);
@@ -67,6 +79,24 @@ impl ChunkManager {
             if results.len() >= self.max_results_per_update {
                 break;
             }
+        }
+
+        // Log every 60 frames
+        #[cfg(not(test))]
+        if self.current_frame % 60 == 0 {
+            let pending = self.chunks.values().filter(|c| c.state == ChunkState::Pending).count();
+            let ready = self.chunks.values().filter(|c| c.state == ChunkState::Ready).count();
+            let active = self.chunks.values().filter(|c| c.state == ChunkState::Active).count();
+            godot_print!(
+                "[ChunkManager] Frame {}: desired={}, sent={}, received={}, pending={}, ready={}, active={}",
+                self.current_frame,
+                desired.len(),
+                requests_sent,
+                results.len(),
+                pending,
+                ready,
+                active
+            );
         }
 
         results
@@ -106,7 +136,7 @@ impl ChunkManager {
         coord: ChunkCoord,
         desired_lod: u8,
         noise_field: &Arc<NoiseField>,
-    ) {
+    ) -> bool {
         let needs_request = match self.chunks.get(&coord) {
             Some(chunk) => chunk.lod_level != desired_lod && chunk.state != ChunkState::Pending,
             None => true,
@@ -137,10 +167,12 @@ impl ChunkManager {
                         chunk.last_access_frame = self.current_frame;
                         chunk
                     });
+                return true;
             }
         } else if let Some(chunk) = self.chunks.get_mut(&coord) {
             chunk.last_access_frame = self.current_frame;
         }
+        false
     }
 
     fn compute_transition_sides(&self, coord: ChunkCoord, lod: u8) -> u8 {
