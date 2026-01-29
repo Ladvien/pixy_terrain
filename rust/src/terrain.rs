@@ -1,140 +1,189 @@
+use godot::classes::mesh::PrimitiveType;
+use godot::classes::rendering_server::ArrayType;
+use godot::classes::{ArrayMesh, MeshInstance3D, Node3D};
 use godot::prelude::*;
-use godot::classes::{MeshInstance3D, ArrayMesh, IMeshInstance3D};
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::chunk::{ChunkCoord, MeshResult};
+use crate::chunk_manager::ChunkManager;
+use crate::lod::LODConfig;
+use crate::mesh_worker::MeshWorkerPool;
+use crate::noise_field::NoiseField;
 type VariantArray = Array<Variant>;
 
 /// Main terrain editor node - displays voxel-based terrain using transvoxel meshing
 #[derive(GodotClass)]
-#[class(base=MeshInstance3D, init, tool)]
+#[class(base=Node3D, init, tool)]
 pub struct PixyTerrain {
-    base: Base<MeshInstance3D>,
+    base: Base<Node3D>,
 
-    /// Size of the terrain grid in voxels
     #[export]
-    #[init(val = Vector3i::new(16, 16, 16))]
-    grid_size: Vector3i,
+    #[init(val = 42)]
+    noise_seed: u32,
 
-    /// Size of each voxel in world units
+    #[export]
+    #[init(val = 4)]
+    noise_octaves: i32,
+
+    #[export]
+    #[init(val = 0.02)]
+    noise_frequency: f32,
+
+    #[export]
+    #[init(val = 32.0)]
+    noise_amplitude: f32,
+
+    #[export]
+    #[init(val = 0.0)]
+    height_offset: f32,
+
     #[export]
     #[init(val = 1.0)]
     voxel_size: f32,
 
-    /// Whether to show debug wireframe
+    #[export]
+    #[init(val = 64.0)]
+    lod_base_distance: f32,
+
+    #[export]
+    #[init(val = 4)]
+    max_lod_level: i32,
+
+    #[export]
+    #[init(val = 0)]
+    worker_threads: i32,
+
     #[export]
     #[init(val = false)]
     debug_wireframe: bool,
+
+    #[init(val = None)]
+    worker_pool: Option<MeshWorkerPool>,
+
+    #[init(val = None)]
+    chunk_manager: Option<ChunkManager>,
+
+    #[init(val = None)]
+    noise_field: Option<Arc<NoiseField>>,
+
+    #[init(val = HashMap::new())]
+    chunk_nodes: HashMap<ChunkCoord, Gd<MeshInstance3D>>,
+
+    #[init(val = false)]
+    initialized: bool,
 }
 
 #[godot_api]
-impl IMeshInstance3D for PixyTerrain {
+impl INode3D for PixyTerrain {
     fn ready(&mut self) {
-        godot_print!("PixyTerrain ready! Grid size: {}", self.grid_size);
-        self.generate_test_mesh();
+        godot_print!("PixyTerrain: Initializing...");
+        self.initialize_systems();
+    }
+
+    fn process(&mut self, _delta: f64) {
+        if !self.initialized {
+            return;
+        }
+        self.update_terrain();
     }
 }
 
-#[godot_api]
 impl PixyTerrain {
-    /// Regenerate the terrain mesh
-    #[func]
-    fn regenerate(&mut self) {
-        godot_print!("Regenerating terrain mesh...");
-        self.generate_test_mesh();
+    fn initialize_systems(&mut self) {
+        let noise = NoiseField::new(
+            self.noise_seed,
+            self.noise_octaves.max(1) as usize,
+            self.noise_frequency,
+            self.noise_amplitude,
+            self.height_offset,
+        );
+        let noise_arc = Arc::new(noise);
+        self.noise_field = Some(Arc::clone(&noise_arc));
+
+        let threads = if self.worker_threads <= 0 {
+            0
+        } else {
+            self.worker_threads as usize
+        };
+        let worker_pool = MeshWorkerPool::new(threads);
+
+        let lod_config = LODConfig::new(self.lod_base_distance, self.max_lod_level.max(0) as u8);
+        let chunk_manager = ChunkManager::new(
+            lod_config,
+            self.voxel_size,
+            worker_pool.request_sender(),
+            worker_pool.result_receiver(),
+        );
+
+        self.worker_pool = Some(worker_pool);
+        self.chunk_manager = Some(chunk_manager);
+        self.initialized = true;
+
+        godot_print!(
+            "PixyTerrain: Ready (seed={}, {} worker threads)",
+            self.noise_seed,
+            self.worker_pool.as_ref().map_or(0, |p| p.thread_count())
+        );
     }
 
-    /// Clear all terrain data
-    #[func]
-    fn clear(&mut self) {
-        self.base_mut().set_mesh(&Gd::<ArrayMesh>::default());
-        godot_print!("Terrain cleared");
-    }
+    fn update_terrain(&mut self) {
+        let camera_pos = self.get_camera_position();
 
-    /// Get the current grid dimensions
-    #[func]
-    fn get_grid_dimensions(&self) -> Vector3i {
-        self.grid_size
-    }
-
-    /// Set a voxel at the given position (stub for now)
-    #[func]
-    fn set_voxel(&mut self, _position: Vector3i, _value: f32) {
-        // TODO: Implement voxel data storage
-        godot_print!("set_voxel called - not yet implemented");
-    }
-
-    /// Generate a simple test mesh to verify the extension works
-    fn generate_test_mesh(&mut self) {
-        use godot::classes::mesh::PrimitiveType;
-        use godot::classes::rendering_server::ArrayType;
-
-        let mut mesh = ArrayMesh::new_gd();
-
-        // Create a simple cube mesh for testing
-        let size = self.voxel_size * self.grid_size.x as f32 * 0.5;
-
-        // Vertices for a cube
-        let vertices = PackedVector3Array::from(&[
-            // Front face
-            Vector3::new(-size, -size, size),
-            Vector3::new(size, -size, size),
-            Vector3::new(size, size, size),
-            Vector3::new(-size, size, size),
-            // Back face
-            Vector3::new(-size, -size, -size),
-            Vector3::new(-size, size, -size),
-            Vector3::new(size, size, -size),
-            Vector3::new(size, -size, -size),
-            // Top face
-            Vector3::new(-size, size, -size),
-            Vector3::new(-size, size, size),
-            Vector3::new(size, size, size),
-            Vector3::new(size, size, -size),
-            // Bottom face
-            Vector3::new(-size, -size, -size),
-            Vector3::new(size, -size, -size),
-            Vector3::new(size, -size, size),
-            Vector3::new(-size, -size, size),
-            // Right face
-            Vector3::new(size, -size, -size),
-            Vector3::new(size, size, -size),
-            Vector3::new(size, size, size),
-            Vector3::new(size, -size, size),
-            // Left face
-            Vector3::new(-size, -size, -size),
-            Vector3::new(-size, -size, size),
-            Vector3::new(-size, size, size),
-            Vector3::new(-size, size, -size),
-        ]);
-
-        // Normals
-        let normals = PackedVector3Array::from(&[
-            // Front
-            Vector3::FORWARD, Vector3::FORWARD, Vector3::FORWARD, Vector3::FORWARD,
-            // Back
-            Vector3::BACK, Vector3::BACK, Vector3::BACK, Vector3::BACK,
-            // Top
-            Vector3::UP, Vector3::UP, Vector3::UP, Vector3::UP,
-            // Bottom
-            Vector3::DOWN, Vector3::DOWN, Vector3::DOWN, Vector3::DOWN,
-            // Right
-            Vector3::RIGHT, Vector3::RIGHT, Vector3::RIGHT, Vector3::RIGHT,
-            // Left
-            Vector3::LEFT, Vector3::LEFT, Vector3::LEFT, Vector3::LEFT,
-        ]);
-
-        // Indices for triangles
-        let mut indices = PackedInt32Array::new();
-        for face in 0..6 {
-            let base = face * 4;
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(base + 2);
-            indices.push(base);
-            indices.push(base + 2);
-            indices.push(base + 3);
+        if let Some(ref pool) = self.worker_pool {
+            pool.process_requests();
         }
 
-        // Build the mesh arrays - need to fill all slots up to MAX
+        let ready_meshes = if let (Some(ref mut manager), Some(ref noise)) =
+            (&mut self.chunk_manager, &self.noise_field)
+        {
+            manager.update(camera_pos, noise)
+        } else {
+            Vec::new()
+        };
+
+        for mesh_result in ready_meshes {
+            self.upload_mesh_to_godot(mesh_result);
+        }
+
+        self.unload_distant_chunks();
+    }
+
+    fn get_camera_position(&self) -> [f32; 3] {
+        if let Some(viewport) = self.base().get_viewport() {
+            if let Some(camera) = viewport.get_camera_3d() {
+                let pos = camera.get_global_position();
+                return [pos.x, pos.y, pos.z];
+            }
+        }
+        let pos = self.base().get_global_position();
+        [pos.x, pos.y, pos.z]
+    }
+
+    fn upload_mesh_to_godot(&mut self, result: MeshResult) {
+        if result.is_empty() {
+            return;
+        }
+
+        let vertices = PackedVector3Array::from(
+            &result
+                .vertices
+                .iter()
+                .map(|v| Vector3::new(v[0], v[1], v[2]))
+                .collect::<Vec<_>>()[..],
+        );
+
+        let normals = PackedVector3Array::from(
+            &result
+                .normals
+                .iter()
+                .map(|n| Vector3::new(n[0], n[1], n[2]))
+                .collect::<Vec<_>>()[..],
+        );
+
+        let indices = PackedInt32Array::from(&result.indices[..]);
+
+        let mut mesh = ArrayMesh::new_gd();
         let num_arrays = ArrayType::MAX.ord() as usize;
         let mut arrays: VariantArray = VariantArray::new();
 
@@ -152,7 +201,42 @@ impl PixyTerrain {
 
         mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
 
-        self.base_mut().set_mesh(&mesh);
-        godot_print!("Test mesh generated: {} vertices", vertices.len());
+        let coord = result.coord;
+        if let Some(mut old_node) = self.chunk_nodes.remove(&coord) {
+            old_node.queue_free();
+        }
+
+        let mut instance = MeshInstance3D::new_alloc();
+        instance.set_mesh(&mesh);
+        instance.set_name(&format!(
+            "Chunk_{}_{}_{}_LOD{}",
+            coord.x, coord.y, coord.z, result.lod_level
+        ));
+
+        self.base_mut().add_child(&instance);
+
+        let instance_id = instance.instance_id().to_i64();
+        self.chunk_nodes.insert(coord, instance);
+
+        if let Some(ref mut manager) = self.chunk_manager {
+            manager.mark_chunk_active(&coord, instance_id);
+        }
+    }
+
+    fn unload_distant_chunks(&mut self) {
+        let unload_list = if let Some(ref manager) = self.chunk_manager {
+            manager.get_unload_candidates()
+        } else {
+            Vec::new()
+        };
+
+        for (coord, _) in unload_list {
+            if let Some(mut node) = self.chunk_nodes.remove(&coord) {
+                node.queue_free();
+            }
+            if let Some(ref mut manager) = self.chunk_manager {
+                manager.remove_chunk(&coord);
+            }
+        }
     }
 }
