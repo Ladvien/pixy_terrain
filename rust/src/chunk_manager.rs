@@ -34,7 +34,7 @@ impl ChunkManager {
             request_tx,
             result_rx,
             current_frame: 0,
-            max_results_per_update: 8,
+            max_results_per_update: 16,
         }
     }
 

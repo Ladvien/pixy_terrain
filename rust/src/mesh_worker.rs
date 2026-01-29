@@ -72,18 +72,15 @@ impl MeshWorkerPool {
         if requests.is_empty() {
             return;
         }
-
-        let result_tx = self.result_tx.clone();
-
-        self.pool.scope(|scope| {
-            for request in requests {
-                let tx = result_tx.clone();
-                scope.spawn(async move {
+        for request in requests {
+            let tx = self.result_tx.clone();
+            self.pool
+                .spawn(async move {
                     let mesh = generate_mesh_for_request(&request);
                     let _ = tx.try_send(mesh);
                 })
-            }
-        });
+                .detach();
+        }
     }
 
     pub fn thread_count(&self) -> usize {
