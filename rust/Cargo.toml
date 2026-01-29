@@ -10,8 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 godot = { git = "https://github.com/godot-rust/gdext", branch = "master" }
 
-# For transvoxel algorithm
-# transvoxel = "0.5"  # Uncomment when ready to implement
+transvoxel = "1.1.0"
+noise = "0.9"
+bevy_tasks = { version = "0.18", default-features = true }
+crossbeam = "0.8"
+num_cpus = "1.17"
 
 [profile.dev]
 opt-level = 1
