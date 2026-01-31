@@ -1,0 +1,144 @@
+<svg viewBox="0 0 900 600" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <!-- Background -->
+  <rect width="900" height="600" fill="#2d2d2d"/>
+  
+  <!-- Menu Bar -->
+  <rect x="0" y="0" width="900" height="30" fill="#1a1a1a"/>
+  <text x="15" y="20" fill="#ccc" font-size="12">Scene</text>
+  <text x="65" y="20" fill="#ccc" font-size="12">Project</text>
+  <text x="125" y="20" fill="#ccc" font-size="12">Debug</text>
+  <text x="175" y="20" fill="#ccc" font-size="12">Editor</text>
+  <text x="230" y="20" fill="#ccc" font-size="12">Help</text>
+  
+  <!-- Play buttons -->
+  <rect x="800" y="5" width="20" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="805" y="19" fill="#8f8" font-size="12">▶</text>
+  <rect x="825" y="5" width="20" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="829" y="19" fill="#ccc" font-size="12">⏸</text>
+  <rect x="850" y="5" width="20" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="855" y="19" fill="#f88" font-size="12">■</text>
+  
+  <!-- Toolbar -->
+  <rect x="0" y="30" width="900" height="35" fill="#252525"/>
+  <rect x="15" y="38" width="45" height="20" rx="3" fill="#3d5a80"/>
+  <text x="27" y="52" fill="#fff" font-size="11">2D</text>
+  <rect x="65" y="38" width="45" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="77" y="52" fill="#ccc" font-size="11">3D</text>
+  <rect x="115" y="38" width="55" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="122" y="52" fill="#ccc" font-size="11">Script</text>
+  <rect x="175" y="38" width="65" height="20" rx="3" fill="#3d3d3d"/>
+  <text x="180" y="52" fill="#ccc" font-size="11">AssetLib</text>
+  
+  <!-- CONTAINER_TOOLBAR label -->
+  <text x="400" y="52" fill="#f8c537" font-size="10" font-style="italic">CONTAINER_TOOLBAR</text>
+  
+  <!-- Left Dock - Upper (0) -->
+  <rect x="5" y="70" width="180" height="200" fill="#1e1e1e" stroke="#444" stroke-width="1"/>
+  <rect x="5" y="70" width="180" height="22" fill="#333"/>
+  <text x="12" y="85" fill="#ccc" font-size="11">Scene</text>
+  <text x="100" y="85" fill="#666" font-size="11">Import</text>
+  
+  <!-- Scene tree content -->
+  <text x="15" y="110" fill="#8bf" font-size="11">▼ Root</text>
+  <text x="30" y="128" fill="#8bf" font-size="11">▼ Node3D</text>
+  <text x="45" y="146" fill="#8bf" font-size="11">└ MeshInstance</text>
+  
+  <!-- Dock label -->
+  <rect x="10" y="240" width="170" height="22" rx="3" fill="#3d5a80"/>
+  <text x="20" y="255" fill="#fff" font-size="10" font-weight="bold">DOCK_SLOT_LEFT_UL (0)</text>
+  
+  <!-- Left Dock - Lower (1) -->
+  <rect x="5" y="275" width="180" height="200" fill="#1e1e1e" stroke="#444" stroke-width="1"/>
+  <rect x="5" y="275" width="180" height="22" fill="#333"/>
+  <text x="12" y="290" fill="#ccc" font-size="11">FileSystem</text>
+  
+  <!-- FileSystem content -->
+  <text x="15" y="315" fill="#fc8" font-size="11">▼ res://</text>
+  <text x="30" y="333" fill="#ccc" font-size="11">▶ addons/</text>
+  <text x="30" y="351" fill="#ccc" font-size="11">▶ scenes/</text>
+  <text x="30" y="369" fill="#ccc" font-size="11">▶ scripts/</text>
+  
+  <!-- Dock label -->
+  <rect x="10" y="445" width="170" height="22" rx="3" fill="#3d5a80"/>
+  <text x="20" y="460" fill="#fff" font-size="10" font-weight="bold">DOCK_SLOT_LEFT_BL (1)</text>
+  
+  <!-- Main Viewport -->
+  <rect x="190" y="70" width="500" height="405" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+  
+  <!-- Viewport content hint -->
+  <rect x="340" y="250" width="150" height="50" rx="5" fill="#252525" stroke="#555" stroke-dasharray="5,5"/>
+  <text x="355" y="280" fill="#888" font-size="12">Main Viewport</text>
+  
+  <!-- Main screen label -->
+  <rect x="290" y="380" width="220" height="28" rx="3" fill="#5a3d80"/>
+  <text x="300" y="399" fill="#fff" font-size="10" font-weight="bold">get_editor_main_screen()</text>
+  
+  <!-- Add main screen plugin hint -->
+  <text x="295" y="435" fill="#c9f" font-size="9" font-style="italic">_has_main_screen() → true</text>
+  <text x="295" y="450" fill="#c9f" font-size="9" font-style="italic">_get_plugin_name() → "Tab Name"</text>
+  
+  <!-- Right Dock - Upper (4) -->
+  <rect x="695" y="70" width="200" height="200" fill="#1e1e1e" stroke="#444" stroke-width="1"/>
+  <rect x="695" y="70" width="200" height="22" fill="#333"/>
+  <text x="702" y="85" fill="#ccc" font-size="11">Inspector</text>
+  <text x="820" y="85" fill="#666" font-size="11">History</text>
+  
+  <!-- Inspector content -->
+  <text x="705" y="110" fill="#8cf" font-size="11">Node3D</text>
+  <rect x="705" y="118" width="180" height="1" fill="#444"/>
+  <text x="710" y="135" fill="#ccc" font-size="10">▼ Transform</text>
+  <text x="720" y="152" fill="#888" font-size="10">Position</text>
+  <text x="800" y="152" fill="#aaa" font-size="10">(0, 0, 0)</text>
+  <text x="720" y="169" fill="#888" font-size="10">Rotation</text>
+  <text x="800" y="169" fill="#aaa" font-size="10">(0, 0, 0)</text>
+  
+  <!-- Dock label -->
+  <rect x="700" y="240" width="185" height="22" rx="3" fill="#3d5a80"/>
+  <text x="710" y="255" fill="#fff" font-size="10" font-weight="bold">DOCK_SLOT_RIGHT_UL (4)</text>
+  
+  <!-- Right Dock - Lower (5) -->
+  <rect x="695" y="275" width="200" height="200" fill="#1e1e1e" stroke="#444" stroke-width="1"/>
+  <rect x="695" y="275" width="200" height="22" fill="#333"/>
+  <text x="702" y="290" fill="#ccc" font-size="11">Node</text>
+  <text x="755" y="290" fill="#666" font-size="11">Groups</text>
+  <text x="820" y="290" fill="#666" font-size="11">Signals</text>
+  
+  <!-- Node panel content -->
+  <text x="705" y="320" fill="#ccc" font-size="10">Signals:</text>
+  <text x="715" y="338" fill="#8f8" font-size="10">ready()</text>
+  <text x="715" y="356" fill="#8f8" font-size="10">tree_entered()</text>
+  <text x="715" y="374" fill="#8f8" font-size="10">tree_exiting()</text>
+  
+  <!-- Dock label -->
+  <rect x="700" y="445" width="185" height="22" rx="3" fill="#3d5a80"/>
+  <text x="710" y="460" fill="#fff" font-size="10" font-weight="bold">DOCK_SLOT_RIGHT_BL (5)</text>
+  
+  <!-- Bottom Panel -->
+  <rect x="5" y="480" width="890" height="115" fill="#1e1e1e" stroke="#444" stroke-width="1"/>
+  <rect x="5" y="480" width="890" height="22" fill="#333"/>
+  <rect x="12" y="485" width="55" height="14" rx="2" fill="#3d5a80"/>
+  <text x="20" y="495" fill="#fff" font-size="9">Output</text>
+  <text x="80" y="495" fill="#888" font-size="9">Debugger</text>
+  <text x="145" y="495" fill="#888" font-size="9">Audio</text>
+  <text x="195" y="495" fill="#888" font-size="9">Animation</text>
+  <text x="270" y="495" fill="#888" font-size="9">Shader Editor</text>
+  
+  <!-- Output content -->
+  <text x="15" y="520" fill="#8f8" font-size="10">> Godot Engine v4.6.stable</text>
+  <text x="15" y="538" fill="#ccc" font-size="10">> Loading project...</text>
+  <text x="15" y="556" fill="#ccc" font-size="10">> Loaded scene: res://main.tscn</text>
+  
+  <!-- Bottom panel label -->
+  <rect x="620" y="555" width="265" height="28" rx="3" fill="#805a3d"/>
+  <text x="630" y="574" fill="#fff" font-size="10" font-weight="bold">add_control_to_bottom_panel()</text>
+  
+  <!-- Legend -->
+  <rect x="5" y="560" width="15" height="15" fill="#3d5a80"/>
+  <text x="25" y="572" fill="#ccc" font-size="9">Dock slots (add_control_to_dock)</text>
+  
+  <rect x="200" y="560" width="15" height="15" fill="#5a3d80"/>
+  <text x="220" y="572" fill="#ccc" font-size="9">Main screen plugin</text>
+  
+  <rect x="370" y="560" width="15" height="15" fill="#805a3d"/>
+  <text x="390" y="572" fill="#ccc" font-size="9">Bottom panel</text>
+</svg>
