@@ -19,6 +19,9 @@ pub struct ChunkManager {
     result_rx: Receiver<MeshResult>,
     current_frame: u64,
     max_results_per_update: usize,
+    map_width: i32,
+    map_height: i32,
+    map_depth: i32,
 }
 
 impl ChunkManager {
@@ -27,6 +30,9 @@ impl ChunkManager {
         base_voxel_size: f32,
         request_tx: Sender<MeshRequest>,
         result_rx: Receiver<MeshResult>,
+        map_width: i32,
+        map_height: i32,
+        map_depth: i32,
     ) -> Self {
         Self {
             chunks: HashMap::new(),
@@ -36,6 +42,9 @@ impl ChunkManager {
             result_rx,
             current_frame: 0,
             max_results_per_update: 64,
+            map_width,
+            map_height,
+            map_depth,
         }
     }
 
@@ -53,7 +62,7 @@ impl ChunkManager {
 
         let mut requests_sent = 0;
         for (coord, desired_lod) in &desired {
-            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field) {
+            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field, &desired) {
                 requests_sent += 1;
             }
         }
@@ -91,6 +100,15 @@ impl ChunkManager {
             for dy in -view_chunks..=view_chunks {
                 for dz in -view_chunks..=view_chunks {
                     let coord = ChunkCoord::new(cam_cx + dx, cam_cy + dy, cam_cz + dz);
+                    if coord.x < 0 || coord.x >= self.map_width {
+                        continue;
+                    }
+                    if coord.y < 0 || coord.y >= self.map_height {
+                        continue;
+                    }
+                    if coord.z < 0 || coord.z >= self.map_depth {
+                        continue;
+                    }
                     let dist_sq = coord.distance_squared_to(camera_pos, chunk_size);
                     let distance = dist_sq.sqrt();
 
@@ -110,6 +128,7 @@ impl ChunkManager {
         coord: ChunkCoord,
         desired_lod: u8,
         noise_field: &Arc<NoiseField>,
+        desired: &HashMap<ChunkCoord, u8>,
     ) -> bool {
         let needs_request = match self.chunks.get(&coord) {
             Some(chunk) => chunk.lod_level != desired_lod && chunk.state != ChunkState::Pending,
@@ -117,7 +136,7 @@ impl ChunkManager {
         };
 
         if needs_request {
-            let transition_sides = self.compute_transition_sides(coord, desired_lod);
+            let transition_sides = self.compute_transition_sides(coord, desired_lod, desired);
 
             let request = MeshRequest {
                 coord,
@@ -149,7 +168,12 @@ impl ChunkManager {
         false
     }
 
-    fn compute_transition_sides(&self, coord: ChunkCoord, lod: u8) -> u8 {
+    fn compute_transition_sides(
+        &self,
+        coord: ChunkCoord,
+        lod: u8,
+        desired: &HashMap<ChunkCoord, u8>,
+    ) -> u8 {
         if lod == 0 {
             return 0;
         }
@@ -165,8 +189,8 @@ impl ChunkManager {
         ];
 
         for (neigbor_coord, flag) in neighbors {
-            if let Some(neighbor) = self.chunks.get(&neigbor_coord) {
-                if neighbor.lod_level < lod {
+            if let Some(&neighbor_lod) = desired.get(&neigbor_coord) {
+                if neighbor_lod < lod {
                     sides |= flag;
                 }
             }
@@ -200,6 +224,10 @@ impl ChunkManager {
             chunk.state = ChunkState::Active;
             chunk.mesh_instance_id = Some(instance_id);
         }
+    }
+
+    pub fn clear_all_chunks(&mut self) {
+        self.chunks.clear();
     }
 
     pub fn chunk_count(&self) -> usize {

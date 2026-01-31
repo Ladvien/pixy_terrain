@@ -127,6 +127,11 @@ impl MeshWorkerPool {
     pub fn thread_count(&self) -> usize {
         self.pool.thread_num()
     }
+
+    pub fn shutdown(&mut self) {
+        while self.request_rx.try_recv().is_ok() {}
+        while self.result_rx.try_recv().is_ok() {}
+    }
 }
 
 impl Default for MeshWorkerPool {

@@ -3,6 +3,7 @@ use godot::classes::rendering_server::ArrayType;
 use godot::classes::{ArrayMesh, MeshInstance3D, Node3D};
 use godot::prelude::*;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkCoord, MeshResult};
@@ -66,6 +67,52 @@ pub struct PixyTerrain {
     #[init(val = 256)]
     channel_capacity: i32,
 
+    // Map settings
+    #[export]
+    #[init(val = 10)]
+    map_width_x: i32,
+
+    #[export]
+    #[init(val = 4)]
+    map_height_y: i32,
+
+    #[export]
+    #[init(val = 10)]
+    map_width_z: i32,
+
+    // Upload buffer
+    #[export]
+    #[init(val = 8)]
+    max_uploads_per_frame: i32,
+
+    #[export]
+    #[init(val = 512)]
+    max_pending_uploads: i32,
+
+    // Terrain floor
+    #[export]
+    #[init(val = 32.0)]
+    terrain_floor_y: f32,
+
+    // Debug
+    #[export]
+    #[init(val = false)]
+    debug_logging: bool,
+
+    #[export]
+    #[init(val = false)]
+    debug_material: bool,
+
+    // Internal state for upload buffer
+    #[init(val = VecDeque::new())]
+    pending_uploads: VecDeque<MeshResult>,
+
+    #[init(val = 0)]
+    meshes_dropped: u64,
+
+    #[init(val = 0)]
+    meshes_uploaded: u64,
+
     #[init(val = None)]
     chunk_manager: Option<ChunkManager>,
 
@@ -119,6 +166,9 @@ impl PixyTerrain {
             self.voxel_size,
             worker_pool.request_sender(),
             worker_pool.result_receiver(),
+            self.map_width_x,
+            self.map_height_y,
+            self.map_width_z,
         );
 
         self.worker_pool = Some(worker_pool);
@@ -139,7 +189,8 @@ impl PixyTerrain {
             pool.process_requests();
         }
 
-        let ready_meshes = if let (Some(ref mut manager), Some(ref noise)) =
+        // Collect new meshes from workers
+        let new_meshes = if let (Some(ref mut manager), Some(ref noise)) =
             (&mut self.chunk_manager, &self.noise_field)
         {
             manager.update(camera_pos, noise)
@@ -147,8 +198,28 @@ impl PixyTerrain {
             Vec::new()
         };
 
-        for mesh_result in ready_meshes {
-            self.upload_mesh_to_godot(mesh_result);
+        // Add to back of queue (FIFO)
+        for mesh in new_meshes {
+            if self.pending_uploads.len() < self.max_pending_uploads as usize {
+                self.pending_uploads.push_back(mesh);
+            } else {
+                // Buffer full, drop oldest to make room
+                if let Some(_old) = self.pending_uploads.pop_front() {
+                    self.meshes_dropped += 1;
+                }
+                self.pending_uploads.push_back(mesh);
+            }
+        }
+
+        // Upload limited number per from (from front, oldest firsst)
+        let max_uploads = self.max_uploads_per_frame.max(1) as usize;
+        for _ in 0..max_uploads {
+            if let Some(mesh_result) = self.pending_uploads.pop_front() {
+                self.upload_mesh_to_godot(mesh_result);
+                self.meshes_uploaded += 1;
+            } else {
+                break;
+            }
         }
 
         self.unload_distant_chunks();
@@ -243,5 +314,45 @@ impl PixyTerrain {
                 manager.remove_chunk(&coord);
             }
         }
+    }
+}
+
+#[godot_api]
+impl PixyTerrain {
+    #[func]
+    pub fn regenerate(&mut self) {
+        self.clear();
+        self.initialize_systems();
+    }
+
+    #[func]
+    pub fn clear(&mut self) {
+        // 1. Stop worker pool first (prevent new results)
+        if let Some(ref mut pool) = self.worker_pool {
+            pool.shutdown()
+        }
+
+        // 2. Clear chunk manager's internal state
+        if let Some(ref mut manager) = self.chunk_manager {
+            manager.clear_all_chunks();
+        }
+
+        // 3. Free chunk mesh nodes
+        let nodes: Vec<_> = self.chunk_nodes.drain().map(|(_, node)| node).collect();
+        for mut node in nodes {
+            if node.is_instance_valid() {
+                self.base_mut().remove_child(&node);
+                node.queue_free();
+            }
+        }
+
+        // 4. Clear pending uploads buffer
+        self.pending_uploads.clear();
+
+        // 5. Drop systems
+        self.worker_pool = None;
+        self.chunk_manager = None;
+        self.noise_field = None;
+        self.initialized = false;
     }
 }
