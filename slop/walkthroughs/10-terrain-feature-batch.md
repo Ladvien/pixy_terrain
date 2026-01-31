@@ -37,7 +37,7 @@ a4d626a fix: prevent mesh holes with upload buffer and chunk state fixes
 
 ## Step 1: Editor Plugin (Pure Rust)
 
-**What you'll build:** A Godot editor plugin with Generate/Clear buttons in the 3D editor toolbar, implemented entirely in Rust using gdext.
+**What you'll build:** A Godot editor plugin with Generate/Clear buttons in the 3D editor's left sidebar, implemented entirely in Rust using gdext.
 
 **Key pattern:** Use `#[class(tool, init, base=EditorPlugin)]` with `IEditorPlugin` trait. No `plugin.cfg` needed - automatic registration via gdextension.
 
@@ -52,27 +52,32 @@ Key concepts:
 - `edit()` sets current_terrain when selected
 - `forward_3d_gui_input()` handles G/C keyboard shortcuts
 - `is_modifying` flag guards against Godot bug #40166 (false hide during child modification)
+- `SPATIAL_EDITOR_SIDE_LEFT` places buttons in 3D viewport's left sidebar
+- `MarginContainer` + `VBoxContainer` for proper padding and vertical layout
 
 ```rust
-use godot::prelude::*;
+use godot::classes::editor_plugin::AfterGuiInput;
+use godot::classes::editor_plugin::CustomControlContainer;
 use godot::classes::{
-    EditorPlugin, IEditorPlugin, Camera3D, InputEvent,
-    InputEventKey, HBoxContainer, Button, IButton,
-    EditorInterface,
+    Button, Camera3D, EditorPlugin, IEditorPlugin, InputEvent, InputEventKey, MarginContainer,
+    VBoxContainer,
 };
-use godot::global::{Key, Error};
+use godot::prelude::*;
 
 #[derive(GodotClass)]
 #[class(tool, init, base=EditorPlugin)]
 pub struct PixyTerrainPlugin {
     base: Base<EditorPlugin>,
-
     #[init(val = None)]
     current_terrain: Option<Gd<Node>>,
-
     #[init(val = None)]
-    toolbar: Option<Gd<HBoxContainer>>,
-
+    margin_container: Option<Gd<MarginContainer>>,
+    #[init(val = None)]
+    toolbar: Option<Gd<VBoxContainer>>,
+    #[init(val = None)]
+    generate_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    clear_button: Option<Gd<Button>>,
     #[init(val = false)]
     is_modifying: bool,
 }
@@ -80,118 +85,136 @@ pub struct PixyTerrainPlugin {
 #[godot_api]
 impl IEditorPlugin for PixyTerrainPlugin {
     fn enter_tree(&mut self) {
-        // Create toolbar container
-        let mut toolbar = HBoxContainer::new_alloc();
+        godot_print!("PixyTerrainPlugin: enter_tree called");
+
+        // Create MarginContainer for outer padding
+        let mut margin_container = MarginContainer::new_alloc();
+        margin_container.set_name("PixyTerrainMargin");
+        margin_container.set_visible(false);
+        margin_container.set_custom_minimum_size(Vector2::new(120.0, 0.0)); // Min width
+        margin_container.add_theme_constant_override("margin_top", 8);
+        margin_container.add_theme_constant_override("margin_left", 8);
+        margin_container.add_theme_constant_override("margin_right", 8);
+        margin_container.add_theme_constant_override("margin_bottom", 8);
+
+        // Create VBoxContainer for vertical button layout
+        let mut toolbar = VBoxContainer::new_alloc();
         toolbar.set_name("PixyTerrainToolbar");
-        toolbar.set_visible(false);
+        toolbar.add_theme_constant_override("separation", 8); // Space between buttons
 
         // Create Generate button
-        let mut gen_button = Button::new_alloc();
-        gen_button.set_text("Generate");
-        gen_button.set_flat(true);
-        gen_button.set_tooltip_text("Generate terrain (G)");
+        let mut generate_button = Button::new_alloc();
+        generate_button.set_text("Generate (G)");
+        generate_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
 
         // Create Clear button
         let mut clear_button = Button::new_alloc();
-        clear_button.set_text("Clear");
-        clear_button.set_flat(true);
-        clear_button.set_tooltip_text("Clear terrain (C)");
+        clear_button.set_text("Clear (C)");
+        clear_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+
+        // Add buttons to VBoxContainer
+        toolbar.add_child(&generate_button);
+        toolbar.add_child(&clear_button);
+
+        // Add VBoxContainer to MarginContainer
+        margin_container.add_child(&toolbar);
 
         // Connect button signals
-        let plugin_instance = self.to_gd();
-        gen_button.connect(
+        let plugin_ref = self.to_gd();
+        generate_button.connect(
             "pressed",
-            &Callable::from_object_method(&plugin_instance, "on_generate_pressed"),
+            &Callable::from_object_method(&plugin_ref, "on_generate_pressed"),
         );
         clear_button.connect(
             "pressed",
-            &Callable::from_object_method(&plugin_instance, "on_clear_pressed"),
+            &Callable::from_object_method(&plugin_ref, "on_clear_pressed"),
         );
 
-        // Add buttons to toolbar
-        toolbar.add_child(&gen_button);
-        toolbar.add_child(&clear_button);
-
-        // Add toolbar to 3D editor menu
+        // Add MarginContainer to the spatial editor side left
         self.base_mut().add_control_to_container(
-            godot::classes::editor_plugin::CustomControlContainer::SPATIAL_EDITOR_MENU,
-            &toolbar,
+            CustomControlContainer::SPATIAL_EDITOR_SIDE_LEFT,
+            &margin_container,
         );
 
+        self.margin_container = Some(margin_container);
         self.toolbar = Some(toolbar);
+        self.generate_button = Some(generate_button);
+        self.clear_button = Some(clear_button);
+        godot_print!("PixyTerrainPlugin: toolbar added to SPATIAL_EDITOR_SIDE_LEFT");
     }
 
     fn exit_tree(&mut self) {
-        if let Some(mut toolbar) = self.toolbar.take() {
+        // Clean up child refs (they'll be freed with parent, but clear refs)
+        self.generate_button = None;
+        self.clear_button = None;
+        self.toolbar = None;
+
+        // Remove and free the margin container (and all children)
+        if let Some(mut margin) = self.margin_container.take() {
             self.base_mut().remove_control_from_container(
-                godot::classes::editor_plugin::CustomControlContainer::SPATIAL_EDITOR_MENU,
-                &toolbar,
+                CustomControlContainer::SPATIAL_EDITOR_SIDE_LEFT,
+                &margin,
             );
-            toolbar.queue_free();
+            margin.queue_free();
         }
     }
 
     fn handles(&self, object: Gd<Object>) -> bool {
-        // Check if the object is a PixyTerrain node
-        object.get_class() == "PixyTerrain".into()
+        let class_name = object.get_class();
+        godot_print!("PixyTerrainPlugin: handles called for class: {}", class_name);
+        class_name == "PixyTerrain"
     }
 
     fn edit(&mut self, object: Option<Gd<Object>>) {
+        godot_print!("PixyTerrainPlugin: edit called, object is_some: {}", object.is_some());
         if let Some(obj) = object {
-            // Try to cast to Node and store reference
             if let Ok(node) = obj.try_cast::<Node>() {
                 self.current_terrain = Some(node);
                 self.set_ui_visible(true);
                 return;
             }
         }
-        self.set_ui_visible(false);
+        self.set_ui_visible(false)
     }
 
     fn make_visible(&mut self, visible: bool) {
         // Guard against false-positive hides during child modifications (bug #40166)
         if !visible && self.is_modifying {
-            self.base_mut().call_deferred("_ensure_visible", &[]);
             return;
         }
 
-        // Double-check validity before hiding
+        self.set_ui_visible(visible);
         if !visible {
-            if let Some(ref terrain) = self.current_terrain {
-                if terrain.is_instance_valid() {
-                    self.base_mut().call_deferred("_validate_visibility", &[]);
-                    return;
-                }
-            }
+            self.current_terrain = None;
         }
-
-        self.update_visibility(visible);
     }
 
-    fn forward_3d_gui_input(&mut self, _camera: Gd<Camera3D>, event: Gd<InputEvent>) -> godot::classes::editor_plugin::AfterGuiInput {
-        // Only handle input when we have a valid terrain selected
-        if self.current_terrain.is_none() {
-            return godot::classes::editor_plugin::AfterGuiInput::PASS;
-        }
+    fn forward_3d_gui_input(
+        &mut self,
+        _camera: Option<Gd<Camera3D>>,
+        event: Option<Gd<InputEvent>>,
+    ) -> i32 {
+        let Some(event) = event else {
+            return AfterGuiInput::PASS.ord();
+        };
 
-        // Check for key press events
         if let Ok(key_event) = event.try_cast::<InputEventKey>() {
             if key_event.is_pressed() && !key_event.is_echo() {
                 match key_event.get_keycode() {
-                    Key::G => {
+                    godot::global::Key::G => {
                         self.do_generate();
-                        return godot::classes::editor_plugin::AfterGuiInput::STOP;
+                        return AfterGuiInput::STOP.ord();
                     }
-                    Key::C => {
+                    godot::global::Key::C => {
                         self.do_clear();
-                        return godot::classes::editor_plugin::AfterGuiInput::STOP;
+                        return AfterGuiInput::STOP.ord();
                     }
                     _ => {}
                 }
             }
         }
 
-        godot::classes::editor_plugin::AfterGuiInput::PASS
+        AfterGuiInput::PASS.ord()
     }
 }
 
@@ -199,51 +222,22 @@ impl IEditorPlugin for PixyTerrainPlugin {
 impl PixyTerrainPlugin {
     #[func]
     fn on_generate_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Generate button pressed");
         self.do_generate();
     }
 
     #[func]
     fn on_clear_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Clear button pressed");
         self.do_clear();
     }
+}
 
-    #[func]
-    fn _ensure_visible(&mut self) {
-        self.set_ui_visible(true);
-    }
-
-    #[func]
-    fn _validate_visibility(&mut self) {
-        if let Some(ref terrain) = self.current_terrain {
-            if !terrain.is_instance_valid() {
-                self.update_visibility(false);
-                return;
-            }
-
-            // Check if terrain is still selected
-            let editor = EditorInterface::singleton();
-            let selection = editor.get_selection().unwrap();
-            let selected = selection.get_selected_nodes();
-
-            let still_selected = selected.iter_shared()
-                .any(|n| n.instance_id() == terrain.instance_id());
-
-            self.update_visibility(still_selected);
-        } else {
-            self.update_visibility(false);
-        }
-    }
-
+impl PixyTerrainPlugin {
     fn set_ui_visible(&mut self, visible: bool) {
-        if let Some(ref mut toolbar) = self.toolbar {
-            toolbar.set_visible(visible);
-        }
-    }
-
-    fn update_visibility(&mut self, visible: bool) {
-        self.set_ui_visible(visible);
-        if !visible {
-            self.current_terrain = None;
+        godot_print!("PixyTerrainPlugin: set_ui_visible({})", visible);
+        if let Some(ref mut margin) = self.margin_container {
+            margin.set_visible(visible);
         }
     }
 
@@ -254,7 +248,7 @@ impl PixyTerrainPlugin {
                 if terrain_clone.has_method("regenerate") {
                     self.is_modifying = true;
                     terrain_clone.call("regenerate", &[]);
-                    self.base_mut().call_deferred("_finish_modification", &[]);
+                    self.is_modifying = false
                 }
             }
         }
@@ -267,19 +261,8 @@ impl PixyTerrainPlugin {
                 if terrain_clone.has_method("clear") {
                     self.is_modifying = true;
                     terrain_clone.call("clear", &[]);
-                    self.base_mut().call_deferred("_finish_modification", &[]);
+                    self.is_modifying = false
                 }
-            }
-        }
-    }
-
-    #[func]
-    fn _finish_modification(&mut self) {
-        self.is_modifying = false;
-        if let Some(ref terrain) = self.current_terrain {
-            if terrain.is_instance_valid() {
-                let editor = EditorInterface::singleton();
-                editor.edit_node(terrain.clone());
             }
         }
     }
@@ -294,16 +277,17 @@ Add the module declaration:
 mod editor_plugin;
 ```
 
-### 1.4 Key Differences from GDScript
+### 1.4 Key Implementation Details
 
-| GDScript | Rust |
-|----------|------|
-| `preload("scene.tscn").instantiate()` | `HBoxContainer::new_alloc()` + manual button setup |
-| `signal.connect(callable)` | `button.connect("pressed", &Callable::from_object_method(...))` |
-| `call_deferred("method")` | `self.base_mut().call_deferred("method", &[])` |
-| `object.get_class() == "PixyTerrain"` | `object.get_class() == "PixyTerrain".into()` |
-| `plugin.cfg` required | No config needed - auto-registered via gdextension |
-| Manual enable in Project Settings | Auto-enabled when library loads |
+| Concept | Implementation |
+|---------|----------------|
+| **Container placement** | `CustomControlContainer::SPATIAL_EDITOR_SIDE_LEFT` - left sidebar of 3D editor |
+| **Vertical layout** | `VBoxContainer` with `separation: 8` theme constant |
+| **Outer padding** | `MarginContainer` with 8px margins on all sides |
+| **Min panel width** | `set_custom_minimum_size(Vector2::new(120.0, 0.0))` |
+| **Button signals** | `Callable::from_object_method(&self.to_gd(), "method_name")` |
+| **Exposed callbacks** | Separate `#[godot_api] impl` block with `#[func]` methods |
+| **String comparison** | `object.get_class() == "PixyTerrain"` (GString auto-converts) |
 
 ### 1.5 Build and verify
 
@@ -314,9 +298,10 @@ cd rust && cargo build
 **Verify:**
 1. Open Godot project (it auto-loads the extension)
 2. Select a PixyTerrain node in the scene tree
-3. Toolbar with Generate/Clear buttons appears in 3D editor menu bar
-4. Press G to generate terrain
-5. Press C to clear terrain
+3. Buttons appear in 3D editor's **left sidebar** (not menu bar)
+4. Buttons have proper padding and spacing
+5. Press G to generate terrain, C to clear
+6. Click buttons - they trigger the same actions
 
 ---
 
@@ -1111,3 +1096,10 @@ git reset --hard 04fa0af
 
 - 2026-01-30: Walkthrough created from commits 090112d..bf06cd3
 - 2026-01-31: Revised Step 1 to use Pure Rust EditorPlugin instead of GDScript (no plugin.cfg needed)
+- 2026-01-31: **Proven implementation** - Step 1 updated with working code:
+  - Changed from `SPATIAL_EDITOR_MENU` (toolbar) to `SPATIAL_EDITOR_SIDE_LEFT` (left sidebar)
+  - Added `MarginContainer` for 8px outer padding
+  - Added `VBoxContainer` for vertical button layout with 8px separation
+  - Added `set_custom_minimum_size(120, 0)` for min panel width
+  - Simplified `forward_3d_gui_input` signature (Option params, returns i32)
+  - Checkpoint commit: b74cf28

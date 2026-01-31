@@ -7,6 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Always consult documentation, download it if needed
 - Prefer Godot `export` variables over magic numbers or constants
 
+## Docs
+- Godot Rust Book - https://godot-rust.github.io/book/
+- Godot API Docs - https://godot-rust.github.io/docs/ and https://godot-rust.github.io/docs/gdext/master/godot/
+- Godot Github - https://github.com/godot-rust/gdext
+
 ## Project Overview
 
 Pixy Terrain is a Godot 4 terrain editor tool written in Rust using GDExtension (godot-rust/gdext). It creates terrain for 3D pixel art games using solid geometry and transvoxel algorithms.
