@@ -155,13 +155,26 @@ impl INode3D for PixyTerrain {
 
 impl PixyTerrain {
     fn initialize_systems(&mut self) {
-        let noise = NoiseField::new(
+        let mut noise = NoiseField::new(
             self.noise_seed,
             self.noise_octaves.max(1) as usize,
             self.noise_frequency,
             self.noise_amplitude,
             self.height_offset,
         );
+
+        // Seet box bounds for SDF-based walls
+        if self.enable_box_bounds {
+            let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
+            let box_min = [0.0, 0.0, 0.0];
+            let box_max = [
+                self.map_width_x as f32 * chunk_size,
+                self.map_height_y as f32 * chunk_size,
+                self.map_width_z as f32 * chunk_size,
+            ];
+            noise.set_box_bounds(box_min, box_max);
+        }
+
         let noise_arc = Arc::new(noise);
         self.noise_field = Some(Arc::clone(&noise_arc));
 
