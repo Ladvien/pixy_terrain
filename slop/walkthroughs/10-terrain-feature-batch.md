@@ -7,7 +7,7 @@
 
 ## Goal
 
-Implement five interconnected features: editor plugin with toolbar buttons, upload buffer to prevent mesh holes, LOD transition seam fixes, and enclosed box geometry with walls that follow terrain contours.
+Implement eight interconnected features: editor plugin with toolbar buttons, upload buffer to prevent mesh holes, LOD transition seam fixes, enclosed box geometry with walls that follow terrain contours, export group labels for Inspector organization, and a checkerboard debug shader for visualizing LOD transitions.
 
 ## Commits Covered
 
@@ -32,6 +32,8 @@ a4d626a fix: prevent mesh holes with upload buffer and chunk state fixes
 | 4 | Box Geometry | `box_geometry.rs` (new), `lib.rs`, `noise_field.rs`, `terrain.rs` |
 | 5 | SDF-Based Walls | `noise_field.rs`, `box_geometry.rs` |
 | 6 | Mesh Translation Fix | `noise_field.rs`, `mesh_extraction.rs`, `terrain.rs` |
+| 7 | Export Group Labels | `terrain.rs` |
+| 8 | Checkerboard Debug Shader | `terrain.rs` |
 
 ---
 
@@ -975,13 +977,35 @@ fn add_wall_strip(...) {
 
 ---
 
-## Step 6: Mesh Translation Fix (Rust)
+## Step 6: Mesh Translation Fix (Wall Alignment)
 
-**What you'll build:** Translate mesh vertices so terrain fills expected bounds despite internal SDF offset.
+**What you'll build:** Coordinate mesh vertices, SDF bounds, and box geometry so walls align flush with terrain edges.
 
-**Problem:** The boundary_offset moves the SDF boundary inward (by `max_voxel_size`) for LOD alignment. This causes terrain mesh to start at X=4, Z=4 instead of near origin.
+**Problem:** Without proper coordination, there's a visible gap between the terrain mesh and box walls:
 
-**Solution:** Translate vertices by `-boundary_offset` in X and Z after mesh generation.
+```
+    Top Down View (Before Fix)
+Z+
+    ─────────────────────┐ Origin
+                         │
+    ┌─────────────────┐  │  ◄── Wall at outer edge
+    │                 │  │
+    │  Terrain Mesh   │  │  ◄── Gap between terrain and wall
+    │                 │  │
+    └─────────────────┘  │
+                         │
+                           X+
+```
+
+**Root Cause:** Mismatched coordinate systems:
+- SDF bounds at `[0, 0, 0]` to `[max, max, max]`
+- Box geometry translated by `-boundary_offset`
+- Mesh vertices NOT translated
+
+**Solution:** Use a coordinated system where ALL components use the same translation:
+1. SDF bounds: `[boundary_offset, ...]` to `[max - boundary_offset, ...]`
+2. Mesh vertices: translated by `-boundary_offset` in mesh_extraction.rs
+3. Box geometry: translated by `-boundary_offset` from SDF bounds
 
 ### 6.1 Store boundary_offset in `NoiseField`
 
@@ -993,67 +1017,444 @@ pub struct NoiseField {
 }
 
 impl NoiseField {
+    /// Create NoiseField with pre-calculated box bounds
     pub fn with_box_bounds(
-        ...,
+        seed: u32,
+        octaves: usize,
+        frequency: f32,
+        amplitude: f32,
+        height_offset: f32,
+        floor_y: f32,
+        box_bounds: Option<([f32; 3], [f32; 3])>,
         boundary_offset: f32,  // NEW parameter
     ) -> Self {
-        // Store in struct
+        // ... fbm setup ...
+
+        let (box_min, box_max) = match box_bounds {
+            Some((min, max)) => (Some(min), Some(max)),
+            None => (None, None),
+        };
+
+        Self {
+            fbm,
+            amplitude,
+            height_offset,
+            box_min,
+            box_max,
+            floor_y,
+            boundary_offset,
+        }
     }
 
     pub fn get_boundary_offset(&self) -> f32 {
         self.boundary_offset
     }
-}
-```
 
-### 6.2 Translate vertices in `mesh_extraction.rs`
-
-```rust
-// After mesh.positions is populated, translate X and Z
-let boundary_offset = noise.get_boundary_offset();
-let vertices: Vec<[f32; 3]> = mesh
-    .positions
-    .chunks(3)
-    .map(|c| [
-        c[0] - boundary_offset,  // Translate X
-        c[1],                     // Keep Y unchanged
-        c[2] - boundary_offset,  // Translate Z
-    ])
-    .collect();
-```
-
-### 6.3 Calculate boundary_offset from max LOD voxel size in `terrain.rs`
-
-```rust
-fn initialize_systems(&mut self) {
-    // Align boundary with largest LOD voxel size so all LOD levels agree
-    let max_voxel_size = self.voxel_size * (1 << self.max_lod_level.max(0)) as f32;
-    let boundary_offset = max_voxel_size;
-
-    // Pass to NoiseField
-    let noise = NoiseField::with_box_bounds(..., boundary_offset);
-
-    // Translate box geometry bounds to match
-    if let Some((box_min, box_max)) = noise_arc.get_box_bounds() {
-        let translated_min = [
-            box_min[0] - boundary_offset,
-            box_min[1],
-            box_min[2] - boundary_offset,
-        ];
-        let translated_max = [
-            box_max[0] - boundary_offset,
-            box_max[1],
-            box_max[2] - boundary_offset,
-        ];
-        self.create_box_geometry(translated_min, translated_max, &noise_arc);
+    pub fn get_box_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        match (&self.box_min, &self.box_max) {
+            (Some(min), Some(max)) => Some((*min, *max)),
+            _ => None,
+        }
     }
 }
 ```
 
+### 6.2 Calculate SDF bounds WITH boundary_offset in `terrain.rs`
+
+The key insight: calculate bounds with `boundary_offset` applied BEFORE creating NoiseField:
+
+```rust
+fn initialize_systems(&mut self) {
+    let max_voxel_size = self.voxel_size * (1 << self.max_lod_level.max(0)) as f32;
+    let boundary_offset = max_voxel_size;
+    let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
+
+    // Calculate box bounds with boundary_offset BEFORE creating NoiseField
+    let box_bounds = if self.enable_box_bounds {
+        let box_min = [boundary_offset, boundary_offset, boundary_offset];
+        let box_max = [
+            self.map_width_x.max(1) as f32 * chunk_size - boundary_offset,
+            self.map_height_y.max(1) as f32 * chunk_size - boundary_offset,
+            self.map_width_z.max(1) as f32 * chunk_size - boundary_offset,
+        ];
+        Some((box_min, box_max))
+    } else {
+        None
+    };
+
+    let noise = NoiseField::with_box_bounds(
+        self.noise_seed,
+        self.noise_octaves.max(1) as usize,
+        self.noise_frequency,
+        self.noise_amplitude,
+        self.height_offset,
+        self.terrain_floor_y,
+        box_bounds,
+        boundary_offset,
+    );
+
+    // ... rest of initialization ...
+}
+```
+
+### 6.3 Translate vertices in `mesh_extraction.rs`
+
+After mesh generation, translate X and Z by `-boundary_offset`:
+
+```rust
+let mesh = builder.build();
+
+// Translate vertices by -boundary_offset on X and Z to align with box geometry
+let boundary_offset = noise.get_boundary_offset();
+
+// Positions are flat [x0, y0, z0, x1, y1, z1...]
+let vertices: Vec<[f32; 3]> = mesh
+    .positions
+    .chunks(3)
+    .map(|c| [c[0] - boundary_offset, c[1], c[2] - boundary_offset])
+    .collect();
+```
+
+### 6.4 Translate box geometry bounds in `create_box_geometry()`
+
+Get bounds from noise field and apply the same translation:
+
+```rust
+fn create_box_geometry(&mut self) {
+    let Some(ref noise) = self.noise_field else {
+        return;
+    };
+
+    let boundary_offset = noise.get_boundary_offset();
+
+    // Get bounds from noise field and translate
+    let Some((box_min, box_max)) = noise.get_box_bounds() else {
+        return;
+    };
+
+    // Translate bounds to match mesh vertex translation
+    let translated_min = [
+        box_min[0] - boundary_offset,
+        box_min[1],
+        box_min[2] - boundary_offset,
+    ];
+    let translated_max = [
+        box_max[0] - boundary_offset,
+        box_max[1],
+        box_max[2] - boundary_offset,
+    ];
+
+    let box_mesh = crate::box_geometry::BoxMesh::generate_with_terrain(
+        translated_min,
+        translated_max,
+        self.terrain_floor_y,
+        noise,
+    );
+
+    // ... upload to Godot ...
+}
+```
+
+### 6.5 Coordinate Flow Summary
+
+After the fix, all coordinates align:
+
+| Component | Before Translation | After Translation |
+|-----------|-------------------|-------------------|
+| SDF bounds | `[boundary_offset, ...]` to `[max - boundary_offset, ...]` | N/A (used for SDF sampling) |
+| Mesh vertices | Generated at SDF coords | `[0, ...]` to `[max - 2*offset, ...]` |
+| Box geometry | Gets SDF bounds | `[0, ...]` to `[max - 2*offset, ...]` |
+
+Both mesh vertices and box geometry now use the same coordinate space.
+
 **Verify:**
 1. `cargo build`
-2. Regenerate terrain
-3. Terrain mesh starts near origin, filling expected bounds
+2. Regenerate terrain (G key)
+3. Walls should align flush with terrain edges - no gap
+4. View from above to confirm alignment
+
+---
+
+## Step 7: Export Group Labels (Rust)
+
+**What you'll build:** Organized inspector UI with collapsible groups for terrain settings, implemented in Rust using gdext's `#[export_group]` attribute.
+
+**Key pattern:** Use `#[export_group(name = "Group Name")]` before export fields to create collapsible sections in Godot's Inspector.
+
+### 7.1 Add export groups to `terrain.rs` struct
+
+Reorganize your `PixyTerrain` struct with export groups. Place `#[export_group]` annotations BEFORE the first `#[export]` field in each group:
+
+```rust
+#[derive(GodotClass)]
+#[class(base=Node3D, init, tool)]
+pub struct PixyTerrain {
+    base: Base<Node3D>,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Map Settings
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "Map Settings")]
+    #[export]
+    #[init(val = 10)]
+    map_width_x: i32,
+
+    #[export]
+    #[init(val = 4)]
+    map_height_y: i32,
+
+    #[export]
+    #[init(val = 10)]
+    map_depth_z: i32,
+
+    #[export]
+    #[init(val = 1.0)]
+    voxel_size: f32,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Terrain Generation (Noise)
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "Terrain Generation")]
+    #[export]
+    #[init(val = 42)]
+    noise_seed: u32,
+
+    #[export]
+    #[init(val = 4)]
+    noise_octaves: i32,
+
+    #[export]
+    #[init(val = 0.02)]
+    noise_frequency: f32,
+
+    #[export]
+    #[init(val = 32.0)]
+    noise_amplitude: f32,
+
+    #[export]
+    #[init(val = 0.0)]
+    height_offset: f32,
+
+    // ═══════════════════════════════════════════════════════════════
+    // LOD Settings
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "LOD Settings")]
+    #[export]
+    #[init(val = 64.0)]
+    lod_base_distance: f32,
+
+    #[export]
+    #[init(val = 4)]
+    max_lod_level: i32,
+
+    #[export]
+    #[init(val = 32)]
+    chunk_subdivisions: i32,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Parallelization
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "Parallelization")]
+    #[export]
+    #[init(val = 0)]
+    worker_threads: i32,
+
+    #[export]
+    #[init(val = 256)]
+    channel_capacity: i32,
+
+    #[export]
+    #[init(val = 8)]
+    max_uploads_per_frame: i32,
+
+    #[export]
+    #[init(val = 512)]
+    max_pending_uploads: i32,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Terrain Floor
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "Terrain Floor")]
+    #[export]
+    #[init(val = 32.0)]
+    terrain_floor_y: f32,
+
+    #[export]
+    #[init(val = true)]
+    enable_box_bounds: bool,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Debug
+    // ═══════════════════════════════════════════════════════════════
+    #[export_group(name = "Debug")]
+    #[export]
+    #[init(val = false)]
+    debug_wireframe: bool,
+
+    #[export]
+    #[init(val = false)]
+    debug_logging: bool,
+
+    #[export]
+    #[init(val = false)]
+    debug_material: bool,
+
+    // ═══════════════════════════════════════════════════════════════
+    // Internal state (not exported - no group needed)
+    // ═══════════════════════════════════════════════════════════════
+    #[init(val = false)]
+    initialized: bool,
+
+    #[init(val = None)]
+    noise_field: Option<Arc<NoiseField>>,
+
+    // ... other internal fields ...
+}
+```
+
+### 7.2 Key Implementation Details
+
+| Concept | Implementation |
+|---------|----------------|
+| **Group annotation** | `#[export_group(name = "Group Name")]` |
+| **Placement** | BEFORE the first `#[export]` field in that group |
+| **Scope** | All subsequent `#[export]` fields belong to that group until the next `#[export_group]` |
+| **Internal fields** | Fields without `#[export]` don't appear in Inspector, no group needed |
+| **Collapsible** | Groups appear as collapsible sections in Godot Inspector |
+
+### 7.3 Build and verify
+
+```bash
+cd rust && cargo build
+```
+
+**Verify:**
+1. Open Godot project
+2. Select a PixyTerrain node
+3. Inspector shows collapsible groups: "Map Settings", "Terrain Generation", "LOD Settings", etc.
+4. Click group headers to expand/collapse
+5. Related properties are grouped together logically
+
+---
+
+## Step 8: Checkerboard Debug Shader (Rust)
+
+**What you'll build:** A world-space checkerboard shader for debugging LOD transitions and mesh alignment, created entirely in Rust using gdext.
+
+**Key pattern:** Create `Shader` and `ShaderMaterial` programmatically in Rust, cache it, and apply to all mesh instances.
+
+### 8.1 Add cached material field to `terrain.rs` struct
+
+```rust
+// In the Debug group or internal state section
+#[init(val = None)]
+cached_material: Option<Gd<ShaderMaterial>>,
+```
+
+### 8.2 Add required imports to `terrain.rs`
+
+```rust
+use godot::classes::{Shader, ShaderMaterial};
+```
+
+### 8.3 Create shader in `initialize_systems()`
+
+Add this code at the start of `initialize_systems()`, before creating chunks:
+
+```rust
+fn initialize_systems(&mut self) {
+    // Create debug material if enabled
+    if self.debug_material {
+        let mut shader = Shader::new_gd();
+        shader.set_code(r#"
+shader_type spatial;
+
+varying vec3 world_vertex;
+
+uniform vec3 color_a : source_color = vec3(0.8, 0.8, 0.8);
+uniform vec3 color_b : source_color = vec3(0.4, 0.4, 0.4);
+uniform float scale : hint_range(0.1, 10.0) = 1.0;
+
+void vertex() {
+    world_vertex = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+void fragment() {
+    float checker = mod(floor(world_vertex.x * scale) + floor(world_vertex.y * scale) + floor(world_vertex.z * scale), 2.0);
+    ALBEDO = mix(color_a, color_b, checker);
+}
+"#);
+        let mut mat = ShaderMaterial::new_gd();
+        mat.set_shader(&shader);
+        self.cached_material = Some(mat);
+    } else {
+        self.cached_material = None;
+    }
+
+    // ... rest of initialize_systems() ...
+}
+```
+
+### 8.4 Apply material in `upload_mesh_to_godot()`
+
+After creating the `MeshInstance3D` and setting its mesh, apply the cached material:
+
+```rust
+fn upload_mesh_to_godot(&mut self, mesh_result: MeshResult) {
+    // ... existing code to create MeshInstance3D and set mesh ...
+
+    // Apply debug material if cached
+    if let Some(ref mat) = self.cached_material {
+        instance.set_surface_override_material(0, mat);
+    }
+
+    // ... rest of upload code ...
+}
+```
+
+### 8.5 Apply material to box geometry too
+
+In `create_box_geometry()`, apply the same material:
+
+```rust
+fn create_box_geometry(&mut self, box_min: [f32; 3], box_max: [f32; 3], noise: &NoiseField) {
+    // ... existing box mesh creation code ...
+
+    // Apply debug material if cached
+    if let Some(ref mat) = self.cached_material {
+        box_instance.set_surface_override_material(0, mat);
+    }
+
+    // ... add to scene ...
+}
+```
+
+### 8.6 Key Shader Concepts
+
+| Concept | Explanation |
+|---------|-------------|
+| `varying vec3 world_vertex` | Passes world position from vertex to fragment shader |
+| `MODEL_MATRIX * vec4(VERTEX, 1.0)` | Converts local vertex position to world space |
+| `mod(floor(...), 2.0)` | Creates alternating 0/1 pattern for checkerboard |
+| `mix(color_a, color_b, checker)` | Blends between two colors based on checker value |
+| `source_color` hint | Tells Godot to show color picker in Inspector |
+| `hint_range` | Provides slider with min/max in Inspector |
+
+### 8.7 Build and verify
+
+```bash
+cd rust && cargo build
+```
+
+**Verify:**
+1. Open Godot project
+2. Select PixyTerrain node
+3. Enable `debug_material` in Inspector (under Debug group)
+4. Press G to regenerate terrain
+5. Terrain shows world-aligned checkerboard pattern
+6. Pattern is consistent across all chunks (no seams at chunk boundaries)
+7. Pattern stays fixed as camera moves (world-space, not screen-space)
+8. Box geometry walls also have the checkerboard pattern
 
 ---
 
@@ -1067,6 +1468,13 @@ fn initialize_systems(&mut self) {
 
 4. **Buffer overflow handling**: When upload buffer is full, drop OLDEST (front) not newest, and reset chunk for re-request. Otherwise chunks stay in Ready state forever.
 
+5. **Wall alignment gap**: If walls appear offset from terrain edges, ensure ALL three components use coordinated translations:
+   - SDF bounds: set with `boundary_offset` inset
+   - Mesh vertices: translated by `-boundary_offset` in `mesh_extraction.rs`
+   - Box geometry: translated by `-boundary_offset` in `create_box_geometry()`
+
+   Missing any one of these causes a visible gap between terrain and walls.
+
 ---
 
 ## Verification Checklist
@@ -1077,7 +1485,10 @@ fn initialize_systems(&mut self) {
 - [ ] LOD transitions: Seams invisible at LOD boundaries
 - [ ] Box geometry: Walls follow terrain contour
 - [ ] Box geometry: No phantom floor plane in valleys
+- [ ] Box geometry: Walls align flush with terrain edges (no gap)
+- [ ] Export groups: Inspector shows collapsible groups for terrain settings
 - [ ] Debug material: Checkerboard shader works correctly
+- [ ] Debug material: Pattern is world-aligned and consistent across chunks
 
 ---
 
@@ -1103,3 +1514,13 @@ git reset --hard 04fa0af
   - Added `set_custom_minimum_size(120, 0)` for min panel width
   - Simplified `forward_3d_gui_input` signature (Option params, returns i32)
   - Checkpoint commit: b74cf28
+- 2026-01-31: Added Step 7 (Export Group Labels) and Step 8 (Checkerboard Debug Shader):
+  - Both implemented in Rust GDExt, not GDScript
+  - Step 7: Uses `#[export_group(name = "...")]` attribute for Inspector organization
+  - Step 8: Creates Shader and ShaderMaterial programmatically in Rust
+- 2026-01-31: **Wall alignment fix** - Expanded Step 6 with complete coordinate system explanation:
+  - Root cause: mesh vertices weren't translated but box geometry was
+  - Fix: translate mesh vertices by `-boundary_offset` in `mesh_extraction.rs`
+  - Added `with_box_bounds()` constructor and `get_box_bounds()` to NoiseField
+  - SDF bounds now calculated with `boundary_offset` inset before NoiseField creation
+  - Added Known Dragon #5 for wall alignment troubleshooting
