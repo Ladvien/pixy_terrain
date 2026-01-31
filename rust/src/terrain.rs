@@ -59,6 +59,10 @@ pub struct PixyTerrain {
     #[init(val = false)]
     debug_wireframe: bool,
 
+    #[export]
+    #[init(val = 32)]
+    chunk_subdivisions: i32,
+
     // Parallelization
     #[init(val = None)]
     worker_pool: Option<MeshWorkerPool>,
@@ -102,6 +106,14 @@ pub struct PixyTerrain {
     #[export]
     #[init(val = false)]
     debug_material: bool,
+
+    // Box geometry
+    #[export]
+    #[init(val = true)]
+    enable_box_bounds: bool,
+
+    #[init(val = None)]
+    box_mesh_node: Option<Gd<MeshInstance3D>>,
 
     // Internal state for upload buffer
     #[init(val = VecDeque::new())]
@@ -160,7 +172,11 @@ impl PixyTerrain {
         };
         let worker_pool = MeshWorkerPool::new(threads, self.channel_capacity as usize);
 
-        let lod_config = LODConfig::new(self.lod_base_distance, self.max_lod_level.max(0) as u8);
+        let lod_config = LODConfig::new(
+            self.lod_base_distance,
+            self.max_lod_level.max(0) as u8,
+            self.chunk_subdivisions.max(1) as u32,
+        );
         let chunk_manager = ChunkManager::new(
             lod_config,
             self.voxel_size,
@@ -173,6 +189,12 @@ impl PixyTerrain {
 
         self.worker_pool = Some(worker_pool);
         self.chunk_manager = Some(chunk_manager);
+
+        // Create box geometry if enabled
+        if self.enable_box_bounds {
+            self.create_box_geometry();
+        }
+
         self.initialized = true;
 
         godot_print!(
@@ -315,6 +337,76 @@ impl PixyTerrain {
             }
         }
     }
+
+    fn create_box_geometry(&mut self) {
+        let Some(ref noise) = self.noise_field else {
+            return;
+        };
+
+        let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
+        let box_min = [0.0, 0.0, 0.0];
+        let box_max = [
+            self.map_width_x as f32 * chunk_size,
+            self.map_height_y as f32 * chunk_size,
+            self.map_width_z as f32 * chunk_size,
+        ];
+
+        let segments = (self.map_width_x.max(self.map_width_z) as usize * 8).max(16);
+        let box_mesh = crate::box_geometry::BoxMesh::generate_with_terrain(
+            box_min,
+            box_max,
+            self.terrain_floor_y,
+            noise,
+            segments,
+        );
+
+        if box_mesh.is_empty() {
+            return;
+        }
+
+        let vertices = PackedVector3Array::from(
+            &box_mesh
+                .vertices
+                .iter()
+                .map(|v| Vector3::new(v[0], v[1], v[2]))
+                .collect::<Vec<_>>()[..],
+        );
+
+        let normals = PackedVector3Array::from(
+            &box_mesh
+                .normals
+                .iter()
+                .map(|n| Vector3::new(n[0], n[1], n[2]))
+                .collect::<Vec<_>>()[..],
+        );
+        let indices = PackedInt32Array::from(&box_mesh.indices[..]);
+
+        let mut mesh = ArrayMesh::new_gd();
+        let mut arrays: Array<Variant> = Array::new();
+        let num_arrays = ArrayType::MAX.ord() as usize;
+
+        for i in 0..num_arrays {
+            if i == ArrayType::VERTEX.ord() as usize {
+                arrays.push(&vertices.to_variant());
+            } else if i == ArrayType::NORMAL.ord() as usize {
+                arrays.push(&normals.to_variant());
+            } else if i == ArrayType::INDEX.ord() as usize {
+                arrays.push(&indices.to_variant());
+            } else {
+                arrays.push(&Variant::nil());
+            }
+        }
+
+        mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+
+        let mut instance = MeshInstance3D::new_alloc();
+        instance.set_mesh(&mesh);
+        instance.set_name("BoxGeometry");
+
+        self.base_mut().add_child(&instance);
+        self.box_mesh_node = Some(instance);
+        // Convert to Godot Mesh
+    }
 }
 
 #[godot_api]
@@ -348,6 +440,14 @@ impl PixyTerrain {
 
         // 4. Clear pending uploads buffer
         self.pending_uploads.clear();
+
+        // 5. Clear box
+        if let Some(mut box_node) = self.box_mesh_node.take() {
+            if box_node.is_instance_valid() {
+                self.base_mut().remove_child(&box_node);
+                box_node.queue_free();
+            }
+        }
 
         // 5. Drop systems
         self.worker_pool = None;

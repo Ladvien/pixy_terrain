@@ -5,11 +5,11 @@ pub struct LODConfig {
 }
 
 impl LODConfig {
-    pub fn new(base_distance: f32, max_lod: u8) -> Self {
+    pub fn new(base_distance: f32, max_lod: u8, chunk_subdivisions: u32) -> Self {
         Self {
             base_distance,
             max_lod,
-            chunk_subdivisions: 32,
+            chunk_subdivisions,
         }
     }
 

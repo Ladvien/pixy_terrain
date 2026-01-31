@@ -37,6 +37,10 @@ impl NoiseField {
         let noise_value = self.fbm.get([x as f64, y as f64, z as f64]) as f32;
         y - self.height_offset - noise_value * self.amplitude
     }
+
+    pub fn get_amplitude(&self) -> f32 {
+        self.amplitude
+    }
 }
 
 /// Thread-safe shared noise field for parallel mesh generation

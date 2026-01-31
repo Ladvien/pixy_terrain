@@ -1,5 +1,6 @@
 use godot::prelude::*;
 
+mod box_geometry;
 mod chunk;
 mod chunk_manager;
 mod editor_plugin;
