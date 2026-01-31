@@ -155,12 +155,17 @@ impl INode3D for PixyTerrain {
 
 impl PixyTerrain {
     fn initialize_systems(&mut self) {
+        let max_voxel_size = self.voxel_size * (1 << self.max_lod_level.max(0)) as f32;
+        let boundary_offset = max_voxel_size;
+
         let mut noise = NoiseField::new(
             self.noise_seed,
             self.noise_octaves.max(1) as usize,
             self.noise_frequency,
             self.noise_amplitude,
             self.height_offset,
+            self.terrain_floor_y,
+            boundary_offset,
         );
 
         // Seet box bounds for SDF-based walls
@@ -357,21 +362,20 @@ impl PixyTerrain {
         };
 
         let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
-        let box_min = [0.0, 0.0, 0.0];
+        let boundary_offset = self
+            .noise_field
+            .as_ref()
+            .map(|n| n.get_boundary_offset())
+            .unwrap_or(0.0);
+
+        let box_min = [-boundary_offset, 0.0, -boundary_offset];
         let box_max = [
-            self.map_width_x as f32 * chunk_size,
+            self.map_width_x as f32 * chunk_size - boundary_offset,
             self.map_height_y as f32 * chunk_size,
-            self.map_width_z as f32 * chunk_size,
+            self.map_width_z as f32 * chunk_size - boundary_offset,
         ];
 
-        let segments = (self.map_width_x.max(self.map_width_z) as usize * 8).max(16);
-        let box_mesh = crate::box_geometry::BoxMesh::generate_with_terrain(
-            box_min,
-            box_max,
-            self.terrain_floor_y,
-            noise,
-            segments,
-        );
+        let box_mesh = crate::box_geometry::BoxMesh::generate_skirt(box_min, box_max);
 
         if box_mesh.is_empty() {
             return;
