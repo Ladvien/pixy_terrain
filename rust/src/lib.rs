@@ -2,6 +2,7 @@ use godot::prelude::*;
 
 mod chunk;
 mod chunk_manager;
+mod editor_plugin;
 mod lod;
 mod mesh_extraction;
 mod mesh_worker;

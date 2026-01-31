@@ -50,26 +50,10 @@ impl MeshWorkerPool {
             num_threads
         };
 
-        #[cfg(not(test))]
-        godot_print!(
-            "[MeshWorker] CPU detection: {} cores, requested {} threads, using {} threads, channel capacity {}",
-            detected_cpus,
-            num_threads,
-            threads,
-            channel_capacity
-        );
-
         let pool = TaskPoolBuilder::new()
             .num_threads(threads)
             .thread_name(String::from("MeshWorker"))
             .build();
-
-        #[cfg(not(test))]
-        godot_print!(
-            "[MeshWorker] TaskPool created with {} threads, rayon has {} threads",
-            pool.thread_num(),
-            rayon::current_num_threads()
-        );
 
         let (request_tx, request_rx) = bounded(channel_capacity);
         let (result_tx, result_rx) = bounded(channel_capacity);
@@ -109,15 +93,6 @@ impl MeshWorkerPool {
 
         let count = batch.len();
         TASKS_SPAWNED.fetch_add(count as u64, Ordering::Relaxed);
-        #[cfg(not(test))]
-        godot_print!(
-            "[MeshWorker] Processing {} of {} batch (rayon threads: {}, spawned: {}, completed: {})",
-            count,
-            batch_size,
-            rayon::current_num_threads(),
-            TASKS_SPAWNED.load(Ordering::Relaxed),
-            TASKS_COMPLETED.load(Ordering::Relaxed)
-        );
 
         let result_tx = self.result_tx.clone();
 
@@ -147,15 +122,6 @@ impl MeshWorkerPool {
                 });
             }
         });
-
-        // Report how many unique threads were used
-        #[cfg(not(test))]
-        {
-            let guard = THREADS_USED.lock().unwrap();
-            if let Some(ref set) = *guard {
-                godot_print!("[MeshWorker] Batch used {} unique threads", set.len());
-            }
-        }
     }
 
     pub fn thread_count(&self) -> usize {

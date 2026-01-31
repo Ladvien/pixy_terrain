@@ -28,14 +28,6 @@ impl ChunkManager {
         request_tx: Sender<MeshRequest>,
         result_rx: Receiver<MeshResult>,
     ) -> Self {
-        #[cfg(not(test))]
-        godot_print!(
-            "[ChunkManager] Created: base_distance={}, max_lod={}, chunk_size={}, max_view_distance={}",
-            lod_config.base_distance,
-            lod_config.max_lod,
-            base_voxel_size * lod_config.chunk_subdivisions as f32,
-            lod_config.max_view_distance()
-        );
         Self {
             chunks: HashMap::new(),
             lod_config,
@@ -79,24 +71,6 @@ impl ChunkManager {
             if results.len() >= self.max_results_per_update {
                 break;
             }
-        }
-
-        // Log every 60 frames
-        #[cfg(not(test))]
-        if self.current_frame % 60 == 0 {
-            let pending = self.chunks.values().filter(|c| c.state == ChunkState::Pending).count();
-            let ready = self.chunks.values().filter(|c| c.state == ChunkState::Ready).count();
-            let active = self.chunks.values().filter(|c| c.state == ChunkState::Active).count();
-            godot_print!(
-                "[ChunkManager] Frame {}: desired={}, sent={}, received={}, pending={}, ready={}, active={}",
-                self.current_frame,
-                desired.len(),
-                requests_sent,
-                results.len(),
-                pending,
-                ready,
-                active
-            );
         }
 
         results
