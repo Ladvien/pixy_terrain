@@ -173,6 +173,50 @@ pub struct PixyTerrain {
     texture_uv_scale: Vector3,
 
     // ═════════════════════════════════════════════════
+    // Cross-Section
+    // ═════════════════════════════════════════════════
+    #[export_group(name = "Cross-Section")]
+    #[export]
+    #[init(val = false)]
+    cross_section_enabled: bool,
+
+    #[export]
+    #[init(val = None)]
+    underground_albedo: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    underground_normal: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    underground_roughness: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    underground_ao: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = 1.0)]
+    underground_uv_scale: f32,
+
+    #[export]
+    #[init(val = Vector3::new(0.0, 0.0, 0.0))]
+    clip_plane_position: Vector3,
+
+    #[export]
+    #[init(val = Vector3::new(0.0, 1.0, 0.0))]
+    clip_plane_normal: Vector3,
+
+    #[export]
+    #[init(val = 0.0)]
+    clip_offset: f32,
+
+    #[export]
+    #[init(val = false)]
+    clip_camera_relative: bool,
+
+    // ═════════════════════════════════════════════════
     // Internal State (not exported)
     // ═════════════════════════════════════════════════
     #[init(val = None)]
@@ -258,6 +302,37 @@ impl PixyTerrain {
 
             // UV scale becomes triplanar scale (use X component for uniform scaling)
             material.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
+
+            // Cross-section parameters
+            material.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
+            material.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            material.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            material.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            material.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+
+            if let Some(ref underground) = self.underground_albedo {
+                material.set_shader_parameter("underground_texture", &underground.to_variant());
+            }
+
+            // Underground normal map (optional)
+            if let Some(ref normal) = self.underground_normal {
+                material.set_shader_parameter("underground_normal_texture", &normal.to_variant());
+                material.set_shader_parameter("use_underground_normal_map", &true.to_variant());
+            }
+
+            // Underground roughness map (optional)
+            if let Some(ref roughness) = self.underground_roughness {
+                material.set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
+                material.set_shader_parameter("use_underground_roughness_map", &true.to_variant());
+            }
+
+            // Underground AO map (optional)
+            if let Some(ref ao) = self.underground_ao {
+                material.set_shader_parameter("underground_ao_texture", &ao.to_variant());
+                material.set_shader_parameter("use_underground_ao_map", &true.to_variant());
+            }
+
+            material.set_shader_parameter("underground_triplanar_scale", &self.underground_uv_scale.to_variant());
 
             self.cached_material = Some(material.upcast::<Material>());
         } else {
