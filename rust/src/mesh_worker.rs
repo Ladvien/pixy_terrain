@@ -159,7 +159,7 @@ mod tests {
     use std::time::Duration;
 
     fn test_noise() -> Arc<NoiseField> {
-        Arc::new(NoiseField::new(42, 4, 0.02, 10.0, 0.0))
+        Arc::new(NoiseField::new(42, 4, 0.02, 10.0, 0.0, 32.0, None))
     }
 
     #[test]

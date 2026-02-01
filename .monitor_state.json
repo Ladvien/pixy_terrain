@@ -1,0 +1,13 @@
+{
+  "last_reviewed_sha": "e0cc355",
+  "monitors": [
+    {
+      "agent": "AGENT-1",
+      "files": ["rust/src/terrain.rs", "rust/src/lib.rs"],
+      "status": "ACTIVE",
+      "last_review": "2026-02-01T08:46:07"
+    }
+  ],
+  "started_at": "2026-02-01T08:46:00",
+  "check_interval_seconds": 30
+}

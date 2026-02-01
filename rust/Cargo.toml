@@ -16,6 +16,7 @@ bevy_tasks = { version = "0.18", features = ["multi_threaded"] }
 rayon = "1.10"
 crossbeam = "0.8"
 num_cpus = "1.17"
+meshopt = "0.3"
 
 [profile.dev]
 opt-level = 1

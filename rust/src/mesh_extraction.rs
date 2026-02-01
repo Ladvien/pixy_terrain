@@ -43,20 +43,21 @@ pub fn extract_chunk_mesh(
 
     let mesh = builder.build();
 
-    let boundary_offset = noise.get_boundary_offset();
-
     let vertices: Vec<[f32; 3]> = mesh
         .positions
         .chunks(3)
-        .map(|c| [c[0] - boundary_offset, c[1], c[2] - boundary_offset])
+        .map(|c| [c[0], c[1], c[2]])
         .collect();
+
+    // Epsilon for near-zero length checks (consistent with mesh_postprocess.rs)
+    const NORMAL_EPSILON: f32 = 1e-6;
 
     let normals: Vec<[f32; 3]> = mesh
         .normals
         .chunks(3)
         .map(|c| {
             let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
-            if len > 0.0001 {
+            if len > NORMAL_EPSILON {
                 [c[0] / len, c[1] / len, c[2] / len]
             } else {
                 [0.0, 1.0, 0.0]
