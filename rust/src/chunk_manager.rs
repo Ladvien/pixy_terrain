@@ -100,15 +100,24 @@ impl ChunkManager {
             for dy in -view_chunks..=view_chunks {
                 for dz in -view_chunks..=view_chunks {
                     let coord = ChunkCoord::new(cam_cx + dx, cam_cy + dy, cam_cz + dz);
-                    if coord.x < 0 || coord.x >= self.map_width {
+
+                    // Boundary checks: allow guard chunks on all boundaries for wall generation
+                    // Transvoxel needs samples on BOTH sides of surfaces to generate geometry.
+                    //
+                    // For a box from [0,0,0] to [max], we need:
+                    // - X=-1 chunk to capture X=0 wall (samples X from -chunk_size to 0)
+                    // - X=map_width chunk to capture X=max wall (samples X from max to max+chunk_size)
+                    // - Same logic for Y and Z
+                    if coord.x < -1 || coord.x > self.map_width {
                         continue;
                     }
-                    if coord.y < 0 || coord.y >= self.map_height {
+                    if coord.z < -1 || coord.z > self.map_depth {
                         continue;
                     }
-                    if coord.z < 0 || coord.z >= self.map_depth {
+                    if coord.y < -1 || coord.y >= self.map_height {
                         continue;
                     }
+
                     let dist_sq = coord.distance_squared_to(camera_pos, chunk_size);
                     let distance = dist_sq.sqrt();
 
@@ -251,10 +260,14 @@ mod tests {
         let (req_tx, req_rx) = bounded(64);
         let (res_tx, res_rx) = bounded(64);
 
-        let config = LODConfig::new(64.0, 4);
-        let manager = ChunkManager::new(config, 1.0, req_tx, res_rx);
+        let config = LODConfig::new(64.0, 4, 32);
+        let manager = ChunkManager::new(config, 1.0, req_tx, res_rx, 10, 4, 10);
 
         (manager, req_rx, res_tx)
+    }
+
+    fn test_noise() -> Arc<crate::noise_field::NoiseField> {
+        Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0, 32.0, None))
     }
 
     #[test]
@@ -289,7 +302,12 @@ mod tests {
         let neighbor = Chunk::new(ChunkCoord::new(-1, 0, 0), 0);
         manager.chunks.insert(ChunkCoord::new(-1, 0, 0), neighbor);
 
-        let sides = manager.compute_transition_sides(ChunkCoord::new(0, 0, 0), 1);
+        // Create a desired map with LOD levels for testing
+        let mut desired: HashMap<ChunkCoord, u8> = HashMap::new();
+        desired.insert(ChunkCoord::new(0, 0, 0), 1);
+        desired.insert(ChunkCoord::new(-1, 0, 0), 0);
+
+        let sides = manager.compute_transition_sides(ChunkCoord::new(0, 0, 0), 1, &desired);
 
         assert!(sides & 0b000001 != 0, "Should have LowX transition");
         assert!(sides & 0b000010 == 0, "Should not have HighX transition");
@@ -299,14 +317,15 @@ mod tests {
     fn test_no_transition_at_lod_0() {
         let (manager, _, _) = test_manager();
 
-        let sides = manager.compute_transition_sides(ChunkCoord::new(0, 0, 0), 0);
+        let desired: HashMap<ChunkCoord, u8> = HashMap::new();
+        let sides = manager.compute_transition_sides(ChunkCoord::new(0, 0, 0), 0, &desired);
         assert_eq!(sides, 0);
     }
 
     #[test]
     fn test_chunk_request_sent() {
         let (mut manager, req_rx, _) = test_manager();
-        let noise = Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0));
+        let noise = test_noise();
 
         let _ = manager.update([0.0, 0.0, 0.0], &noise);
 
@@ -321,7 +340,7 @@ mod tests {
     #[test]
     fn test_result_updates_chunk_state() {
         let (mut manager, _, res_tx) = test_manager();
-        let noise = Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0));
+        let noise = test_noise();
 
         let _ = manager.update([0.0, 0.0, 0.0], &noise);
 
@@ -346,9 +365,9 @@ mod tests {
         // Use smaller config to avoid channel overflow
         let (req_tx, _req_rx) = bounded(64);
         let (res_tx, res_rx) = bounded(64);
-        let config = LODConfig::new(32.0, 2); // Smaller view distance
-        let mut manager = ChunkManager::new(config, 1.0, req_tx, res_rx);
-        let noise = Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0));
+        let config = LODConfig::new(32.0, 2, 32); // Smaller view distance
+        let mut manager = ChunkManager::new(config, 1.0, req_tx, res_rx, 10, 4, 10);
+        let noise = test_noise();
 
         // Load chunks at origin
         let _ = manager.update([0.0, 0.0, 0.0], &noise);
@@ -367,5 +386,121 @@ mod tests {
         let unload = manager.get_unload_candidates();
         let has_origin = unload.iter().any(|(c, _)| *c == ChunkCoord::new(0, 0, 0));
         assert!(has_origin, "Origin chunk should be marked for unload");
+    }
+
+    #[test]
+    fn test_floor_chunks_generated() {
+        // Test that Y=-1 chunks are included for floor surface generation
+        // The box SDF floor is at Y=0, transvoxel needs samples on both sides
+        let (req_tx, _req_rx) = bounded(128);
+        let (_res_tx, res_rx) = bounded(64);
+        let config = LODConfig::new(64.0, 4, 32);
+        let manager = ChunkManager::new(config, 1.0, req_tx, res_rx, 4, 4, 4);
+
+        // Camera at Y=16 (middle of chunk 0)
+        let desired = manager.compute_desired_chunks([16.0, 16.0, 16.0]);
+
+        // Should include Y=-1 chunk for floor
+        assert!(
+            desired.contains_key(&ChunkCoord::new(0, -1, 0)),
+            "Should include Y=-1 chunk for floor surface"
+        );
+
+        // Should also include Y=0 through Y=map_height-1
+        assert!(
+            desired.contains_key(&ChunkCoord::new(0, 0, 0)),
+            "Should include Y=0 chunk"
+        );
+    }
+
+    #[test]
+    fn test_wall_chunks_generated() {
+        // Test that guard chunks are generated for all wall boundaries
+        // Transvoxel needs samples on BOTH sides of surfaces to generate geometry
+        let (req_tx, _req_rx) = bounded(256);
+        let (_res_tx, res_rx) = bounded(64);
+        let config = LODConfig::new(128.0, 4, 32); // Large view distance
+        let manager = ChunkManager::new(config, 1.0, req_tx, res_rx, 4, 4, 4);
+
+        // Camera at center of terrain
+        let desired = manager.compute_desired_chunks([64.0, 64.0, 64.0]);
+
+        // Should include guard chunks for all walls
+        assert!(
+            desired.contains_key(&ChunkCoord::new(-1, 0, 0)),
+            "Should include X=-1 chunk for X=0 wall"
+        );
+        assert!(
+            desired.contains_key(&ChunkCoord::new(0, 0, -1)),
+            "Should include Z=-1 chunk for Z=0 wall"
+        );
+        assert!(
+            desired.contains_key(&ChunkCoord::new(4, 0, 0)), // map_width=4
+            "Should include X=map_width chunk for X=max wall"
+        );
+        assert!(
+            desired.contains_key(&ChunkCoord::new(0, 0, 4)), // map_depth=4
+            "Should include Z=map_depth chunk for Z=max wall"
+        );
+    }
+
+    #[test]
+    fn test_default_terrain_chunks() {
+        // Test with EXACT default terrain settings from terrain.rs
+        let (req_tx, _req_rx) = bounded(512);
+        let (_res_tx, res_rx) = bounded(64);
+
+        // Default settings:
+        // lod_base_distance = 64.0, max_lod_level = 4, chunk_subdivisions = 32
+        // map_width_x = 10, map_height_y = 4, map_width_z = 10
+        // voxel_size = 1.0
+        let config = LODConfig::new(64.0, 4, 32);
+        let manager = ChunkManager::new(config, 1.0, req_tx, res_rx, 10, 4, 10);
+
+        // chunk_size = 1.0 * 32 = 32
+        // map bounds: [0,0,0] to [320, 128, 320]
+
+        // Test with camera at terrain center
+        let center_cam = [160.0, 64.0, 160.0];
+        let desired = manager.compute_desired_chunks(center_cam);
+
+        println!("\n=== Default terrain chunk analysis ===");
+        println!("Camera at {:?}", center_cam);
+        println!("Total desired chunks: {}", desired.len());
+
+        // Count boundary chunks
+        let x_neg1: Vec<_> = desired.keys().filter(|c| c.x == -1).collect();
+        let z_neg1: Vec<_> = desired.keys().filter(|c| c.z == -1).collect();
+        let y_neg1: Vec<_> = desired.keys().filter(|c| c.y == -1).collect();
+        let x_max: Vec<_> = desired.keys().filter(|c| c.x == 10).collect();
+        let z_max: Vec<_> = desired.keys().filter(|c| c.z == 10).collect();
+
+        println!("X=-1 chunks (wall): {}", x_neg1.len());
+        println!("Z=-1 chunks (wall): {}", z_neg1.len());
+        println!("Y=-1 chunks (floor): {}", y_neg1.len());
+        println!("X=10 chunks (wall): {}", x_max.len());
+        println!("Z=10 chunks (wall): {}", z_max.len());
+
+        // All boundary chunks should be present (view distance is 512 > terrain size 320)
+        assert!(
+            !x_neg1.is_empty(),
+            "Should have X=-1 wall chunks"
+        );
+        assert!(
+            !z_neg1.is_empty(),
+            "Should have Z=-1 wall chunks"
+        );
+        assert!(
+            !y_neg1.is_empty(),
+            "Should have Y=-1 floor chunks"
+        );
+        assert!(
+            !x_max.is_empty(),
+            "Should have X=max wall chunks"
+        );
+        assert!(
+            !z_max.is_empty(),
+            "Should have Z=max wall chunks"
+        );
     }
 }
