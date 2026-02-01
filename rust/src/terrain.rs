@@ -148,6 +148,14 @@ pub struct PixyTerrain {
     #[init(val = false)]
     debug_logging: bool,
 
+    #[export]
+    #[init(val = false)]
+    debug_camera_position: bool,
+
+    #[var]
+    #[init(val = 0.0)]
+    debug_print_timer: f64,
+
     // ════════════════════════════════════════════════
     // Texture
     // ════════════════════════════════════════════════
@@ -259,10 +267,25 @@ impl INode3D for PixyTerrain {
         self.initialize_systems();
     }
 
-    fn process(&mut self, _delta: f64) {
+    fn process(&mut self, delta: f64) {
         if !self.initialized {
             return;
         }
+
+        // Debug: Print camera position every 0.5 seconds
+        if self.debug_camera_position {
+            self.debug_print_timer += delta;
+            if self.debug_print_timer >= 0.5 {
+                self.debug_print_timer = 0.0;
+                if let Some(viewport) = self.base().get_viewport() {
+                    if let Some(camera) = viewport.get_camera_3d() {
+                        let pos = camera.get_global_position();
+                        godot_print!("Camera Position: x={:.2}, y={:.2}, z={:.2}", pos.x, pos.y, pos.z);
+                    }
+                }
+            }
+        }
+
         self.update_terrain();
     }
 }
