@@ -19,6 +19,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Pixy Terrain is a Godot 4 terrain editor tool written in Rust using GDExtension (godot-rust/gdext). It creates terrain for 3D pixel art games using solid geometry and transvoxel algorithms.
 
+## Known Working States
+
+**IMPORTANT: Restore working stencil cap shader:**
+```bash
+git show working-stencil-cap-v1:rust/src/shaders/stencil_cap.gdshader > rust/src/shaders/stencil_cap.gdshader && cd rust && cargo build
+```
+
 ## Build Commands
 
 ```bash
