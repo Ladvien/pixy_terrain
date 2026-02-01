@@ -2,10 +2,12 @@ shader_type spatial;
 // Pass 3: Stencil-masked cap rendering
 // Only renders where stencil == 255 (exposed interior visible but no front face)
 // Renders flat cap with underground texture using triplanar mapping
-render_mode cull_disabled, depth_test_disabled, diffuse_burley, specular_schlick_ggx;
+render_mode cull_disabled, depth_test_disabled, unshaded;
 stencil_mode read, compare_equal, 255;
 
 // Clipping uniforms (shared with main shader)
+// Note: clip_plane_position, clip_offset, clip_camera_relative are set by Rust
+// but not used here - the stencil test is sufficient for cap rendering
 uniform bool cross_section_enabled = false;
 uniform vec3 clip_plane_position = vec3(0.0);
 uniform vec3 clip_plane_normal = vec3(0.0, 1.0, 0.0);
@@ -42,13 +44,9 @@ void fragment() {
         discard;
     }
 
-    // Calculate effective clip plane position
-    vec3 effective_clip_pos = clip_plane_position;
-    if (clip_camera_relative) {
-        effective_clip_pos += CAMERA_POSITION_WORLD;
-    }
-    effective_clip_pos += normalize(clip_plane_normal) * clip_offset;
-
+    // The stencil test (compare_equal 255) already ensures we only render
+    // on exposed interior surfaces where back-faces are visible.
+    // No clip plane discard needed here - that's handled by stencil_write.
     vec3 clip_normal = normalize(clip_plane_normal);
 
     // For the cap, we use the clip plane normal as the surface normal
@@ -61,7 +59,12 @@ void fragment() {
     weights /= (weights.x + weights.y + weights.z);
 
     // Sample underground texture using world position for continuity
-    ALBEDO = triplanar_sample(underground_texture, world_pos, weights, underground_triplanar_scale).rgb;
+    vec3 tex_color = triplanar_sample(underground_texture, world_pos, weights, underground_triplanar_scale).rgb;
+    // Fallback to earthy brown if texture is unbound/black
+    if (length(tex_color) < 0.01) {
+        tex_color = vec3(0.4, 0.25, 0.1);
+    }
+    ALBEDO = tex_color;
 
     // Normal map (optional)
     if (use_underground_normal_map) {

@@ -39,7 +39,7 @@ void fragment() {
         discard;
     }
 
-    // Don't write color - stencil_mode directive handles writing 255
-    // Set alpha to 0 to prevent any color contribution
-    ALPHA = 0.0;
+    // Render as invisible black - stencil still gets written
+    // NOTE: Do NOT use ALPHA = 0.0 as it may cause fragment discard before stencil write
+    ALBEDO = vec3(0.0);
 }

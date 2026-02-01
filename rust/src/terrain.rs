@@ -373,6 +373,13 @@ impl PixyTerrain {
             // ═══════════════════════════════════════════════════════════════════
             // Chain materials: stencil_write -> terrain -> stencil_cap
             // ═══════════════════════════════════════════════════════════════════
+            // Set render priorities for correct pass ordering
+            // NOTE: next_pass materials aren't necessarily rendered immediately after parent
+            // Per Godot PR #80710: "Users have to rely entirely on render_priority to get correct sorting"
+            stencil_write_mat.set_render_priority(-1);  // Render first (back faces mark stencil)
+            terrain_mat.set_render_priority(0);          // Render second (front faces clear stencil)
+            cap_mat.set_render_priority(1);              // Render last (cap where stencil == 255)
+
             terrain_mat.set_next_pass(&cap_mat.upcast::<Material>());
             stencil_write_mat.set_next_pass(&terrain_mat.upcast::<Material>());
 
