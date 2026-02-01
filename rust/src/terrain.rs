@@ -1,6 +1,7 @@
-use godot::classes::mesh::PrimitiveType;
+use godot::classes::mesh::{self, PrimitiveType};
 use godot::classes::rendering_server::ArrayType;
 use godot::classes::{ArrayMesh, MeshInstance3D, Node3D};
+use godot::classes::{Shader, ShaderMaterial};
 use godot::prelude::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -19,6 +20,30 @@ type VariantArray = Array<Variant>;
 pub struct PixyTerrain {
     base: Base<Node3D>,
 
+    // ═════════════════════════════════════════════════
+    // Map Settings
+    // ═════════════════════════════════════════════════
+    #[export_group(name = "Map Settings")]
+    #[export]
+    #[init(val = 10)]
+    map_width_x: i32,
+
+    #[export]
+    #[init(val = 4)]
+    map_height_y: i32,
+
+    #[export]
+    #[init(val = 10)]
+    map_width_z: i32,
+
+    #[export]
+    #[init(val = 1.0)]
+    voxel_size: f32,
+
+    // ═════════════════════════════════════════════
+    // Terrain Generation
+    // ═════════════════════════════════════════════
+    #[export_group(name = "Terrain Generation")]
     #[export]
     #[init(val = 42)]
     noise_seed: u32,
@@ -39,10 +64,10 @@ pub struct PixyTerrain {
     #[init(val = 0.0)]
     height_offset: f32,
 
-    #[export]
-    #[init(val = 1.0)]
-    voxel_size: f32,
-
+    // ══════════════════════════════════════════════
+    // LOD Settings
+    // ══════════════════════════════════════════════
+    #[export_group(name = "LOD Settings")]
     #[export]
     #[init(val = 64.0)]
     lod_base_distance: f32,
@@ -52,39 +77,21 @@ pub struct PixyTerrain {
     max_lod_level: i32,
 
     #[export]
-    #[init(val = 0)]
-    worker_threads: i32,
-
-    #[export]
-    #[init(val = false)]
-    debug_wireframe: bool,
-
-    #[export]
     #[init(val = 32)]
     chunk_subdivisions: i32,
 
+    // ═══════════════════════════════════════════════
     // Parallelization
-    #[init(val = None)]
-    worker_pool: Option<MeshWorkerPool>,
+    // ═══════════════════════════════════════════════
+    #[export_group(name = "Parallelization")]
+    #[export]
+    #[init(val = 0)]
+    worker_threads: i32,
 
     #[export]
     #[init(val = 256)]
     channel_capacity: i32,
 
-    // Map settings
-    #[export]
-    #[init(val = 10)]
-    map_width_x: i32,
-
-    #[export]
-    #[init(val = 4)]
-    map_height_y: i32,
-
-    #[export]
-    #[init(val = 10)]
-    map_width_z: i32,
-
-    // Upload buffer
     #[export]
     #[init(val = 8)]
     max_uploads_per_frame: i32,
@@ -93,12 +100,26 @@ pub struct PixyTerrain {
     #[init(val = 512)]
     max_pending_uploads: i32,
 
-    // Terrain floor
+    // ══════════════════════════════════════════════
+    // Terrain Floor
+    // ══════════════════════════════════════════════
+    #[export_group(name = "Terrain Floor")]
     #[export]
     #[init(val = 32.0)]
     terrain_floor_y: f32,
 
+    #[export]
+    #[init(val = true)]
+    enable_box_bounds: bool,
+
+    // ════════════════════════════════════════════════
     // Debug
+    // ════════════════════════════════════════════════
+    #[export_group(name = "Debug")]
+    #[export]
+    #[init(val = false)]
+    debug_wireframe: bool,
+
     #[export]
     #[init(val = false)]
     debug_logging: bool,
@@ -107,15 +128,15 @@ pub struct PixyTerrain {
     #[init(val = false)]
     debug_material: bool,
 
-    // Box geometry
-    #[export]
-    #[init(val = true)]
-    enable_box_bounds: bool,
+    // ═════════════════════════════════════════════════
+    // Internal State (not exported)
+    // ═════════════════════════════════════════════════
+    #[init(val = None)]
+    worker_pool: Option<MeshWorkerPool>,
 
     #[init(val = None)]
     box_mesh_node: Option<Gd<MeshInstance3D>>,
 
-    // Internal state for upload buffer
     #[init(val = VecDeque::new())]
     pending_uploads: VecDeque<MeshResult>,
 
@@ -136,6 +157,9 @@ pub struct PixyTerrain {
 
     #[init(val = false)]
     initialized: bool,
+
+    #[init(val = None)]
+    cached_material: Option<Gd<ShaderMaterial>>,
 }
 
 #[godot_api]
@@ -155,30 +179,45 @@ impl INode3D for PixyTerrain {
 
 impl PixyTerrain {
     fn initialize_systems(&mut self) {
+        // Create debug material
+        if self.debug_material {
+            let mut shader = Shader::new_gd();
+            shader.set_code(include_str!("shaders/checkerboard.gdshader"));
+            let mut debug_material = ShaderMaterial::new_gd();
+            debug_material.set_shader(&shader);
+            self.cached_material = Some(debug_material);
+        } else {
+            self.cached_material = None;
+        }
+
         let max_voxel_size = self.voxel_size * (1 << self.max_lod_level.max(0)) as f32;
         let boundary_offset = max_voxel_size;
+        let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
 
-        let mut noise = NoiseField::new(
+        let box_bounds = if self.enable_box_bounds {
+            let box_min = [boundary_offset, boundary_offset, boundary_offset];
+            let box_max = [
+                self.map_width_x.max(1) as f32 * chunk_size - boundary_offset,
+                self.map_height_y.max(1) as f32 * chunk_size - boundary_offset,
+                self.map_width_z.max(1) as f32 * chunk_size - boundary_offset,
+            ];
+            Some((box_min, box_max))
+        } else {
+            None
+        };
+
+        // TODO 2: Use NoiseField::with_box_bounds() instead of new()
+        // - Pass all the same parameters plus box_bounds and boundary_offset
+        let noise = NoiseField::with_box_bounds(
             self.noise_seed,
             self.noise_octaves.max(1) as usize,
             self.noise_frequency,
             self.noise_amplitude,
             self.height_offset,
             self.terrain_floor_y,
+            box_bounds,
             boundary_offset,
         );
-
-        // Seet box bounds for SDF-based walls
-        if self.enable_box_bounds {
-            let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
-            let box_min = [0.0, 0.0, 0.0];
-            let box_max = [
-                self.map_width_x as f32 * chunk_size,
-                self.map_height_y as f32 * chunk_size,
-                self.map_width_z as f32 * chunk_size,
-            ];
-            noise.set_box_bounds(box_min, box_max);
-        }
 
         let noise_arc = Arc::new(noise);
         self.noise_field = Some(Arc::clone(&noise_arc));
@@ -329,6 +368,11 @@ impl PixyTerrain {
             coord.x, coord.y, coord.z, result.lod_level
         ));
 
+        // Apply debug material if cached
+        if let Some(ref mat) = self.cached_material {
+            instance.set_surface_override_material(0, mat);
+        }
+
         self.base_mut().add_child(&instance);
 
         let instance_id = instance.instance_id().to_i64();
@@ -360,22 +404,23 @@ impl PixyTerrain {
         let Some(ref noise) = self.noise_field else {
             return;
         };
+        let boundary_offset = noise.get_boundary_offset();
 
-        let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
-        let boundary_offset = self
-            .noise_field
-            .as_ref()
-            .map(|n| n.get_boundary_offset())
-            .unwrap_or(0.0);
+        let Some((box_min, box_max)) = noise.get_box_bounds() else {
+            return;
+        };
 
-        let box_min = [-boundary_offset, 0.0, -boundary_offset];
-        let box_max = [
-            self.map_width_x as f32 * chunk_size - boundary_offset,
-            self.map_height_y as f32 * chunk_size,
-            self.map_width_z as f32 * chunk_size - boundary_offset,
+        let translated_min = [
+            box_min[0] - boundary_offset,
+            box_min[1],
+            box_min[2] - boundary_offset,
         ];
-
-        let box_mesh = crate::box_geometry::BoxMesh::generate_skirt(box_min, box_max);
+        let translated_max = [
+            box_max[0] - boundary_offset,
+            box_max[1],
+            box_max[2] - boundary_offset,
+        ];
+        let box_mesh = crate::box_geometry::BoxMesh::generate_skirt(translated_min, translated_max);
 
         if box_mesh.is_empty() {
             return;
@@ -419,6 +464,10 @@ impl PixyTerrain {
         let mut instance = MeshInstance3D::new_alloc();
         instance.set_mesh(&mesh);
         instance.set_name("BoxGeometry");
+
+        if let Some(ref mat) = self.cached_material {
+            instance.set_surface_override_material(0, mat);
+        }
 
         self.base_mut().add_child(&instance);
         self.box_mesh_node = Some(instance);

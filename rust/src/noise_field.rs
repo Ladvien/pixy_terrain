@@ -41,6 +41,45 @@ impl NoiseField {
             boundary_offset,
         }
     }
+
+    pub fn with_box_bounds(
+        seed: u32,
+        octaves: usize,
+        frequency: f32,
+        amplitude: f32,
+        height_offset: f32,
+        floor_y: f32,
+        box_bounds: Option<([f32; 3], [f32; 3])>,
+        boundary_offset: f32,
+    ) -> Self {
+        let fbm = Fbm::<Perlin>::new(seed)
+            .set_octaves(octaves)
+            .set_frequency(frequency as f64)
+            .set_lacunarity(2.0)
+            .set_persistence(0.5);
+        let (box_min, box_max) = match box_bounds {
+            Some((min, max)) => (Some(min), Some(max)),
+            None => (None, None),
+        };
+
+        Self {
+            fbm,
+            amplitude,
+            height_offset,
+            floor_y,
+            boundary_offset,
+            box_min,
+            box_max,
+        }
+    }
+
+    pub fn get_box_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        match (&self.box_min, &self.box_max) {
+            (Some(min), Some(max)) => Some((*min, *max)),
+            _ => None,
+        }
+    }
+
     /// Set box bounds for SDFK clipping (walls via SDF)
     pub fn set_box_bounds(&mut self, min: [f32; 3], max: [f32; 3]) {
         self.box_min = Some(min);

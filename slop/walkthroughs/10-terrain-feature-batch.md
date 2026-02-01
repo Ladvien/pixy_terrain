@@ -1357,16 +1357,11 @@ cached_material: Option<Gd<ShaderMaterial>>,
 use godot::classes::{Shader, ShaderMaterial};
 ```
 
-### 8.3 Create shader in `initialize_systems()`
+### 8.3 Create shader file
 
-Add this code at the start of `initialize_systems()`, before creating chunks:
+Create `rust/src/shaders/checkerboard.gdshader`:
 
-```rust
-fn initialize_systems(&mut self) {
-    // Create debug material if enabled
-    if self.debug_material {
-        let mut shader = Shader::new_gd();
-        shader.set_code(r#"
+```glsl
 shader_type spatial;
 
 varying vec3 world_vertex;
@@ -1383,7 +1378,18 @@ void fragment() {
     float checker = mod(floor(world_vertex.x * scale) + floor(world_vertex.y * scale) + floor(world_vertex.z * scale), 2.0);
     ALBEDO = mix(color_a, color_b, checker);
 }
-"#);
+```
+
+### 8.4 Load shader in `initialize_systems()`
+
+Add this code at the start of `initialize_systems()`, before creating chunks:
+
+```rust
+fn initialize_systems(&mut self) {
+    // Create debug material if enabled
+    if self.debug_material {
+        let mut shader = Shader::new_gd();
+        shader.set_code(include_str!("shaders/checkerboard.gdshader"));
         let mut mat = ShaderMaterial::new_gd();
         mat.set_shader(&shader);
         self.cached_material = Some(mat);

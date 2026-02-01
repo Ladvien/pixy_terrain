@@ -43,11 +43,12 @@ pub fn extract_chunk_mesh(
 
     let mesh = builder.build();
 
-    // Positions are flat [x0, y0, z0, z1, y1, z1...]
+    let boundary_offset = noise.get_boundary_offset();
+
     let vertices: Vec<[f32; 3]> = mesh
         .positions
         .chunks(3)
-        .map(|c| [c[0], c[1], c[2]])
+        .map(|c| [c[0] - boundary_offset, c[1], c[2] - boundary_offset])
         .collect();
 
     let normals: Vec<[f32; 3]> = mesh
