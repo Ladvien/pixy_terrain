@@ -271,70 +271,113 @@ impl PixyTerrain {
     fn initialize_systems(&mut self) {
         // Create material based on texture selection
         if let Some(ref albedo) = self.terrain_albedo {
-            // User provided textures - use triplanar shader (no UVs needed)
-            // The transvoxel mesh has no UV coordinates, so we project textures
-            // using world-space coordinates via triplanar mapping
-            let mut shader = Shader::new_gd();
-            shader.set_code(include_str!("shaders/triplanar_pbr.gdshader"));
-            let mut material = ShaderMaterial::new_gd();
-            material.set_shader(&shader);
+            // Three-pass stencil buffer rendering for proper capped cross-sections:
+            // Pass 1 (stencil_write): Back faces mark stencil buffer where interior is visible
+            // Pass 2 (terrain): Front faces render normally with clip plane discard
+            // Pass 3 (stencil_cap): Flat cap renders only where stencil == 255
+
+            // ═══════════════════════════════════════════════════════════════════
+            // Pass 1: Stencil Write - marks back faces in stencil buffer
+            // ═══════════════════════════════════════════════════════════════════
+            let mut stencil_write_shader = Shader::new_gd();
+            stencil_write_shader.set_code(include_str!("shaders/stencil_write.gdshader"));
+            let mut stencil_write_mat = ShaderMaterial::new_gd();
+            stencil_write_mat.set_shader(&stencil_write_shader);
+
+            // Cross-section parameters for stencil write pass
+            stencil_write_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
+            stencil_write_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            stencil_write_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            stencil_write_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            stencil_write_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+
+            // ═══════════════════════════════════════════════════════════════════
+            // Pass 2: Main Terrain - front faces with triplanar PBR texturing
+            // ═══════════════════════════════════════════════════════════════════
+            let mut terrain_shader = Shader::new_gd();
+            terrain_shader.set_code(include_str!("shaders/triplanar_pbr.gdshader"));
+            let mut terrain_mat = ShaderMaterial::new_gd();
+            terrain_mat.set_shader(&terrain_shader);
 
             // Set albedo texture
-            material.set_shader_parameter("albedo_texture", &albedo.to_variant());
+            terrain_mat.set_shader_parameter("albedo_texture", &albedo.to_variant());
 
             // Normal map (optional)
             if let Some(ref normal) = self.terrain_normal {
-                material.set_shader_parameter("normal_texture", &normal.to_variant());
-                material.set_shader_parameter("use_normal_map", &true.to_variant());
+                terrain_mat.set_shader_parameter("normal_texture", &normal.to_variant());
+                terrain_mat.set_shader_parameter("use_normal_map", &true.to_variant());
             }
 
             // Roughness map (optional)
             if let Some(ref roughness) = self.terrain_roughness {
-                material.set_shader_parameter("roughness_texture", &roughness.to_variant());
-                material.set_shader_parameter("use_roughness_map", &true.to_variant());
+                terrain_mat.set_shader_parameter("roughness_texture", &roughness.to_variant());
+                terrain_mat.set_shader_parameter("use_roughness_map", &true.to_variant());
             }
 
             // Ambient Occlusion map (optional)
             if let Some(ref ao) = self.terrain_ao {
-                material.set_shader_parameter("ao_texture", &ao.to_variant());
-                material.set_shader_parameter("use_ao_map", &true.to_variant());
+                terrain_mat.set_shader_parameter("ao_texture", &ao.to_variant());
+                terrain_mat.set_shader_parameter("use_ao_map", &true.to_variant());
             }
 
             // UV scale becomes triplanar scale (use X component for uniform scaling)
-            material.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
+            terrain_mat.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
 
-            // Cross-section parameters
-            material.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            material.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
-            material.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
-            material.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            material.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            // Cross-section parameters for terrain pass
+            terrain_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
+            terrain_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            terrain_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            terrain_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            terrain_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
 
+            // ═══════════════════════════════════════════════════════════════════
+            // Pass 3: Stencil Cap - flat cap at clip plane where stencil == 255
+            // ═══════════════════════════════════════════════════════════════════
+            let mut cap_shader = Shader::new_gd();
+            cap_shader.set_code(include_str!("shaders/stencil_cap.gdshader"));
+            let mut cap_mat = ShaderMaterial::new_gd();
+            cap_mat.set_shader(&cap_shader);
+
+            // Cross-section parameters for cap pass
+            cap_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
+            cap_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            cap_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            cap_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            cap_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+
+            // Underground texture (required for cap)
             if let Some(ref underground) = self.underground_albedo {
-                material.set_shader_parameter("underground_texture", &underground.to_variant());
+                cap_mat.set_shader_parameter("underground_texture", &underground.to_variant());
             }
 
             // Underground normal map (optional)
             if let Some(ref normal) = self.underground_normal {
-                material.set_shader_parameter("underground_normal_texture", &normal.to_variant());
-                material.set_shader_parameter("use_underground_normal_map", &true.to_variant());
+                cap_mat.set_shader_parameter("underground_normal_texture", &normal.to_variant());
+                cap_mat.set_shader_parameter("use_underground_normal_map", &true.to_variant());
             }
 
             // Underground roughness map (optional)
             if let Some(ref roughness) = self.underground_roughness {
-                material.set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
-                material.set_shader_parameter("use_underground_roughness_map", &true.to_variant());
+                cap_mat.set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
+                cap_mat.set_shader_parameter("use_underground_roughness_map", &true.to_variant());
             }
 
             // Underground AO map (optional)
             if let Some(ref ao) = self.underground_ao {
-                material.set_shader_parameter("underground_ao_texture", &ao.to_variant());
-                material.set_shader_parameter("use_underground_ao_map", &true.to_variant());
+                cap_mat.set_shader_parameter("underground_ao_texture", &ao.to_variant());
+                cap_mat.set_shader_parameter("use_underground_ao_map", &true.to_variant());
             }
 
-            material.set_shader_parameter("underground_triplanar_scale", &self.underground_uv_scale.to_variant());
+            cap_mat.set_shader_parameter("underground_triplanar_scale", &self.underground_uv_scale.to_variant());
 
-            self.cached_material = Some(material.upcast::<Material>());
+            // ═══════════════════════════════════════════════════════════════════
+            // Chain materials: stencil_write -> terrain -> stencil_cap
+            // ═══════════════════════════════════════════════════════════════════
+            terrain_mat.set_next_pass(&cap_mat.upcast::<Material>());
+            stencil_write_mat.set_next_pass(&terrain_mat.upcast::<Material>());
+
+            // Apply stencil_write_mat as the mesh material (it chains the others)
+            self.cached_material = Some(stencil_write_mat.upcast::<Material>());
         } else {
             // No texture - use debug checkerboard shader
             let mut shader = Shader::new_gd();
