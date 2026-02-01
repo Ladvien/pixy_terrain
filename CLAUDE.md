@@ -11,6 +11,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Godot Rust Book - https://godot-rust.github.io/book/
 - Godot API Docs - https://godot-rust.github.io/docs/ and https://godot-rust.github.io/docs/gdext/master/godot/
 - Godot Github - https://github.com/godot-rust/gdext
+- Godot clip-plane / cross-sectional shaders
+  - Walkthrough - https://www.ronja-tutorials.com/post/021-plane-clipping/
+  - Godot Code - https://github.com/19PHOBOSS98/Godot-Planar-and-Box-Material-Cutoff-Shader
 
 ## Project Overview
 

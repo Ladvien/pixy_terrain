@@ -41,6 +41,7 @@ impl ChunkCoord {
 
 /// Mesh data produced by worker threads.
 /// Uses only Rust primitive types
+#[derive(Clone)]
 pub struct MeshResult {
     pub coord: ChunkCoord,
     pub lod_level: u8,

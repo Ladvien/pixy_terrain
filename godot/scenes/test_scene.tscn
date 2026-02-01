@@ -1,6 +1,14 @@
 [gd_scene format=3 uid="uid://c1234test"]
 
 [ext_resource type="Script" uid="uid://bfrw1dqdf2h30" path="res://scripts/orbit_camera.gd" id="1_orbit"]
+[ext_resource type="Texture2D" uid="uid://bolp4ibeuh1lk" path="res://textures/grass/grass_color.png" id="2_qjeyg"]
+[ext_resource type="Texture2D" uid="uid://bn54w8wie075e" path="res://textures/grass/grass_normal.png" id="3_3qnke"]
+[ext_resource type="Texture2D" uid="uid://bdbg1pbcwsjn" path="res://textures/grass/grass_roughness.png" id="4_wtsjf"]
+[ext_resource type="Texture2D" uid="uid://bfoopscvfiu8w" path="res://textures/grass/grass_ao.png" id="5_rnaij"]
+[ext_resource type="Texture2D" uid="uid://bxsyqyk50fint" path="res://textures/ground/Ground048_2K-PNG_Color.png" id="6_3qnke"]
+[ext_resource type="Texture2D" uid="uid://cig7dxybp4xgu" path="res://textures/ground/Ground048_2K-PNG_NormalDX.png" id="7_h3xc6"]
+[ext_resource type="Texture2D" uid="uid://qyhugnsji3j6" path="res://textures/ground/Ground048_2K-PNG_Roughness.png" id="8_s36qc"]
+[ext_resource type="Texture2D" uid="uid://bffb8o603b5ou" path="res://textures/ground/Ground048_2K-PNG_AmbientOcclusion.png" id="9_6qxox"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -39,6 +47,16 @@ fov = 60.0
 script = ExtResource("1_orbit")
 
 [node name="PixyTerrain" type="PixyTerrain" parent="." unique_id=284420277]
+decimation_target_triangles = 5000
+terrain_albedo = ExtResource("2_qjeyg")
+terrain_normal = ExtResource("3_3qnke")
+terrain_roughness = ExtResource("4_wtsjf")
+terrain_ao = ExtResource("5_rnaij")
+cross_section_enabled = true
+underground_albedo = ExtResource("6_3qnke")
+underground_normal = ExtResource("7_h3xc6")
+underground_roughness = ExtResource("8_s36qc")
+underground_ao = ExtResource("9_6qxox")
 
 [node name="GridFloor" type="MeshInstance3D" parent="." unique_id=2116148011]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.01, 0)

@@ -12,6 +12,9 @@ pub struct NoiseField {
     floor_y: f32,
     box_min: Option<[f32; 3]>,
     box_max: Option<[f32; 3]>,
+    /// Blend width for smooth CSG intersection (0 = hard max, >0 = smooth transition)
+    /// Recommended: 1.0 to 2.0 * voxel_size for smooth normals at terrain-wall junctions
+    csg_blend_width: f32,
 }
 
 impl NoiseField {
@@ -23,6 +26,28 @@ impl NoiseField {
         height_offset: f32,
         floor_y: f32,
         box_bounds: Option<([f32; 3], [f32; 3])>,
+    ) -> Self {
+        Self::with_csg_blend(
+            seed,
+            octaves,
+            frequency,
+            amplitude,
+            height_offset,
+            floor_y,
+            box_bounds,
+            2.0, // Default blend width for smooth normals
+        )
+    }
+
+    pub fn with_csg_blend(
+        seed: u32,
+        octaves: usize,
+        frequency: f32,
+        amplitude: f32,
+        height_offset: f32,
+        floor_y: f32,
+        box_bounds: Option<([f32; 3], [f32; 3])>,
+        csg_blend_width: f32,
     ) -> Self {
         let fbm = Fbm::<Perlin>::new(seed)
             .set_octaves(octaves)
@@ -42,6 +67,7 @@ impl NoiseField {
             floor_y,
             box_min,
             box_max,
+            csg_blend_width,
         }
     }
 
@@ -66,6 +92,7 @@ impl NoiseField {
     }
     /// Sample the SDF at world position
     /// Uses CSG intersection to create watertight mesh when box bounds are set
+    /// When csg_blend_width > 0, uses smooth_max for continuous gradients (better normals)
     pub fn sample(&self, x: f32, y: f32, z: f32) -> f32 {
         let terrain_sdf = self.sample_terrain_only(x, y, z);
 
@@ -75,10 +102,25 @@ impl NoiseField {
             // box_dist: negative inside box (solid), positive outside (air)
             // max(a, b) = intersection: solid only where BOTH are solid (negative)
             let box_dist = Self::box_sdf([x, y, z], *min, *max);
-            return terrain_sdf.max(box_dist);
+            return Self::smooth_max(terrain_sdf, box_dist, self.csg_blend_width);
         }
 
         terrain_sdf
+    }
+
+    /// Smooth maximum for CSG intersection with continuous gradient
+    /// When k <= 0, falls back to hard max(a, b)
+    /// When k > 0, blends over a region of width k for C1 continuous gradients
+    /// This eliminates normal artifacts at CSG intersection seams
+    #[inline]
+    fn smooth_max(a: f32, b: f32, k: f32) -> f32 {
+        if k <= 0.0 {
+            return a.max(b);
+        }
+        // Polynomial smooth max (faster than exp-based, still C1 continuous)
+        let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+        // Blend values with correction term for exact result at edges
+        a * (1.0 - h) + b * h + k * h * (1.0 - h)
     }
 
     pub fn get_amplitude(&self) -> f32 {
@@ -87,6 +129,14 @@ impl NoiseField {
 
     pub fn get_floor_y(&self) -> f32 {
         self.floor_y
+    }
+
+    pub fn get_csg_blend_width(&self) -> f32 {
+        self.csg_blend_width
+    }
+
+    pub fn set_csg_blend_width(&mut self, width: f32) {
+        self.csg_blend_width = width;
     }
 
     /// Signed distance function for an axis-aligned box

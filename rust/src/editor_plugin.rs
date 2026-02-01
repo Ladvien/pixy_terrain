@@ -20,6 +20,14 @@ pub struct PixyTerrainPlugin {
     generate_button: Option<Gd<Button>>,
     #[init(val = None)]
     clear_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    merge_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    weld_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    decimate_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    normals_button: Option<Gd<Button>>,
     #[init(val = false)]
     is_modifying: bool,
 }
@@ -54,9 +62,30 @@ impl IEditorPlugin for PixyTerrainPlugin {
         clear_button.set_text("Clear (C)");
         clear_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
 
+        // Post-processing buttons
+        let mut merge_button = Button::new_alloc();
+        merge_button.set_text("Merge & Export");
+        merge_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+
+        let mut weld_button = Button::new_alloc();
+        weld_button.set_text("Weld Seams");
+        weld_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+
+        let mut decimate_button = Button::new_alloc();
+        decimate_button.set_text("Decimate");
+        decimate_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+
+        let mut normals_button = Button::new_alloc();
+        normals_button.set_text("Recompute Normals");
+        normals_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+
         // Add buttons to VBoxContainer
         toolbar.add_child(&generate_button);
         toolbar.add_child(&clear_button);
+        toolbar.add_child(&merge_button);
+        toolbar.add_child(&weld_button);
+        toolbar.add_child(&decimate_button);
+        toolbar.add_child(&normals_button);
 
         // Add VBoxContainer to MarginContainer
         margin_container.add_child(&toolbar);
@@ -71,6 +100,22 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "pressed",
             &Callable::from_object_method(&plugin_ref, "on_clear_pressed"),
         );
+        merge_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_merge_pressed"),
+        );
+        weld_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_weld_pressed"),
+        );
+        decimate_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_decimate_pressed"),
+        );
+        normals_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_normals_pressed"),
+        );
 
         // Add MarginContainer to the spatial editor side left
         self.base_mut().add_control_to_container(
@@ -82,6 +127,10 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.toolbar = Some(toolbar);
         self.generate_button = Some(generate_button);
         self.clear_button = Some(clear_button);
+        self.merge_button = Some(merge_button);
+        self.weld_button = Some(weld_button);
+        self.decimate_button = Some(decimate_button);
+        self.normals_button = Some(normals_button);
         godot_print!("PixyTerrainPlugin: toolbar added to SPATIAL_EDITOR_SIDE_LEFT");
     }
 
@@ -89,6 +138,10 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // Clean up child refs (they'll be freed with parent, but clear refs)
         self.generate_button = None;
         self.clear_button = None;
+        self.merge_button = None;
+        self.weld_button = None;
+        self.decimate_button = None;
+        self.normals_button = None;
         self.toolbar = None;
 
         // Remove and free the margin container (and all children)
@@ -173,6 +226,42 @@ impl PixyTerrainPlugin {
         godot_print!("PixyTerrainPlugin: Clear button pressed");
         self.do_clear();
     }
+
+    #[func]
+    fn on_merge_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Merge & Export button pressed");
+        self.call_terrain_method("merge_and_export");
+    }
+
+    #[func]
+    fn on_weld_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Weld Seams button pressed");
+        self.call_terrain_method("weld_seams");
+    }
+
+    #[func]
+    fn on_decimate_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Decimate button pressed");
+        // decimate_mesh requires a target_triangles parameter
+        if let Some(ref terrain) = self.current_terrain {
+            if terrain.is_instance_valid() {
+                let mut terrain_clone = terrain.clone();
+                if terrain_clone.has_method("decimate_mesh") {
+                    self.is_modifying = true;
+                    // Read the decimation target from the terrain's export variable
+                    let target = terrain_clone.get("decimation_target_triangles");
+                    terrain_clone.call("decimate_mesh", &[target]);
+                    self.is_modifying = false;
+                }
+            }
+        }
+    }
+
+    #[func]
+    fn on_normals_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Recompute Normals button pressed");
+        self.call_terrain_method("recompute_normals");
+    }
 }
 
 impl PixyTerrainPlugin {
@@ -183,29 +272,24 @@ impl PixyTerrainPlugin {
         }
     }
 
-    fn do_generate(&mut self) {
+    fn call_terrain_method(&mut self, method_name: &str) {
         if let Some(ref terrain) = self.current_terrain {
             if terrain.is_instance_valid() {
                 let mut terrain_clone = terrain.clone();
-                if terrain_clone.has_method("regenerate") {
+                if terrain_clone.has_method(method_name) {
                     self.is_modifying = true;
-                    terrain_clone.call("regenerate", &[]);
-                    self.is_modifying = false
+                    terrain_clone.call(method_name, &[]);
+                    self.is_modifying = false;
                 }
             }
         }
     }
 
+    fn do_generate(&mut self) {
+        self.call_terrain_method("regenerate");
+    }
+
     fn do_clear(&mut self) {
-        if let Some(ref terrain) = self.current_terrain {
-            if terrain.is_instance_valid() {
-                let mut terrain_clone = terrain.clone();
-                if terrain_clone.has_method("clear") {
-                    self.is_modifying = true;
-                    terrain_clone.call("clear", &[]);
-                    self.is_modifying = false
-                }
-            }
-        }
+        self.call_terrain_method("clear");
     }
 }
