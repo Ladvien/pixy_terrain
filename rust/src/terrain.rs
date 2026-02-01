@@ -1,6 +1,7 @@
+use godot::classes::base_material_3d::{Feature, TextureParam};
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::rendering_server::ArrayType;
-use godot::classes::{ArrayMesh, MeshInstance3D, Node3D};
+use godot::classes::{ArrayMesh, Material, MeshInstance3D, Node3D, StandardMaterial3D, Texture2D};
 use godot::classes::{Shader, ShaderMaterial};
 use godot::prelude::*;
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
 use crate::lod::LODConfig;
-use crate::mesh_postprocess::MeshPostProcessor;
+use crate::mesh_postprocess::{CombinedMesh, MeshPostProcessor};
 use crate::mesh_worker::MeshWorkerPool;
 use crate::noise_field::NoiseField;
 type VariantArray = Array<Variant>;
@@ -64,6 +65,13 @@ pub struct PixyTerrain {
     #[export]
     #[init(val = 0.0)]
     height_offset: f32,
+
+    /// CSG blend width for smooth normals at terrain-wall junctions
+    /// Higher values = smoother normals but more rounding at corners
+    /// Recommended: 1.0 to 2.0 * voxel_size. Set to 0 for hard CSG (old behavior)
+    #[export]
+    #[init(val = 2.0)]
+    csg_blend_width: f32,
 
     // ══════════════════════════════════════════════
     // LOD Settings
@@ -141,9 +149,29 @@ pub struct PixyTerrain {
     #[init(val = false)]
     debug_logging: bool,
 
+    // ════════════════════════════════════════════════
+    // Texture
+    // ════════════════════════════════════════════════
+    #[export_group(name = "Texture")]
     #[export]
-    #[init(val = false)]
-    debug_material: bool,
+    #[init(val = None)]
+    terrain_albedo: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    terrain_normal: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    terrain_roughness: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = None)]
+    terrain_ao: Option<Gd<Texture2D>>,
+
+    #[export]
+    #[init(val = Vector3::new(1.0, 1.0, 1.0))]
+    texture_uv_scale: Vector3,
 
     // ═════════════════════════════════════════════════
     // Internal State (not exported)
@@ -154,9 +182,10 @@ pub struct PixyTerrain {
     #[init(val = VecDeque::new())]
     pending_uploads: VecDeque<MeshResult>,
 
-    /// Storage for all uploaded mesh data (for post-processing)
-    #[init(val = Vec::new())]
-    uploaded_meshes: Vec<MeshResult>,
+    /// Storage for uploaded mesh data by chunk coordinate (for post-processing)
+    /// Using HashMap ensures only the current LOD version is kept per chunk
+    #[init(val = HashMap::new())]
+    uploaded_meshes: HashMap<ChunkCoord, MeshResult>,
 
     #[init(val = 0)]
     meshes_dropped: u64,
@@ -177,7 +206,7 @@ pub struct PixyTerrain {
     initialized: bool,
 
     #[init(val = None)]
-    cached_material: Option<Gd<ShaderMaterial>>,
+    cached_material: Option<Gd<Material>>,
 }
 
 #[godot_api]
@@ -197,15 +226,42 @@ impl INode3D for PixyTerrain {
 
 impl PixyTerrain {
     fn initialize_systems(&mut self) {
-        // Create debug material
-        if self.debug_material {
+        // Create material based on texture selection
+        if let Some(ref albedo) = self.terrain_albedo {
+            // User provided textures - use StandardMaterial3D with PBR
+            let mut material = StandardMaterial3D::new_gd();
+
+            // Albedo
+            material.set_texture(TextureParam::ALBEDO, albedo);
+
+            // Normal map
+            if let Some(ref normal) = self.terrain_normal {
+                material.set_texture(TextureParam::NORMAL, normal);
+                material.set_feature(Feature::NORMAL_MAPPING, true);
+            }
+
+            // Roughness
+            if let Some(ref roughness) = self.terrain_roughness {
+                material.set_texture(TextureParam::ROUGHNESS, roughness);
+            }
+
+            // Ambient Occlusion
+            if let Some(ref ao) = self.terrain_ao {
+                material.set_texture(TextureParam::AMBIENT_OCCLUSION, ao);
+                material.set_feature(Feature::AMBIENT_OCCLUSION, true);
+            }
+
+            // UV Scale for texture tiling
+            material.set_uv1_scale(self.texture_uv_scale);
+
+            self.cached_material = Some(material.upcast::<Material>());
+        } else {
+            // No texture - use debug checkerboard shader
             let mut shader = Shader::new_gd();
             shader.set_code(include_str!("shaders/checkerboard.gdshader"));
             let mut debug_material = ShaderMaterial::new_gd();
             debug_material.set_shader(&shader);
-            self.cached_material = Some(debug_material);
-        } else {
-            self.cached_material = None;
+            self.cached_material = Some(debug_material.upcast::<Material>());
         }
 
         let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
@@ -219,7 +275,8 @@ impl PixyTerrain {
         ];
 
         // Create noise field with SDF enclosure for watertight mesh generation
-        let noise = NoiseField::new(
+        // Uses smooth CSG intersection for artifact-free normals at terrain-wall junctions
+        let noise = NoiseField::with_csg_blend(
             self.noise_seed,
             self.noise_octaves.max(1) as usize,
             self.noise_frequency,
@@ -227,6 +284,7 @@ impl PixyTerrain {
             self.height_offset,
             self.terrain_floor_y,
             Some((box_min, box_max)),
+            self.csg_blend_width,
         );
 
         let noise_arc = Arc::new(noise);
@@ -295,12 +353,13 @@ impl PixyTerrain {
             }
         }
 
-        // Upload limited number per from (from front, oldest firsst)
+        // Upload limited number per frame (from front, oldest first)
         let max_uploads = self.max_uploads_per_frame.max(1) as usize;
         for _ in 0..max_uploads {
             if let Some(mesh_result) = self.pending_uploads.pop_front() {
-                // Store a copy for post-processing before uploading
-                self.uploaded_meshes.push(mesh_result.clone());
+                // Store by coord - automatically replaces old LOD versions
+                let coord = mesh_result.coord;
+                self.uploaded_meshes.insert(coord, mesh_result.clone());
                 self.upload_mesh_to_godot(mesh_result);
                 self.meshes_uploaded += 1;
             } else {
@@ -553,7 +612,7 @@ impl PixyTerrain {
         let mesh = self.combined_mesh_to_godot(&combined);
 
         // Apply to scene
-        self.apply_combined_mesh(mesh.clone(), "MergedTerrain");
+        self.apply_combined_mesh(mesh.clone(), "MergedTerrain", &combined);
 
         godot_print!(
             "PixyTerrain: Merged {} chunks - {} vertices, {} triangles",
@@ -570,16 +629,43 @@ impl PixyTerrain {
     pub fn weld_seams(&mut self) {
         let chunks = self.collect_chunk_meshes();
 
+        godot_print!(
+            "PixyTerrain: weld_seams - {} chunks, {} total vertices before processing",
+            chunks.len(),
+            chunks.iter().map(|c| c.vertices.len()).sum::<usize>()
+        );
+
+        if chunks.is_empty() {
+            godot_print!("PixyTerrain: WARNING - No chunks to process! uploaded_meshes is empty.");
+            return;
+        }
+
         let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
+        godot_print!(
+            "PixyTerrain: After merge - {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
+        );
+
         processor.weld_vertices(&mut combined);
+        godot_print!(
+            "PixyTerrain: After weld - {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
+        );
+
+        if combined.vertices.is_empty() {
+            godot_print!("PixyTerrain: WARNING - Combined mesh is empty after welding!");
+            return;
+        }
 
         let mesh = self.combined_mesh_to_godot(&combined);
-        self.apply_combined_mesh(mesh, "WeldedTerrain");
+        self.apply_combined_mesh(mesh, "WeldedTerrain", &combined);
 
         godot_print!(
-            "PixyTerrain: Welded seams - {} vertices, {} triangles",
+            "PixyTerrain: Welded seams - final {} vertices, {} triangles",
             combined.vertex_count(),
             combined.triangle_count()
         );
@@ -602,7 +688,7 @@ impl PixyTerrain {
         let mesh = self.combined_mesh_to_godot(&combined);
 
         // Apply to scene
-        self.apply_combined_mesh(mesh.clone(), "DecimatedTerrain");
+        self.apply_combined_mesh(mesh.clone(), "DecimatedTerrain", &combined);
 
         godot_print!(
             "PixyTerrain: Decimated to {} triangles ({} vertices)",
@@ -618,18 +704,52 @@ impl PixyTerrain {
     pub fn recompute_normals(&mut self) {
         let chunks = self.collect_chunk_meshes();
 
+        godot_print!(
+            "PixyTerrain: recompute_normals - {} chunks, {} total vertices before processing",
+            chunks.len(),
+            chunks.iter().map(|c| c.vertices.len()).sum::<usize>()
+        );
+
+        if chunks.is_empty() {
+            godot_print!("PixyTerrain: WARNING - No chunks to process! uploaded_meshes is empty.");
+            return;
+        }
+
         let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
+        godot_print!(
+            "PixyTerrain: After merge - {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
+        );
+
         processor.weld_vertices(&mut combined);
+        godot_print!(
+            "PixyTerrain: After weld - {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
+        );
+
         processor.recompute_normals(&mut combined);
+        godot_print!(
+            "PixyTerrain: After normals - {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
+        );
+
+        if combined.vertices.is_empty() {
+            godot_print!("PixyTerrain: WARNING - Combined mesh is empty after processing!");
+            return;
+        }
 
         let mesh = self.combined_mesh_to_godot(&combined);
-        self.apply_combined_mesh(mesh, "NormalsRecomputed");
+        self.apply_combined_mesh(mesh, "NormalsRecomputed", &combined);
 
         godot_print!(
-            "PixyTerrain: Recomputed normals for {} vertices",
-            combined.vertex_count()
+            "PixyTerrain: Recomputed normals - final {} vertices, {} triangles",
+            combined.vertex_count(),
+            combined.triangle_count()
         );
     }
 
@@ -692,7 +812,7 @@ impl PixyTerrain {
 
 impl PixyTerrain {
     /// Apply a combined/processed mesh to the scene, replacing all chunk meshes
-    fn apply_combined_mesh(&mut self, mesh: Gd<ArrayMesh>, name: &str) {
+    fn apply_combined_mesh(&mut self, mesh: Gd<ArrayMesh>, name: &str, combined: &CombinedMesh) {
         // Clear all existing chunk nodes (keep box geometry)
         let nodes: Vec<_> = self.chunk_nodes.drain().map(|(_, node)| node).collect();
         for mut node in nodes {
@@ -718,15 +838,27 @@ impl PixyTerrain {
         let combined_coord = ChunkCoord { x: 0, y: 0, z: 0 };
         self.chunk_nodes.insert(combined_coord, instance);
 
-        // Clear mesh storage since we've merged everything
+        // Clear pending uploads
         self.pending_uploads.clear();
+
+        // Store the combined mesh back as a single MeshResult so subsequent
+        // post-processing operations can chain (e.g., Decimate then Recompute Normals)
         self.uploaded_meshes.clear();
+        let mesh_result = MeshResult {
+            coord: combined_coord,
+            lod_level: 0,
+            vertices: combined.vertices.clone(),
+            normals: combined.normals.clone(),
+            indices: combined.indices.iter().map(|&i| i as i32).collect(),
+            transition_sides: 0,
+        };
+        self.uploaded_meshes.insert(combined_coord, mesh_result);
     }
 
     /// Collect mesh data from all uploaded chunks
     fn collect_chunk_meshes(&self) -> Vec<MeshResult> {
-        // Use uploaded_meshes which stores all mesh data after upload
-        self.uploaded_meshes.iter().cloned().collect()
+        // Use uploaded_meshes HashMap which stores only current LOD per chunk
+        self.uploaded_meshes.values().cloned().collect()
     }
 
     /// Convert CombinedMesh to Godot ArrayMesh
