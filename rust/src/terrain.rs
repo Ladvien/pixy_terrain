@@ -1,7 +1,6 @@
-use godot::classes::base_material_3d::{Feature, TextureParam};
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::rendering_server::ArrayType;
-use godot::classes::{ArrayMesh, Material, MeshInstance3D, Node3D, StandardMaterial3D, Texture2D};
+use godot::classes::{ArrayMesh, Material, MeshInstance3D, Node3D, Texture2D};
 use godot::classes::{Shader, ShaderMaterial};
 use godot::prelude::*;
 use std::collections::HashMap;
@@ -228,31 +227,37 @@ impl PixyTerrain {
     fn initialize_systems(&mut self) {
         // Create material based on texture selection
         if let Some(ref albedo) = self.terrain_albedo {
-            // User provided textures - use StandardMaterial3D with PBR
-            let mut material = StandardMaterial3D::new_gd();
+            // User provided textures - use triplanar shader (no UVs needed)
+            // The transvoxel mesh has no UV coordinates, so we project textures
+            // using world-space coordinates via triplanar mapping
+            let mut shader = Shader::new_gd();
+            shader.set_code(include_str!("shaders/triplanar_pbr.gdshader"));
+            let mut material = ShaderMaterial::new_gd();
+            material.set_shader(&shader);
 
-            // Albedo
-            material.set_texture(TextureParam::ALBEDO, albedo);
+            // Set albedo texture
+            material.set_shader_parameter("albedo_texture", &albedo.to_variant());
 
-            // Normal map
+            // Normal map (optional)
             if let Some(ref normal) = self.terrain_normal {
-                material.set_texture(TextureParam::NORMAL, normal);
-                material.set_feature(Feature::NORMAL_MAPPING, true);
+                material.set_shader_parameter("normal_texture", &normal.to_variant());
+                material.set_shader_parameter("use_normal_map", &true.to_variant());
             }
 
-            // Roughness
+            // Roughness map (optional)
             if let Some(ref roughness) = self.terrain_roughness {
-                material.set_texture(TextureParam::ROUGHNESS, roughness);
+                material.set_shader_parameter("roughness_texture", &roughness.to_variant());
+                material.set_shader_parameter("use_roughness_map", &true.to_variant());
             }
 
-            // Ambient Occlusion
+            // Ambient Occlusion map (optional)
             if let Some(ref ao) = self.terrain_ao {
-                material.set_texture(TextureParam::AMBIENT_OCCLUSION, ao);
-                material.set_feature(Feature::AMBIENT_OCCLUSION, true);
+                material.set_shader_parameter("ao_texture", &ao.to_variant());
+                material.set_shader_parameter("use_ao_map", &true.to_variant());
             }
 
-            // UV Scale for texture tiling
-            material.set_uv1_scale(self.texture_uv_scale);
+            // UV scale becomes triplanar scale (use X component for uniform scaling)
+            material.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
 
             self.cached_material = Some(material.upcast::<Material>());
         } else {
