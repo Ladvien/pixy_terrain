@@ -1,6 +1,7 @@
 # Rust
 rust/target/
 rust/Cargo.lock
+rust/debug_terrain.log
 
 # Godot
 godot/.godot/

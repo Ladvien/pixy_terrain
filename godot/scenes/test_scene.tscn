@@ -1,14 +1,7 @@
 [gd_scene format=3 uid="uid://c1234test"]
 
 [ext_resource type="Script" uid="uid://bfrw1dqdf2h30" path="res://scripts/orbit_camera.gd" id="1_orbit"]
-[ext_resource type="Texture2D" uid="uid://bolp4ibeuh1lk" path="res://textures/grass/grass_color.png" id="2_qjeyg"]
-[ext_resource type="Texture2D" uid="uid://bn54w8wie075e" path="res://textures/grass/grass_normal.png" id="3_3qnke"]
-[ext_resource type="Texture2D" uid="uid://bdbg1pbcwsjn" path="res://textures/grass/grass_roughness.png" id="4_wtsjf"]
-[ext_resource type="Texture2D" uid="uid://bfoopscvfiu8w" path="res://textures/grass/grass_ao.png" id="5_rnaij"]
-[ext_resource type="Texture2D" uid="uid://bxsyqyk50fint" path="res://textures/ground/Ground048_2K-PNG_Color.png" id="6_3qnke"]
-[ext_resource type="Texture2D" uid="uid://cig7dxybp4xgu" path="res://textures/ground/Ground048_2K-PNG_NormalDX.png" id="7_h3xc6"]
-[ext_resource type="Texture2D" uid="uid://qyhugnsji3j6" path="res://textures/ground/Ground048_2K-PNG_Roughness.png" id="8_s36qc"]
-[ext_resource type="Texture2D" uid="uid://bffb8o603b5ou" path="res://textures/ground/Ground048_2K-PNG_AmbientOcclusion.png" id="9_6qxox"]
+[ext_resource type="Script" path="res://scripts/terrain_test.gd" id="2_terrain_test"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -25,40 +18,20 @@ sky = SubResource("Sky_main")
 ambient_light_source = 2
 ambient_light_color = Color(0.5, 0.5, 0.5, 1)
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_grid"]
-albedo_color = Color(0.3, 0.3, 0.3, 1)
+[node name="TestScene" type="Node3D"]
+script = ExtResource("2_terrain_test")
 
-[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
-size = Vector2(50, 50)
-
-[node name="TestScene" type="Node3D" unique_id=1059564556]
-
-[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1321600982]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_env")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1064348885]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 10, 0)
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="." unique_id=1223478353]
+[node name="Camera3D" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 15, 25)
 current = true
 fov = 60.0
 script = ExtResource("1_orbit")
 
-[node name="PixyTerrain" type="PixyTerrain" parent="." unique_id=284420277]
-decimation_target_triangles = 5000
-terrain_albedo = ExtResource("2_qjeyg")
-terrain_normal = ExtResource("3_3qnke")
-terrain_roughness = ExtResource("4_wtsjf")
-terrain_ao = ExtResource("5_rnaij")
-cross_section_enabled = true
-underground_albedo = ExtResource("6_3qnke")
-underground_normal = ExtResource("7_h3xc6")
-underground_roughness = ExtResource("8_s36qc")
-underground_ao = ExtResource("9_6qxox")
-
-[node name="GridFloor" type="MeshInstance3D" parent="." unique_id=2116148011]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.01, 0)
-material_override = SubResource("StandardMaterial3D_grid")
-mesh = SubResource("PlaneMesh_floor")
+[node name="PixyTerrain" type="PixyTerrain" parent="."]

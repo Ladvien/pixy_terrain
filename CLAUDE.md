@@ -14,10 +14,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Godot clip-plane / cross-sectional shaders
   - Walkthrough - https://www.ronja-tutorials.com/post/021-plane-clipping/
   - Godot Code - https://github.com/19PHOBOSS98/Godot-Planar-and-Box-Material-Cutoff-Shader
+- Godot Pixel Art Shaders - https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo/tree/main/Shaders
 
 ## Project Overview
 
 Pixy Terrain is a Godot 4 terrain editor tool written in Rust using GDExtension (godot-rust/gdext). It creates terrain for 3D pixel art games using solid geometry and transvoxel algorithms.
+
+## Known Working States
+
+**IMPORTANT: Restore working stencil cap shader:**
+```bash
+git show working-stencil-cap-v1:rust/src/shaders/stencil_cap.gdshader > rust/src/shaders/stencil_cap.gdshader && cd rust && cargo build
+```
 
 ## Build Commands
 
