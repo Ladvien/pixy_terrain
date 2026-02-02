@@ -156,12 +156,18 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
     fn handles(&self, object: Gd<Object>) -> bool {
         let class_name = object.get_class();
-        godot_print!("PixyTerrainPlugin: handles called for class: {}", class_name);
+        godot_print!(
+            "PixyTerrainPlugin: handles called for class: {}",
+            class_name
+        );
         class_name == "PixyTerrain"
     }
 
     fn edit(&mut self, object: Option<Gd<Object>>) {
-        godot_print!("PixyTerrainPlugin: edit called, object is_some: {}", object.is_some());
+        godot_print!(
+            "PixyTerrainPlugin: edit called, object is_some: {}",
+            object.is_some()
+        );
         if let Some(obj) = object {
             if let Ok(node) = obj.try_cast::<Node>() {
                 self.current_terrain = Some(node);

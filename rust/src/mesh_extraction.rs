@@ -4,6 +4,7 @@ use transvoxel::transition_sides::{TransitionSide, TransitionSides};
 use transvoxel::voxel_source::{Block, BlockDims};
 
 use crate::chunk::{ChunkCoord, MeshResult};
+use crate::debug_log::{compute_normal_stats, debug_log};
 use crate::noise_field::NoiseField;
 
 /// Extract mesh for a single chunk
@@ -66,6 +67,32 @@ pub fn extract_chunk_mesh(
         .collect();
 
     let indices: Vec<i32> = mesh.triangle_indices.iter().map(|&i| i as i32).collect();
+
+    let vert_count = vertices.len();
+    let tri_count = indices.len() / 3;
+
+    // Log normal statistics for debugging (especially for boundary chunks)
+    if cfg!(debug_assertions) && !normals.is_empty() {
+        let normal_stats = compute_normal_stats(&normals);
+        if normal_stats.degenerate_count > 0 || coord.y == -1 || coord.x == -1 || coord.z == -1 {
+            debug_log(&format!(
+                "[extract_chunk_mesh] ({}, {}, {}) normals: min_len={:.3}, max_len={:.3}, degenerate={}",
+                coord.x, coord.y, coord.z,
+                normal_stats.min_len, normal_stats.max_len, normal_stats.degenerate_count
+            ));
+        }
+    }
+
+    // Log extraction results for floor chunks or empty meshes
+    if coord.y == -1 || vert_count == 0 {
+        debug_log(&format!(
+            "[extract_chunk_mesh] ({}, {}, {}) LOD={}: origin=({:.1}, {:.1}, {:.1}), subdivs={}, verts={}, tris={}{}",
+            coord.x, coord.y, coord.z, lod_level,
+            origin[0], origin[1], origin[2], subdivisions,
+            vert_count, tri_count,
+            if vert_count == 0 { " [EMPTY]" } else { "" }
+        ));
+    }
 
     MeshResult {
         coord,

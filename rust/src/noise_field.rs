@@ -1,5 +1,10 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Counter for boundary sample logging (to avoid excessive output)
+static BOUNDARY_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+const MAX_BOUNDARY_LOGS: usize = 100;
 
 /// Noise-based sign distance field for terrain generation
 /// Negative = inside terrain (solid)
@@ -15,6 +20,10 @@ pub struct NoiseField {
     /// Blend width for smooth CSG intersection (0 = hard max, >0 = smooth transition)
     /// Recommended: 1.0 to 2.0 * voxel_size for smooth normals at terrain-wall junctions
     csg_blend_width: f32,
+    /// Extension applied to box bounds for SDF calculation.
+    /// Set to chunk_size to ensure guard chunks have proper SDF zero-crossings.
+    /// This extends the box surface INTO guard chunk regions so they generate real geometry.
+    box_extension: f32,
 }
 
 impl NoiseField {
@@ -49,6 +58,33 @@ impl NoiseField {
         box_bounds: Option<([f32; 3], [f32; 3])>,
         csg_blend_width: f32,
     ) -> Self {
+        Self::with_box_extension(
+            seed,
+            octaves,
+            frequency,
+            amplitude,
+            height_offset,
+            floor_y,
+            box_bounds,
+            csg_blend_width,
+            0.0, // Default no extension
+        )
+    }
+
+    /// Create noise field with extended box bounds for SDF calculation.
+    /// The box_extension parameter extends the box surface into guard chunk regions,
+    /// ensuring corner chunks generate proper geometry instead of degenerate triangles.
+    pub fn with_box_extension(
+        seed: u32,
+        octaves: usize,
+        frequency: f32,
+        amplitude: f32,
+        height_offset: f32,
+        floor_y: f32,
+        box_bounds: Option<([f32; 3], [f32; 3])>,
+        csg_blend_width: f32,
+        box_extension: f32,
+    ) -> Self {
         let fbm = Fbm::<Perlin>::new(seed)
             .set_octaves(octaves)
             .set_frequency(frequency as f64)
@@ -68,6 +104,7 @@ impl NoiseField {
             box_min,
             box_max,
             csg_blend_width,
+            box_extension,
         }
     }
 
@@ -75,6 +112,71 @@ impl NoiseField {
         match (&self.box_min, &self.box_max) {
             (Some(min), Some(max)) => Some((*min, *max)),
             _ => None,
+        }
+    }
+
+    /// Check if a chunk coordinate represents a corner guard chunk
+    /// (touches 3 boundaries: floor + 2 walls)
+    pub fn is_corner_guard_chunk(&self, chunk_coord: [i32; 3], chunk_size: f32) -> bool {
+        if let (Some(min), Some(max)) = (&self.box_min, &self.box_max) {
+            let chunk_min = [
+                chunk_coord[0] as f32 * chunk_size,
+                chunk_coord[1] as f32 * chunk_size,
+                chunk_coord[2] as f32 * chunk_size,
+            ];
+            let chunk_max = [
+                (chunk_coord[0] + 1) as f32 * chunk_size,
+                (chunk_coord[1] + 1) as f32 * chunk_size,
+                (chunk_coord[2] + 1) as f32 * chunk_size,
+            ];
+
+            // Count how many boundaries this chunk touches
+            let mut boundary_count = 0;
+
+            // Check X boundaries
+            if chunk_max[0] <= min[0] + 0.001 || chunk_min[0] >= max[0] - 0.001 {
+                boundary_count += 1;
+            }
+            // Check Y boundaries
+            if chunk_max[1] <= min[1] + 0.001 || chunk_min[1] >= max[1] - 0.001 {
+                boundary_count += 1;
+            }
+            // Check Z boundaries
+            if chunk_max[2] <= min[2] + 0.001 || chunk_min[2] >= max[2] - 0.001 {
+                boundary_count += 1;
+            }
+
+            // Corner chunks touch 3 boundaries
+            boundary_count >= 3
+        } else {
+            false
+        }
+    }
+
+    /// Check if a chunk coordinate is a boundary/guard chunk
+    /// (outside the main terrain volume, used for wall/floor generation)
+    pub fn is_boundary_chunk(&self, chunk_coord: [i32; 3], chunk_size: f32) -> bool {
+        if let (Some(min), Some(max)) = (&self.box_min, &self.box_max) {
+            let chunk_min = [
+                chunk_coord[0] as f32 * chunk_size,
+                chunk_coord[1] as f32 * chunk_size,
+                chunk_coord[2] as f32 * chunk_size,
+            ];
+            let chunk_max = [
+                (chunk_coord[0] + 1) as f32 * chunk_size,
+                (chunk_coord[1] + 1) as f32 * chunk_size,
+                (chunk_coord[2] + 1) as f32 * chunk_size,
+            ];
+
+            // Chunk is a boundary chunk if any part of it is outside the box
+            chunk_min[0] < min[0]
+                || chunk_max[0] > max[0]
+                || chunk_min[1] < min[1]
+                || chunk_max[1] > max[1]
+                || chunk_min[2] < min[2]
+                || chunk_max[2] > max[2]
+        } else {
+            false
         }
     }
 
@@ -101,8 +203,34 @@ impl NoiseField {
             // terrain_sdf: negative below surface (solid), positive above (air)
             // box_dist: negative inside box (solid), positive outside (air)
             // max(a, b) = intersection: solid only where BOTH are solid (negative)
-            let box_dist = Self::box_sdf([x, y, z], *min, *max);
-            return Self::smooth_max(terrain_sdf, box_dist, self.csg_blend_width);
+            //
+            // Extend box bounds to include guard chunk regions.
+            // This brings the box surface INTO the corner chunks, creating proper
+            // SDF zero-crossings so they generate real geometry instead of degenerate triangles.
+            let ext = self.box_extension;
+            let extended_min = [min[0] - ext, min[1] - ext, min[2] - ext];
+            let extended_max = [max[0] + ext, max[1] + ext, max[2] + ext];
+
+            let box_dist = Self::box_sdf([x, y, z], extended_min, extended_max);
+            let result = Self::smooth_max(terrain_sdf, box_dist, self.csg_blend_width);
+
+            // Debug logging for boundary positions (limited to avoid spam)
+            if cfg!(debug_assertions) {
+                let tolerance = 2.0;
+                let is_boundary =
+                    crate::debug_log::is_boundary_position([x, y, z], *min, *max, tolerance);
+                if is_boundary {
+                    let count = BOUNDARY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if count < MAX_BOUNDARY_LOGS {
+                        crate::debug_log::debug_log(&format!(
+                            "[noise_field] boundary sample at ({:.1}, {:.1}, {:.1}): terrain={:.3}, box={:.3}, final={:.3}",
+                            x, y, z, terrain_sdf, box_dist, result
+                        ));
+                    }
+                }
+            }
+
+            return result;
         }
 
         terrain_sdf
@@ -161,7 +289,8 @@ impl NoiseField {
         ];
 
         // Outside distance (when any component is positive)
-        let outside = (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
+        let outside =
+            (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
         // Inside distance (when all components are negative)
         let inside = q[0].max(q[1]).max(q[2]).min(0.0);
 
@@ -360,14 +489,7 @@ mod tests {
 
         // Test 1: Terrain surface generates mesh in chunk (0,1,0)
         // This chunk covers Y=32..64, containing the terrain surface at ~Y=50
-        let terrain_result = extract_chunk_mesh(
-            &noise,
-            ChunkCoord::new(0, 1, 0),
-            0,
-            1.0,
-            32.0,
-            0,
-        );
+        let terrain_result = extract_chunk_mesh(&noise, ChunkCoord::new(0, 1, 0), 0, 1.0, 32.0, 0);
         assert!(
             !terrain_result.vertices.is_empty(),
             "Terrain surface chunk should have vertices"
@@ -375,14 +497,7 @@ mod tests {
 
         // Test 2: Floor generates mesh in chunk (0,-1,0)
         // This chunk covers Y=-32..0, spanning across the floor at Y=0
-        let floor_result = extract_chunk_mesh(
-            &noise,
-            ChunkCoord::new(0, -1, 0),
-            0,
-            1.0,
-            32.0,
-            0,
-        );
+        let floor_result = extract_chunk_mesh(&noise, ChunkCoord::new(0, -1, 0), 0, 1.0, 32.0, 0);
         assert!(
             !floor_result.vertices.is_empty(),
             "Floor chunk should have vertices when spanning Y=0"
@@ -401,20 +516,10 @@ mod tests {
         );
 
         // Test 3: Chunk (0,0,0) alone won't have floor (no Y < 0 samples)
-        let no_floor_result = extract_chunk_mesh(
-            &noise,
-            ChunkCoord::new(0, 0, 0),
-            0,
-            1.0,
-            32.0,
-            0,
-        );
+        let no_floor_result = extract_chunk_mesh(&noise, ChunkCoord::new(0, 0, 0), 0, 1.0, 32.0, 0);
         // This chunk has no surface crossings (terrain is above, floor is at boundary)
         // It might be empty or have only wall geometry at X=0, Z=0
-        let has_floor_in_chunk0 = no_floor_result
-            .vertices
-            .iter()
-            .any(|v| v[1].abs() < 1.0);
+        let has_floor_in_chunk0 = no_floor_result.vertices.iter().any(|v| v[1].abs() < 1.0);
         assert!(
             !has_floor_in_chunk0,
             "Chunk (0,0,0) should not have floor vertices at Y=0"
@@ -481,18 +586,18 @@ mod tests {
 
         let box_min = [0.0, 0.0, 0.0];
         let box_max = [
-            map_width as f32 * chunk_size,   // 320
-            map_height as f32 * chunk_size,  // 128
-            map_depth as f32 * chunk_size,   // 320
+            map_width as f32 * chunk_size,  // 320
+            map_height as f32 * chunk_size, // 128
+            map_depth as f32 * chunk_size,  // 320
         ];
 
         let noise = NoiseField::new(
-            42,                    // seed
-            4,                     // octaves
-            0.02,                  // frequency
-            32.0,                  // amplitude (default)
-            0.0,                   // height_offset (default)
-            32.0,                  // terrain_floor_y (default)
+            42,   // seed
+            4,    // octaves
+            0.02, // frequency
+            32.0, // amplitude (default)
+            0.0,  // height_offset (default)
+            32.0, // terrain_floor_y (default)
             Some((box_min, box_max)),
         );
 
@@ -544,7 +649,9 @@ mod tests {
             !wall_chunk.vertices.is_empty(),
             "X=-1 guard chunk should generate wall geometry. \
              SDF at wall: {}, inside: {}, outside: {}",
-            sdf_on_wall, sdf_inside_wall, sdf_outside_wall
+            sdf_on_wall,
+            sdf_inside_wall,
+            sdf_outside_wall
         );
 
         // Test floor chunk Y=-1
@@ -573,7 +680,12 @@ mod tests {
         let box_max = [320.0, 128.0, 320.0];
 
         let noise = NoiseField::new(
-            42, 4, 0.02, 32.0, 0.0, 32.0,
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
             Some(([0.0, 0.0, 0.0], box_max)),
         );
 
@@ -589,7 +701,10 @@ mod tests {
             let chunk = extract_chunk_mesh(
                 &noise,
                 ChunkCoord::new(-1, y, 5), // X=-1 guard chunk, Z=5 (middle)
-                0, 1.0, chunk_size, 0,
+                0,
+                1.0,
+                chunk_size,
+                0,
             );
 
             let world_y_min = y as f32 * chunk_size;
@@ -597,7 +712,9 @@ mod tests {
 
             println!(
                 "Chunk (-1, {}, 5) [Y={:.0}..{:.0}]: {} vertices, {} triangles",
-                y, world_y_min, world_y_max,
+                y,
+                world_y_min,
+                world_y_max,
                 chunk.vertices.len(),
                 chunk.indices.len() / 3
             );
@@ -615,14 +732,207 @@ mod tests {
         }
 
         // At least Y=0 chunk should have wall geometry (Y=0..32, below terrain surface)
-        let y0_chunk = extract_chunk_mesh(
-            &noise,
-            ChunkCoord::new(-1, 0, 5),
-            0, 1.0, chunk_size, 0,
-        );
+        let y0_chunk = extract_chunk_mesh(&noise, ChunkCoord::new(-1, 0, 5), 0, 1.0, chunk_size, 0);
         assert!(
             !y0_chunk.vertices.is_empty(),
             "X=-1,Y=0 chunk should have wall vertices (terrain solid at Y<32)"
+        );
+    }
+
+    #[test]
+    fn test_corner_chunks_have_geometry() {
+        // Verify that corner guard chunks produce mesh geometry
+        // These are chunks that touch 3 boundaries (floor + 2 walls)
+        use crate::chunk::ChunkCoord;
+        use crate::mesh_extraction::extract_chunk_mesh;
+
+        let chunk_size = 32.0;
+        // Use with_box_extension to extend box bounds into corner chunks
+        // Extension = chunk_size/2 puts the surface in the MIDDLE of guard chunks,
+        // ensuring samples on both sides of the surface for proper zero-crossings.
+        // (chunk_size would put surface at chunk corner = no zero-crossing)
+        let noise = NoiseField::with_box_extension(
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0, // floor_y = 32, so terrain is solid below Y~32
+            Some(([0.0, 0.0, 0.0], [320.0, 128.0, 320.0])),
+            2.0,              // csg_blend_width
+            chunk_size / 2.0, // box_extension = half chunk for proper zero-crossings
+        );
+
+        // Test all 4 floor-level corner chunks
+        let corners = [
+            ChunkCoord::new(-1, -1, -1), // Corner: X=0, Y=0, Z=0
+            ChunkCoord::new(-1, -1, 10), // Corner: X=0, Y=0, Z=max
+            ChunkCoord::new(10, -1, -1), // Corner: X=max, Y=0, Z=0
+            ChunkCoord::new(10, -1, 10), // Corner: X=max, Y=0, Z=max
+        ];
+
+        println!("\n=== Corner chunk geometry test ===");
+        for corner in &corners {
+            let mesh = extract_chunk_mesh(&noise, *corner, 0, 1.0, chunk_size, 0);
+            let vert_count = mesh.vertices.len();
+            let tri_count = mesh.indices.len() / 3;
+
+            println!(
+                "Corner ({}, {}, {}): {} verts, {} tris",
+                corner.x, corner.y, corner.z, vert_count, tri_count
+            );
+
+            // Corner chunks should produce meaningful geometry with extended box bounds.
+            // A single degenerate triangle (3 verts, 1 tri) indicates the fix isn't working.
+            // We require at least 3 triangles (9 indices) for watertight corner geometry.
+            assert!(
+                mesh.indices.len() >= 9,
+                "Corner chunk {:?} produced {} triangles (need >= 3 for watertight). verts={}, tris={}",
+                corner, tri_count, vert_count, tri_count
+            );
+        }
+    }
+
+    #[test]
+    fn test_boundary_chunks_minimum_geometry() {
+        // Verify that edge boundary chunks (not corners) produce sufficient geometry
+        use crate::chunk::ChunkCoord;
+        use crate::mesh_extraction::extract_chunk_mesh;
+
+        let chunk_size = 32.0;
+        let noise = NoiseField::new(
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
+            Some(([0.0, 0.0, 0.0], [320.0, 128.0, 320.0])),
+        );
+
+        // Test edge chunks (touch 2 boundaries: floor + 1 wall)
+        let edge_chunks = [
+            ChunkCoord::new(-1, -1, 5), // X=-1 edge, floor
+            ChunkCoord::new(10, -1, 5), // X=max edge, floor
+            ChunkCoord::new(5, -1, -1), // Z=-1 edge, floor
+            ChunkCoord::new(5, -1, 10), // Z=max edge, floor
+        ];
+
+        println!("\n=== Edge boundary chunk geometry test ===");
+        for chunk in &edge_chunks {
+            let mesh = extract_chunk_mesh(&noise, *chunk, 0, 1.0, chunk_size, 0);
+            let vert_count = mesh.vertices.len();
+            let tri_count = mesh.indices.len() / 3;
+
+            println!(
+                "Edge ({}, {}, {}): {} verts, {} tris",
+                chunk.x, chunk.y, chunk.z, vert_count, tri_count
+            );
+
+            // Edge chunks should have more geometry than corners since they
+            // span more of the boundary surface
+            assert!(
+                vert_count >= 6,
+                "Edge chunk {:?} should have at least 6 vertices, got {}",
+                chunk,
+                vert_count
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_corner_guard_chunk() {
+        let noise = NoiseField::new(
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
+            Some(([0.0, 0.0, 0.0], [320.0, 128.0, 320.0])),
+        );
+        let chunk_size = 32.0;
+
+        // These should be identified as corner chunks
+        assert!(noise.is_corner_guard_chunk([-1, -1, -1], chunk_size));
+        assert!(noise.is_corner_guard_chunk([-1, -1, 10], chunk_size));
+        assert!(noise.is_corner_guard_chunk([10, -1, -1], chunk_size));
+        assert!(noise.is_corner_guard_chunk([10, -1, 10], chunk_size));
+
+        // These are edge chunks, not corners
+        assert!(!noise.is_corner_guard_chunk([-1, -1, 5], chunk_size));
+        assert!(!noise.is_corner_guard_chunk([5, -1, 5], chunk_size));
+
+        // Interior chunks
+        assert!(!noise.is_corner_guard_chunk([5, 0, 5], chunk_size));
+    }
+
+    #[test]
+    fn test_is_boundary_chunk() {
+        let noise = NoiseField::new(
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
+            Some(([0.0, 0.0, 0.0], [320.0, 128.0, 320.0])),
+        );
+        let chunk_size = 32.0;
+
+        // Guard chunks are boundary chunks
+        assert!(noise.is_boundary_chunk([-1, 0, 5], chunk_size));
+        assert!(noise.is_boundary_chunk([5, -1, 5], chunk_size));
+        assert!(noise.is_boundary_chunk([5, 0, -1], chunk_size));
+
+        // Interior chunks are not boundary chunks
+        assert!(!noise.is_boundary_chunk([5, 1, 5], chunk_size));
+        assert!(!noise.is_boundary_chunk([0, 0, 0], chunk_size));
+    }
+
+    #[test]
+    fn test_box_extension_creates_zero_crossings() {
+        // Verify that box_extension = chunk_size/2 creates proper SDF zero-crossings
+        // in corner chunks, enabling transvoxel to generate geometry.
+        let chunk_size = 32.0;
+
+        // With extension=16 (half chunk), the surface at (-16,-16,-16) passes
+        // through the center of corner chunk (-1,-1,-1), creating samples on
+        // both sides of the surface.
+        let noise = NoiseField::with_box_extension(
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
+            Some(([0.0, 0.0, 0.0], [320.0, 128.0, 320.0])),
+            2.0,              // csg_blend_width
+            chunk_size / 2.0, // extension = 16 (half chunk)
+        );
+
+        // Sample at opposite ends of the corner chunk
+        let at_corner = noise.sample(-32.0, -32.0, -32.0); // Outside extended box
+        let at_origin = noise.sample(0.0, 0.0, 0.0); // Inside extended box
+
+        // These should have opposite signs for a zero-crossing to exist
+        assert!(
+            at_corner > 0.0,
+            "Corner (-32,-32,-32) should be outside (positive SDF), got {}",
+            at_corner
+        );
+        assert!(
+            at_origin < 0.0,
+            "Origin (0,0,0) should be inside (negative SDF), got {}",
+            at_origin
+        );
+
+        // The surface (SDF ≈ 0) should be around (-16,-16,-16)
+        let at_center = noise.sample(-16.0, -16.0, -16.0);
+        assert!(
+            at_center.abs() < 1.0,
+            "Center (-16,-16,-16) should be near surface (SDF ≈ 0), got {}",
+            at_center
         );
     }
 }

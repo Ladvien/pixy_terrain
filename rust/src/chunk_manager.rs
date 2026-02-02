@@ -7,6 +7,7 @@ use crossbeam::channel::{Receiver, Sender};
 use godot::prelude::godot_print;
 
 use crate::chunk::{self, Chunk, ChunkCoord, ChunkState, MeshResult};
+use crate::debug_log::debug_log;
 use crate::lod::LODConfig;
 use crate::mesh_worker::MeshRequest;
 use crate::noise_field::NoiseField;
@@ -22,6 +23,8 @@ pub struct ChunkManager {
     map_width: i32,
     map_height: i32,
     map_depth: i32,
+    /// Debug: Force LOD 0 with no transition sides (disables LOD stitching)
+    pub debug_force_lod0: bool,
 }
 
 impl ChunkManager {
@@ -45,6 +48,7 @@ impl ChunkManager {
             map_width,
             map_height,
             map_depth,
+            debug_force_lod0: false,
         }
     }
 
@@ -80,6 +84,16 @@ impl ChunkManager {
             if results.len() >= self.max_results_per_update {
                 break;
             }
+        }
+
+        // Log when we have results or sent requests
+        if requests_sent > 0 || !results.is_empty() {
+            debug_log(&format!(
+                "[ChunkManager::update] Frame {}: requests_sent={}, results_received={}",
+                self.current_frame,
+                requests_sent,
+                results.len()
+            ));
         }
 
         results
@@ -129,6 +143,15 @@ impl ChunkManager {
             }
         }
 
+        // Log summary of desired chunks (only once per significant change, controlled by frame)
+        if self.current_frame % 60 == 1 {
+            let floor_chunks = desired.keys().filter(|c| c.y == -1).count();
+            debug_log(&format!(
+                "[compute_desired_chunks] Frame {}: camera_chunk=({}, {}, {}), view_dist={:.1}, total={}, floor(Y=-1)={}",
+                self.current_frame, cam_cx, cam_cy, cam_cz, view_distance, desired.len(), floor_chunks
+            ));
+        }
+
         desired
     }
 
@@ -145,11 +168,19 @@ impl ChunkManager {
         };
 
         if needs_request {
-            let transition_sides = self.compute_transition_sides(coord, desired_lod, desired);
+            // If debug_force_lod0, force LOD 0 and no transitions (tests if transvoxel seams cause gaps)
+            let (actual_lod, transition_sides) = if self.debug_force_lod0 {
+                (0, 0)
+            } else {
+                (
+                    desired_lod,
+                    self.compute_transition_sides(coord, desired_lod, desired),
+                )
+            };
 
             let request = MeshRequest {
                 coord,
-                lod_level: desired_lod,
+                lod_level: actual_lod,
                 transition_sides,
                 noise_field: Arc::clone(noise_field),
                 base_voxel_size: self.base_voxel_size,
@@ -157,6 +188,14 @@ impl ChunkManager {
             };
 
             if self.request_tx.try_send(request).is_ok() {
+                // Log new chunk requests (especially floor chunks)
+                if coord.y == -1 {
+                    debug_log(&format!(
+                        "[ensure_chunk_requested] Floor chunk ({}, -1, {}) LOD={} trans=0b{:06b}",
+                        coord.x, coord.z, actual_lod, transition_sides
+                    ));
+                }
+
                 self.chunks
                     .entry(coord)
                     .and_modify(|c| {
@@ -267,7 +306,9 @@ mod tests {
     }
 
     fn test_noise() -> Arc<crate::noise_field::NoiseField> {
-        Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0, 32.0, None))
+        Arc::new(crate::noise_field::NoiseField::new(
+            42, 4, 0.02, 10.0, 0.0, 32.0, None,
+        ))
     }
 
     #[test]
@@ -482,25 +523,10 @@ mod tests {
         println!("Z=10 chunks (wall): {}", z_max.len());
 
         // All boundary chunks should be present (view distance is 512 > terrain size 320)
-        assert!(
-            !x_neg1.is_empty(),
-            "Should have X=-1 wall chunks"
-        );
-        assert!(
-            !z_neg1.is_empty(),
-            "Should have Z=-1 wall chunks"
-        );
-        assert!(
-            !y_neg1.is_empty(),
-            "Should have Y=-1 floor chunks"
-        );
-        assert!(
-            !x_max.is_empty(),
-            "Should have X=max wall chunks"
-        );
-        assert!(
-            !z_max.is_empty(),
-            "Should have Z=max wall chunks"
-        );
+        assert!(!x_neg1.is_empty(), "Should have X=-1 wall chunks");
+        assert!(!z_neg1.is_empty(), "Should have Z=-1 wall chunks");
+        assert!(!y_neg1.is_empty(), "Should have Y=-1 floor chunks");
+        assert!(!x_max.is_empty(), "Should have X=max wall chunks");
+        assert!(!z_max.is_empty(), "Should have Z=max wall chunks");
     }
 }

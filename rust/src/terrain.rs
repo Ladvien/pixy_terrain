@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
+use crate::debug_log::{debug_log, init_debug_log};
 use crate::lod::LODConfig;
 use crate::mesh_postprocess::{CombinedMesh, MeshPostProcessor};
 use crate::mesh_worker::MeshWorkerPool;
@@ -248,8 +249,33 @@ pub struct PixyTerrain {
     #[init(val = false)]
     initialized: bool,
 
+    /// Full material chain for individual chunks (stencil_write -> terrain -> stencil_cap)
+    /// Used when cross-section is DISABLED
     #[init(val = None)]
     cached_material: Option<Gd<Material>>,
+
+    /// Terrain-only material (no stencil passes)
+    /// Used for chunks when cross-section is ENABLED - merged mesh handles stencil
+    #[init(val = None)]
+    cached_terrain_only_material: Option<Gd<Material>>,
+
+    /// Stencil-only material chain (stencil_write -> stencil_cap, no terrain pass)
+    /// Used for merged mesh to handle stencil cap rendering only
+    #[init(val = None)]
+    cached_stencil_only_material: Option<Gd<Material>>,
+
+    /// Merged mesh instance used for stencil cap rendering when cross-section is enabled.
+    /// This ensures all back faces render before any caps, fixing holes at chunk boundaries.
+    #[init(val = None)]
+    merged_stencil_mesh: Option<Gd<MeshInstance3D>>,
+
+    /// Track whether merged mesh needs rebuild (chunks changed while cross-section enabled)
+    #[init(val = false)]
+    merged_mesh_dirty: bool,
+
+    /// Cache the previous cross_section_enabled state to detect changes
+    #[init(val = false)]
+    prev_cross_section_enabled: bool,
 }
 
 #[godot_api]
@@ -269,8 +295,37 @@ impl INode3D for PixyTerrain {
 
 impl PixyTerrain {
     fn initialize_systems(&mut self) {
+        // Initialize debug logging (recreates log file each run)
+        init_debug_log();
+        debug_log("[initialize_systems] START");
+        debug_log(&format!(
+            "[initialize_systems] Config: map={}x{}x{}, voxel_size={}, chunk_subdivs={}",
+            self.map_width_x,
+            self.map_height_y,
+            self.map_width_z,
+            self.voxel_size,
+            self.chunk_subdivisions
+        ));
+        debug_log(&format!(
+            "[initialize_systems] Noise: seed={}, octaves={}, freq={}, amp={}, height_offset={}",
+            self.noise_seed,
+            self.noise_octaves,
+            self.noise_frequency,
+            self.noise_amplitude,
+            self.height_offset
+        ));
+        debug_log(&format!(
+            "[initialize_systems] LOD: base_dist={}, max_level={}, floor_y={}",
+            self.lod_base_distance, self.max_lod_level, self.terrain_floor_y
+        ));
+        debug_log(&format!(
+            "[initialize_systems] Cross-section: enabled={}, plane_pos={:?}, plane_normal={:?}",
+            self.cross_section_enabled, self.clip_plane_position, self.clip_plane_normal
+        ));
+
         // Create material based on texture selection
         if let Some(ref albedo) = self.terrain_albedo {
+            debug_log("[initialize_systems] Creating stencil_write material...");
             // Three-pass stencil buffer rendering for proper capped cross-sections:
             // Pass 1 (stencil_write): Back faces mark stencil buffer where interior is visible
             // Pass 2 (terrain): Front faces render normally with clip plane discard
@@ -285,12 +340,23 @@ impl PixyTerrain {
             stencil_write_mat.set_shader(&stencil_write_shader);
 
             // Cross-section parameters for stencil write pass
-            stencil_write_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            stencil_write_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            stencil_write_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            stencil_write_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             stencil_write_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            stencil_write_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
+            debug_log("[initialize_systems] Creating terrain material...");
             // ═══════════════════════════════════════════════════════════════════
             // Pass 2: Main Terrain - front faces with triplanar PBR texturing
             // ═══════════════════════════════════════════════════════════════════
@@ -321,15 +387,27 @@ impl PixyTerrain {
             }
 
             // UV scale becomes triplanar scale (use X component for uniform scaling)
-            terrain_mat.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
+            terrain_mat
+                .set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
 
             // Cross-section parameters for terrain pass
-            terrain_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            terrain_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
-            terrain_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            terrain_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            terrain_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            terrain_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             terrain_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            terrain_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            terrain_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
+            debug_log("[initialize_systems] Creating stencil_cap material...");
             // ═══════════════════════════════════════════════════════════════════
             // Pass 3: Stencil Cap - flat cap at clip plane where stencil == 255
             // ═══════════════════════════════════════════════════════════════════
@@ -339,11 +417,20 @@ impl PixyTerrain {
             cap_mat.set_shader(&cap_shader);
 
             // Cross-section parameters for cap pass
-            cap_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            cap_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            cap_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            cap_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
             cap_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             cap_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            cap_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            cap_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
             // Underground texture (required for cap)
             if let Some(ref underground) = self.underground_albedo {
@@ -358,7 +445,8 @@ impl PixyTerrain {
 
             // Underground roughness map (optional)
             if let Some(ref roughness) = self.underground_roughness {
-                cap_mat.set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
+                cap_mat
+                    .set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
                 cap_mat.set_shader_parameter("use_underground_roughness_map", &true.to_variant());
             }
 
@@ -368,7 +456,10 @@ impl PixyTerrain {
                 cap_mat.set_shader_parameter("use_underground_ao_map", &true.to_variant());
             }
 
-            cap_mat.set_shader_parameter("underground_triplanar_scale", &self.underground_uv_scale.to_variant());
+            cap_mat.set_shader_parameter(
+                "underground_triplanar_scale",
+                &self.underground_uv_scale.to_variant(),
+            );
 
             // ═══════════════════════════════════════════════════════════════════
             // Chain materials: stencil_write -> terrain -> stencil_cap
@@ -376,16 +467,151 @@ impl PixyTerrain {
             // Set render priorities for correct pass ordering
             // NOTE: next_pass materials aren't necessarily rendered immediately after parent
             // Per Godot PR #80710: "Users have to rely entirely on render_priority to get correct sorting"
-            stencil_write_mat.set_render_priority(-1);  // Render first (back faces mark stencil)
-            terrain_mat.set_render_priority(0);          // Render second (front faces clear stencil)
-            cap_mat.set_render_priority(1);              // Render last (cap where stencil == 255)
+            stencil_write_mat.set_render_priority(-1); // Render first (back faces mark stencil)
+            terrain_mat.set_render_priority(0); // Render second (front faces clear stencil)
+            cap_mat.set_render_priority(1); // Render last (cap where stencil == 255)
 
             terrain_mat.set_next_pass(&cap_mat.upcast::<Material>());
             stencil_write_mat.set_next_pass(&terrain_mat.upcast::<Material>());
 
             // Apply stencil_write_mat as the mesh material (it chains the others)
             self.cached_material = Some(stencil_write_mat.upcast::<Material>());
+            debug_log("[initialize_systems] Material chain: priorities -1, 0, 1 (stencil_write -> terrain -> cap)");
+
+            debug_log("[initialize_systems] Creating stencil-only material for merged mesh...");
+            // ═══════════════════════════════════════════════════════════════════
+            // Stencil-only material chain (for merged mesh: stencil_write -> stencil_cap)
+            // This skips the terrain pass - chunks handle terrain rendering,
+            // merged mesh handles stencil cap only to fix holes at chunk boundaries.
+            // ═══════════════════════════════════════════════════════════════════
+            let mut merged_stencil_write_shader = Shader::new_gd();
+            merged_stencil_write_shader.set_code(include_str!("shaders/stencil_write.gdshader"));
+            let mut merged_stencil_write_mat = ShaderMaterial::new_gd();
+            merged_stencil_write_mat.set_shader(&merged_stencil_write_shader);
+
+            // Cross-section parameters
+            merged_stencil_write_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            merged_stencil_write_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            merged_stencil_write_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            merged_stencil_write_mat
+                .set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            merged_stencil_write_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
+
+            let mut merged_cap_shader = Shader::new_gd();
+            merged_cap_shader.set_code(include_str!("shaders/stencil_cap.gdshader"));
+            let mut merged_cap_mat = ShaderMaterial::new_gd();
+            merged_cap_mat.set_shader(&merged_cap_shader);
+
+            // Cross-section parameters for cap
+            merged_cap_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            merged_cap_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            merged_cap_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            merged_cap_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            merged_cap_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
+
+            // Underground textures for cap
+            if let Some(ref underground) = self.underground_albedo {
+                merged_cap_mat
+                    .set_shader_parameter("underground_texture", &underground.to_variant());
+            }
+            if let Some(ref normal) = self.underground_normal {
+                merged_cap_mat
+                    .set_shader_parameter("underground_normal_texture", &normal.to_variant());
+                merged_cap_mat
+                    .set_shader_parameter("use_underground_normal_map", &true.to_variant());
+            }
+            if let Some(ref roughness) = self.underground_roughness {
+                merged_cap_mat
+                    .set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
+                merged_cap_mat
+                    .set_shader_parameter("use_underground_roughness_map", &true.to_variant());
+            }
+            if let Some(ref ao) = self.underground_ao {
+                merged_cap_mat.set_shader_parameter("underground_ao_texture", &ao.to_variant());
+                merged_cap_mat.set_shader_parameter("use_underground_ao_map", &true.to_variant());
+            }
+            merged_cap_mat.set_shader_parameter(
+                "underground_triplanar_scale",
+                &self.underground_uv_scale.to_variant(),
+            );
+
+            // Chain: stencil_write -> stencil_cap (no terrain pass)
+            // Render priorities: -2 for stencil write (before chunk stencil), 2 for cap (after chunk cap)
+            merged_stencil_write_mat.set_render_priority(-2);
+            merged_cap_mat.set_render_priority(2);
+            merged_stencil_write_mat.set_next_pass(&merged_cap_mat.upcast::<Material>());
+
+            self.cached_stencil_only_material = Some(merged_stencil_write_mat.upcast::<Material>());
+            debug_log("[initialize_systems] Stencil-only material: priorities -2, 2 (stencil_write -> cap)");
+
+            debug_log("[initialize_systems] Creating terrain-only material...");
+            // ═══════════════════════════════════════════════════════════════════
+            // Terrain-only material (no stencil passes)
+            // Used for chunks when cross-section is ENABLED - merged mesh handles stencil
+            // ═══════════════════════════════════════════════════════════════════
+            let mut terrain_only_shader = Shader::new_gd();
+            terrain_only_shader.set_code(include_str!("shaders/triplanar_pbr.gdshader"));
+            let mut terrain_only_mat = ShaderMaterial::new_gd();
+            terrain_only_mat.set_shader(&terrain_only_shader);
+
+            // Copy all terrain texture settings
+            terrain_only_mat.set_shader_parameter("albedo_texture", &albedo.to_variant());
+            if let Some(ref normal) = self.terrain_normal {
+                terrain_only_mat.set_shader_parameter("normal_texture", &normal.to_variant());
+                terrain_only_mat.set_shader_parameter("use_normal_map", &true.to_variant());
+            }
+            if let Some(ref roughness) = self.terrain_roughness {
+                terrain_only_mat.set_shader_parameter("roughness_texture", &roughness.to_variant());
+                terrain_only_mat.set_shader_parameter("use_roughness_map", &true.to_variant());
+            }
+            if let Some(ref ao) = self.terrain_ao {
+                terrain_only_mat.set_shader_parameter("ao_texture", &ao.to_variant());
+                terrain_only_mat.set_shader_parameter("use_ao_map", &true.to_variant());
+            }
+            terrain_only_mat
+                .set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
+
+            // Cross-section parameters (for clip plane discard in terrain shader)
+            terrain_only_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            terrain_only_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            terrain_only_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            terrain_only_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
+            terrain_only_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
+
+            self.cached_terrain_only_material = Some(terrain_only_mat.upcast::<Material>());
+            debug_log("[initialize_systems] All materials created successfully");
         } else {
+            debug_log("[initialize_systems] No albedo texture - using debug checkerboard shader");
             // No texture - use debug checkerboard shader
             let mut shader = Shader::new_gd();
             shader.set_code(include_str!("shaders/checkerboard.gdshader"));
@@ -406,7 +632,9 @@ impl PixyTerrain {
 
         // Create noise field with SDF enclosure for watertight mesh generation
         // Uses smooth CSG intersection for artifact-free normals at terrain-wall junctions
-        let noise = NoiseField::with_csg_blend(
+        // Box extension = chunk_size/2 puts surfaces in MIDDLE of guard chunks,
+        // ensuring proper SDF zero-crossings for watertight corner geometry.
+        let noise = NoiseField::with_box_extension(
             self.noise_seed,
             self.noise_octaves.max(1) as usize,
             self.noise_frequency,
@@ -415,10 +643,15 @@ impl PixyTerrain {
             self.terrain_floor_y,
             Some((box_min, box_max)),
             self.csg_blend_width,
+            chunk_size / 2.0, // Extend box bounds by half chunk for corner geometry
         );
 
         let noise_arc = Arc::new(noise);
         self.noise_field = Some(Arc::clone(&noise_arc));
+        debug_log(&format!(
+            "[initialize_systems] Noise field created with CSG blend={}",
+            self.csg_blend_width
+        ));
 
         let threads = if self.worker_threads <= 0 {
             0
@@ -426,6 +659,11 @@ impl PixyTerrain {
             self.worker_threads as usize
         };
         let worker_pool = MeshWorkerPool::new(threads, self.channel_capacity as usize);
+        let actual_threads = worker_pool.thread_count();
+        debug_log(&format!(
+            "[initialize_systems] Worker pool: {} threads (requested: {})",
+            actual_threads, self.worker_threads
+        ));
 
         let lod_config = LODConfig::new(
             self.lod_base_distance,
@@ -441,11 +679,18 @@ impl PixyTerrain {
             self.map_height_y,
             self.map_width_z,
         );
+        debug_log(&format!(
+            "[initialize_systems] Chunk manager created: map {}x{}x{}",
+            self.map_width_x, self.map_height_y, self.map_width_z
+        ));
 
         self.worker_pool = Some(worker_pool);
         self.chunk_manager = Some(chunk_manager);
 
         self.initialized = true;
+
+        debug_log("[initialize_systems] END");
+        debug_log("");
 
         godot_print!(
             "PixyTerrain: Ready (seed={}, {} worker threads)",
@@ -470,6 +715,20 @@ impl PixyTerrain {
             Vec::new()
         };
 
+        // Track if chunks changed (for merged mesh update)
+        let chunks_changed = !new_meshes.is_empty();
+
+        // Log new meshes received (only when there are new meshes to avoid spam)
+        if !new_meshes.is_empty() {
+            debug_log(&format!(
+                "[update_terrain] New meshes from workers: {}, camera=({:.1}, {:.1}, {:.1})",
+                new_meshes.len(),
+                camera_pos[0],
+                camera_pos[1],
+                camera_pos[2]
+            ));
+        }
+
         // Add to back of queue (FIFO)
         for mesh in new_meshes {
             if self.pending_uploads.len() < self.max_pending_uploads as usize {
@@ -485,6 +744,7 @@ impl PixyTerrain {
 
         // Upload limited number per frame (from front, oldest first)
         let max_uploads = self.max_uploads_per_frame.max(1) as usize;
+        let mut uploaded_this_frame = false;
         for _ in 0..max_uploads {
             if let Some(mesh_result) = self.pending_uploads.pop_front() {
                 // Store by coord - automatically replaces old LOD versions
@@ -492,12 +752,38 @@ impl PixyTerrain {
                 self.uploaded_meshes.insert(coord, mesh_result.clone());
                 self.upload_mesh_to_godot(mesh_result);
                 self.meshes_uploaded += 1;
+                uploaded_this_frame = true;
             } else {
                 break;
             }
         }
 
-        self.unload_distant_chunks();
+        let unloaded = self.unload_distant_chunks();
+
+        // Detect cross_section_enabled toggle
+        let cross_section_toggled = self.cross_section_enabled != self.prev_cross_section_enabled;
+        self.prev_cross_section_enabled = self.cross_section_enabled;
+
+        if cross_section_toggled {
+            debug_log(&format!(
+                "[update_terrain] Cross-section TOGGLED: {} -> {}",
+                !self.cross_section_enabled, self.cross_section_enabled
+            ));
+        }
+
+        // Mark merged mesh dirty if chunks changed while cross-section enabled
+        if self.cross_section_enabled && (chunks_changed || uploaded_this_frame || unloaded) {
+            self.merged_mesh_dirty = true;
+            debug_log(&format!(
+                "[update_terrain] Merged mesh marked dirty: chunks_changed={}, uploaded={}, unloaded={}",
+                chunks_changed, uploaded_this_frame, unloaded
+            ));
+        }
+
+        // Update merged mesh for cross-section stencil cap
+        if cross_section_toggled || self.merged_mesh_dirty {
+            self.update_merged_stencil_mesh();
+        }
     }
 
     fn get_camera_position(&self) -> [f32; 3] {
@@ -513,8 +799,15 @@ impl PixyTerrain {
 
     fn upload_mesh_to_godot(&mut self, result: MeshResult) {
         if result.is_empty() {
+            debug_log(&format!(
+                "[upload_mesh_to_godot] SKIPPED empty mesh: ({}, {}, {}) LOD={}",
+                result.coord.x, result.coord.y, result.coord.z, result.lod_level
+            ));
             return;
         }
+
+        let vert_count = result.vertices.len();
+        let tri_count = result.indices.len() / 3;
 
         let vertices = PackedVector3Array::from(
             &result
@@ -564,10 +857,27 @@ impl PixyTerrain {
             coord.x, coord.y, coord.z, result.lod_level
         ));
 
-        // Apply debug material if cached
-        if let Some(ref mat) = self.cached_material {
+        // Apply material based on cross-section state:
+        // - Cross-section DISABLED: use full material chain (stencil + terrain + cap)
+        // - Cross-section ENABLED: use terrain-only material (merged mesh handles stencil)
+        let material_type = if self.cross_section_enabled {
+            "terrain_only"
+        } else {
+            "full_chain"
+        };
+        let material = if self.cross_section_enabled {
+            self.cached_terrain_only_material.as_ref()
+        } else {
+            self.cached_material.as_ref()
+        };
+        if let Some(mat) = material {
             instance.set_surface_override_material(0, mat);
         }
+
+        debug_log(&format!(
+            "[upload_mesh_to_godot] Chunk ({}, {}, {}) LOD={}: {} verts, {} tris, material={}",
+            coord.x, coord.y, coord.z, result.lod_level, vert_count, tri_count, material_type
+        ));
 
         self.base_mut().add_child(&instance);
 
@@ -579,20 +889,202 @@ impl PixyTerrain {
         }
     }
 
-    fn unload_distant_chunks(&mut self) {
+    /// Unload chunks that are too far from camera. Returns true if any chunks were unloaded.
+    fn unload_distant_chunks(&mut self) -> bool {
         let unload_list = if let Some(ref manager) = self.chunk_manager {
             manager.get_unload_candidates()
         } else {
             Vec::new()
         };
 
+        let unloaded = !unload_list.is_empty();
+
+        if !unload_list.is_empty() {
+            debug_log(&format!(
+                "[unload_distant_chunks] Unloading {} chunks",
+                unload_list.len()
+            ));
+        }
+
+        for (coord, _) in &unload_list {
+            debug_log(&format!(
+                "[unload_distant_chunks] Unloading chunk ({}, {}, {})",
+                coord.x, coord.y, coord.z
+            ));
+        }
+
         for (coord, _) in unload_list {
             if let Some(mut node) = self.chunk_nodes.remove(&coord) {
                 node.queue_free();
             }
+            // Also remove from uploaded_meshes so merged mesh stays in sync
+            self.uploaded_meshes.remove(&coord);
             if let Some(ref mut manager) = self.chunk_manager {
                 manager.remove_chunk(&coord);
             }
+        }
+
+        unloaded
+    }
+
+    /// Switch all chunk materials between full (stencil+terrain+cap) and terrain-only.
+    /// Called when cross_section_enabled changes.
+    fn update_chunk_materials(&mut self) {
+        let material_type = if self.cross_section_enabled {
+            "terrain_only"
+        } else {
+            "full_chain"
+        };
+        let material = if self.cross_section_enabled {
+            self.cached_terrain_only_material.as_ref()
+        } else {
+            self.cached_material.as_ref()
+        };
+
+        debug_log(&format!(
+            "[update_chunk_materials] Switching {} chunks to {} material",
+            self.chunk_nodes.len(),
+            material_type
+        ));
+
+        if let Some(mat) = material {
+            for (_, instance) in self.chunk_nodes.iter_mut() {
+                if instance.is_instance_valid() {
+                    instance.set_surface_override_material(0, mat);
+                }
+            }
+        }
+    }
+
+    /// Update merged mesh for cross-section stencil cap rendering.
+    /// When cross_section_enabled, merges all chunk meshes into a single mesh
+    /// with stencil-only material (stencil_write -> stencil_cap).
+    /// This ensures all back faces from all chunks are written to stencil
+    /// before any cap rendering, fixing holes at chunk boundaries.
+    fn update_merged_stencil_mesh(&mut self) {
+        debug_log(&format!(
+            "[update_merged_stencil_mesh] cross_section={}, dirty={}",
+            self.cross_section_enabled, self.merged_mesh_dirty
+        ));
+
+        // If cross-section disabled, clean up merged mesh and restore chunk materials
+        if !self.cross_section_enabled {
+            debug_log(
+                "[update_merged_stencil_mesh] Cross-section DISABLED - cleaning up merged mesh",
+            );
+            if let Some(mut instance) = self.merged_stencil_mesh.take() {
+                if instance.is_instance_valid() {
+                    self.base_mut().remove_child(&instance);
+                    instance.queue_free();
+                }
+            }
+            // Restore full material chain to chunks
+            self.update_chunk_materials();
+            self.merged_mesh_dirty = false;
+            return;
+        }
+
+        // Cross-section enabled - switch chunks to terrain-only material
+        self.update_chunk_materials();
+
+        // Collect all chunk meshes
+        let chunks = self.collect_chunk_meshes();
+        debug_log(&format!(
+            "[update_merged_stencil_mesh] Collecting {} chunk meshes",
+            chunks.len()
+        ));
+
+        if chunks.is_empty() {
+            debug_log("[update_merged_stencil_mesh] No chunks to merge - cleaning up");
+            // No chunks to merge - clean up any existing merged mesh
+            if let Some(mut instance) = self.merged_stencil_mesh.take() {
+                if instance.is_instance_valid() {
+                    self.base_mut().remove_child(&instance);
+                    instance.queue_free();
+                }
+            }
+            self.merged_mesh_dirty = false;
+            return;
+        }
+
+        // Log floor chunks (Y=-1) specifically
+        let floor_chunks: Vec<_> = chunks.iter().filter(|c| c.coord.y == -1).collect();
+        debug_log(&format!(
+            "[update_merged_stencil_mesh] Floor chunks (Y=-1): {}",
+            floor_chunks.len()
+        ));
+
+        // Merge chunks using MeshPostProcessor (just merge, no other processing)
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
+        let combined = processor.merge_chunks(&chunks);
+
+        debug_log(&format!(
+            "[update_merged_stencil_mesh] Merged result: {} verts, {} tris",
+            combined.vertex_count(),
+            combined.triangle_count()
+        ));
+
+        if combined.vertices.is_empty() {
+            debug_log("[update_merged_stencil_mesh] Merged mesh is EMPTY - skipping");
+            self.merged_mesh_dirty = false;
+            return;
+        }
+
+        // Convert to Godot ArrayMesh
+        let mesh = self.combined_mesh_to_godot(&combined);
+
+        // Create or update merged mesh instance
+        if let Some(ref mut instance) = self.merged_stencil_mesh {
+            if instance.is_instance_valid() {
+                // Update existing instance with new mesh
+                debug_log("[update_merged_stencil_mesh] Updating existing merged mesh instance");
+                instance.set_mesh(&mesh);
+            } else {
+                // Instance became invalid, create new one
+                debug_log(
+                    "[update_merged_stencil_mesh] Existing instance invalid - will create new",
+                );
+                self.merged_stencil_mesh = None;
+            }
+        }
+
+        if self.merged_stencil_mesh.is_none() {
+            debug_log("[update_merged_stencil_mesh] Creating NEW merged mesh instance");
+            let mut instance = MeshInstance3D::new_alloc();
+            instance.set_mesh(&mesh);
+            instance.set_name("MergedStencilMesh");
+
+            // Apply stencil-only material (stencil_write -> stencil_cap, no terrain)
+            if let Some(ref mat) = self.cached_stencil_only_material {
+                instance.set_surface_override_material(0, mat);
+                debug_log("[update_merged_stencil_mesh] Applied stencil-only material");
+            } else {
+                debug_log(
+                    "[update_merged_stencil_mesh] WARNING: No stencil-only material available!",
+                );
+            }
+
+            self.base_mut().add_child(&instance);
+            self.merged_stencil_mesh = Some(instance);
+        }
+
+        self.merged_mesh_dirty = false;
+        debug_log(&format!(
+            "[update_merged_stencil_mesh] COMPLETE: {} chunks -> {} verts, {} tris",
+            chunks.len(),
+            combined.vertex_count(),
+            combined.triangle_count()
+        ));
+        debug_log("");
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Updated merged stencil mesh - {} chunks, {} vertices, {} triangles",
+                chunks.len(),
+                combined.vertex_count(),
+                combined.triangle_count()
+            );
         }
     }
 }
@@ -644,7 +1136,12 @@ impl PixyTerrain {
         godot_print!("  Z=max (wall): {}", z_max);
 
         let cam_pos = self.get_camera_position();
-        godot_print!("Camera position: [{:.1}, {:.1}, {:.1}]", cam_pos[0], cam_pos[1], cam_pos[2]);
+        godot_print!(
+            "Camera position: [{:.1}, {:.1}, {:.1}]",
+            cam_pos[0],
+            cam_pos[1],
+            cam_pos[2]
+        );
 
         let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
         godot_print!("Chunk size: {}", chunk_size);
@@ -675,7 +1172,10 @@ impl PixyTerrain {
 
                 // Test inside terrain (should be negative)
                 let sdf_inside = noise.sample(mid_x, 16.0, mid_z);
-                godot_print!("SDF inside terrain (Y=16): {:.2} (should be <0)", sdf_inside);
+                godot_print!(
+                    "SDF inside terrain (Y=16): {:.2} (should be <0)",
+                    sdf_inside
+                );
             } else {
                 godot_print!("WARNING: Box bounds are None! Walls/floor won't generate.");
             }
@@ -686,6 +1186,129 @@ impl PixyTerrain {
         godot_print!("Pending uploads: {}", self.pending_uploads.len());
         godot_print!("Meshes uploaded: {}", self.meshes_uploaded);
         godot_print!("Meshes dropped: {}", self.meshes_dropped);
+    }
+
+    /// Debug function: analyze floor chunks and geometry below Y=0
+    #[func]
+    pub fn debug_floor(&self) {
+        godot_print!("=== PixyTerrain Floor Debug ===");
+        godot_print!("Cross-section enabled: {}", self.cross_section_enabled);
+        godot_print!("Merged mesh dirty: {}", self.merged_mesh_dirty);
+
+        // Check merged stencil mesh
+        if let Some(ref mesh_instance) = self.merged_stencil_mesh {
+            if mesh_instance.is_instance_valid() {
+                godot_print!("Merged stencil mesh: EXISTS and VALID");
+                if let Some(mesh) = mesh_instance.get_mesh() {
+                    let surface_count = mesh.get_surface_count();
+                    godot_print!("  Surface count: {}", surface_count);
+                }
+            } else {
+                godot_print!("Merged stencil mesh: EXISTS but INVALID");
+            }
+        } else {
+            godot_print!("Merged stencil mesh: NONE");
+        }
+
+        // Analyze Y=-1 floor chunks
+        godot_print!("\n--- Floor Chunks (Y=-1) ---");
+        let mut floor_chunks = Vec::new();
+        let mut total_floor_verts = 0;
+        let mut total_floor_tris = 0;
+
+        for (coord, mesh_result) in &self.uploaded_meshes {
+            if coord.y == -1 {
+                floor_chunks.push(*coord);
+                total_floor_verts += mesh_result.vertices.len();
+                total_floor_tris += mesh_result.indices.len() / 3;
+
+                // Check for vertices below Y=0
+                let below_y0: Vec<_> = mesh_result.vertices.iter().filter(|v| v[1] < 0.0).collect();
+
+                godot_print!(
+                    "  Chunk ({}, -1, {}): {} verts, {} tris, {} verts below Y=0",
+                    coord.x,
+                    coord.z,
+                    mesh_result.vertices.len(),
+                    mesh_result.indices.len() / 3,
+                    below_y0.len()
+                );
+
+                // Find Y range of this chunk's vertices
+                if !mesh_result.vertices.is_empty() {
+                    let min_y = mesh_result
+                        .vertices
+                        .iter()
+                        .map(|v| v[1])
+                        .fold(f32::INFINITY, f32::min);
+                    let max_y = mesh_result
+                        .vertices
+                        .iter()
+                        .map(|v| v[1])
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    godot_print!("    Y range: {:.2} to {:.2}", min_y, max_y);
+                }
+            }
+        }
+
+        godot_print!(
+            "\nTotal floor chunks: {}, verts: {}, tris: {}",
+            floor_chunks.len(),
+            total_floor_verts,
+            total_floor_tris
+        );
+
+        // Analyze chunks at Y=0 (first layer above floor)
+        godot_print!("\n--- Ground Level Chunks (Y=0) ---");
+        let mut y0_chunks = 0;
+        let mut y0_verts = 0;
+        let mut y0_tris = 0;
+
+        for (coord, mesh_result) in &self.uploaded_meshes {
+            if coord.y == 0 {
+                y0_chunks += 1;
+                y0_verts += mesh_result.vertices.len();
+                y0_tris += mesh_result.indices.len() / 3;
+            }
+        }
+
+        godot_print!(
+            "Total Y=0 chunks: {}, verts: {}, tris: {}",
+            y0_chunks,
+            y0_verts,
+            y0_tris
+        );
+
+        // Check for gaps in floor coverage
+        godot_print!("\n--- Floor Coverage Analysis ---");
+        let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
+        godot_print!(
+            "Expected floor chunks: X from -1 to {}, Z from -1 to {}",
+            self.map_width_x,
+            self.map_width_z
+        );
+
+        let mut missing_floor = Vec::new();
+        for x in -1..=self.map_width_x {
+            for z in -1..=self.map_width_z {
+                let coord = crate::chunk::ChunkCoord::new(x, -1, z);
+                if !self.uploaded_meshes.contains_key(&coord) {
+                    missing_floor.push(coord);
+                }
+            }
+        }
+
+        if missing_floor.is_empty() {
+            godot_print!("All floor chunks present!");
+        } else {
+            godot_print!("MISSING {} floor chunks:", missing_floor.len());
+            for coord in missing_floor.iter().take(10) {
+                godot_print!("  ({}, -1, {})", coord.x, coord.z);
+            }
+            if missing_floor.len() > 10 {
+                godot_print!("  ... and {} more", missing_floor.len() - 10);
+            }
+        }
     }
 
     #[func]
@@ -709,11 +1332,20 @@ impl PixyTerrain {
             }
         }
 
-        // 4. Clear pending uploads buffer and uploaded mesh storage
+        // 4. Free merged stencil mesh if it exists
+        if let Some(mut instance) = self.merged_stencil_mesh.take() {
+            if instance.is_instance_valid() {
+                self.base_mut().remove_child(&instance);
+                instance.queue_free();
+            }
+        }
+        self.merged_mesh_dirty = false;
+
+        // 5. Clear pending uploads buffer and uploaded mesh storage
         self.pending_uploads.clear();
         self.uploaded_meshes.clear();
 
-        // 5. Drop systems
+        // 6. Drop systems
         self.worker_pool = None;
         self.chunk_manager = None;
         self.noise_field = None;
@@ -732,11 +1364,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(
-            self.weld_epsilon,
-            self.normal_angle_threshold,
-            target,
-        );
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -770,7 +1399,8 @@ impl PixyTerrain {
             return;
         }
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -812,7 +1442,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -845,7 +1476,8 @@ impl PixyTerrain {
             return;
         }
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -894,11 +1526,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(
-            self.weld_epsilon,
-            self.normal_angle_threshold,
-            target,
-        );
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
 
