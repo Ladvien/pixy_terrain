@@ -28,6 +28,8 @@ A small indie team needs to quickly create 3D pixel art terrain in Godot with ca
 - Multi-tile props (large Blender assets that snap to grid)
 - Destructible terrain (runtime tile replacement when digging)
 - WFC-based auto-fill for rapid level layout
+- Decal/overlay painting (grid-independent detail: weathering, paths, moss, etc.)
+- Runtime decals (footprints, damage, dynamic effects)
 
 ## Non-Goals
 
@@ -76,11 +78,20 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 - Affects all downstream generation and placement
 
 #### 2. WANG Tile Wizard
-- User selects terrain A (e.g., ground) and terrain B (e.g., grass)
-- Configures feathering/transition style
-- System procedurally generates all edge-matching variants
+User inputs:
+- **Block mesh** - Base geometry for the tile
+- **Texture A** (the "cake") - Primary/base terrain texture
+- **Texture B** (the "icing") - Secondary/overlay terrain texture
+- **Interaction model** - How textures relate (A is base, B covers it)
+- **Feathering style** - How the two textures blend at transitions
+- **Metadata** - Tags, properties for the generated tiles
+- **Static props** - Optional decorations attached to tiles
+
+System outputs:
+- All edge-matching tile variants for the two terrain types
 - **Full 3D edge matching** - 6 faces, not just top face
-- Outputs MeshLibrary compatible with GridMap
+- MeshLibrary compatible with GridMap
+- Auto-generated WFC rules for the tile set
 
 #### 3. Tile Editor
 - Paint regions at high level (this area = grass, that = cave)
@@ -90,6 +101,9 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 
 #### 4. Cross-Section Renderer
 - "Ant farm" view - see underground like a side cutaway
+- **Textbook-style cutaway** - like anatomical diagrams where a body is sliced in half
+- Cut surface must show "innards" texture that looks like solid material, not hollow
+- Works at any zoom level
 - **Must look clean and pretty** - this is non-negotiable
 - Approach TBD: clip plane shader, geometry slicing, or camera trick
 
@@ -97,6 +111,46 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 - Developer-friendly rule definition for WFC
 - Defines which tile edges can connect to which
 - Supports procedural generation of base tiles
+- **Compound tags for edge matching** (see Data Format below)
+
+### Tile Data Format
+
+```rust
+struct TileDefinition {
+    // Identity
+    id: u32,
+    name: String,
+
+    // Geometry
+    mesh: Gd<Mesh>,
+
+    // Edge matching - 6 faces: +X, -X, +Y, -Y, +Z, -Z
+    // Uses compound tags (e.g., "dirt_wet") for simple matching
+    face_tags: [String; 6],
+
+    // WFC
+    weight: f32,  // Probability weight for selection
+
+    // Materials
+    terrain_type: TerrainTypeId,
+
+    // Metadata
+    tags: Vec<String>,  // "grass", "cave_entrance", etc.
+    props: Vec<PropPlacement>,  // Static props attached
+}
+
+struct ConnectionRule {
+    tag_a: String,
+    tag_b: String,
+    allowed: bool,
+}
+```
+
+**Edge Matching Decision:** Compound tags over multi-tag priority system.
+
+Instead of `["dirt", "wet"]` with complex priority evaluation, use specific compound tags like `"dirt_wet"`. This is simpler to implement, debug, and reason about. Follows the "design to strengths" philosophy from WFC literature—strong tileset design prevents problems better than complex rule systems.
+
+Reference: [Boris the Brave on WFC](https://www.boristhebrave.com/2020/02/08/wave-function-collapse-tips-and-tricks/), [Tessera](https://www.boristhebrave.com/2021/10/31/constraint-based-tile-generators/)
 
 ### How It Works
 
@@ -121,6 +175,8 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 - **Rust/GDExtension only**: Performance matters, team prefers Rust, no GDScript unless absolutely required.
 - **Tile size as forced choice**: Prevents "default trap" and ensures intentional grid decisions.
 - **Editor-time WANG generation**: Keeps runtime simple, allows inspection/tweaking of generated tiles.
+- **Compound tags for edge matching**: Use `"dirt_wet"` instead of `["dirt", "wet"]` with priority rules. Simpler to implement and debug. Strong tileset design > complex rule systems.
+- **Decals are Full Vision, not MVP**: Decals are polish (make good terrain look better). WANG tiles are foundational (create the terrain blocks). Ship MVP first, add decals when terrain feels "too clean."
 
 ## Alternatives Considered
 
@@ -205,10 +261,15 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 
 ### Open Questions
 
-- **Cross-section rendering approach**: Clip plane shader? Geometry slicing? Camera trick? Needs prototyping.
+- **Cross-section rendering approach**: Clip plane shader? Geometry slicing? Camera trick? Needs prototyping. Must show solid "innards" texture at cut surface.
 - **WANG wizard UI/UX**: How to make terrain selection and feathering options intuitive?
-- **Rule definition format**: How do developers define WFC rules easily? Visual editor? Config file?
+- **Feathering algorithm**: How exactly do two textures blend? Noise-based? Distance-based? User-configurable patterns?
 - **Tile size recommendations**: What sizes work best for 3D pixel art? Should we provide guidance even if we don't enforce defaults?
+
+### Resolved Questions
+
+- **Edge matching approach**: Compound tags (decided). Simpler than multi-tag priority systems.
+- **Decals in MVP**: No (decided). Moved to Full Vision. WANG tiles are foundational, decals are polish.
 
 ## Constraints
 
@@ -250,3 +311,4 @@ A tile-based terrain editor built on Godot's GridMap, with a WANG tile wizard fo
 ---
 
 *Design conversation: 2026-02-02*
+*Last updated: 2026-02-02 - Added tile data format, compound tag decision, WANG wizard inputs, decals moved to Full Vision*
