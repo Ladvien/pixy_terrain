@@ -17,17 +17,11 @@ pub struct PixyTerrainPlugin {
     #[init(val = None)]
     toolbar: Option<Gd<VBoxContainer>>,
     #[init(val = None)]
-    generate_button: Option<Gd<Button>>,
+    test_floor_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    tower_button: Option<Gd<Button>>,
     #[init(val = None)]
     clear_button: Option<Gd<Button>>,
-    #[init(val = None)]
-    merge_button: Option<Gd<Button>>,
-    #[init(val = None)]
-    weld_button: Option<Gd<Button>>,
-    #[init(val = None)]
-    decimate_button: Option<Gd<Button>>,
-    #[init(val = None)]
-    normals_button: Option<Gd<Button>>,
     #[init(val = false)]
     is_modifying: bool,
 }
@@ -41,7 +35,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut margin_container = MarginContainer::new_alloc();
         margin_container.set_name("PixyTerrainMargin");
         margin_container.set_visible(false);
-        margin_container.set_custom_minimum_size(Vector2::new(120.0, 0.0)); // Min width
+        margin_container.set_custom_minimum_size(Vector2::new(140.0, 0.0));
         margin_container.add_theme_constant_override("margin_top", 8);
         margin_container.add_theme_constant_override("margin_left", 8);
         margin_container.add_theme_constant_override("margin_right", 8);
@@ -50,71 +44,44 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // Create VBoxContainer for vertical button layout
         let mut toolbar = VBoxContainer::new_alloc();
         toolbar.set_name("PixyTerrainToolbar");
-        toolbar.add_theme_constant_override("separation", 8); // Space between buttons
+        toolbar.add_theme_constant_override("separation", 8);
 
-        // Create Generate button
-        let mut generate_button = Button::new_alloc();
-        generate_button.set_text("Generate (G)");
-        generate_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+        // Create Test Floor button
+        let mut test_floor_button = Button::new_alloc();
+        test_floor_button.set_text("Test Floor (T)");
+        test_floor_button.set_custom_minimum_size(Vector2::new(120.0, 30.0));
+
+        // Create Tower button
+        let mut tower_button = Button::new_alloc();
+        tower_button.set_text("Test Tower (W)");
+        tower_button.set_custom_minimum_size(Vector2::new(120.0, 30.0));
 
         // Create Clear button
         let mut clear_button = Button::new_alloc();
-        clear_button.set_text("Clear (C)");
-        clear_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
-
-        // Post-processing buttons
-        let mut merge_button = Button::new_alloc();
-        merge_button.set_text("Merge & Export");
-        merge_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
-
-        let mut weld_button = Button::new_alloc();
-        weld_button.set_text("Weld Seams");
-        weld_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
-
-        let mut decimate_button = Button::new_alloc();
-        decimate_button.set_text("Decimate");
-        decimate_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
-
-        let mut normals_button = Button::new_alloc();
-        normals_button.set_text("Recompute Normals");
-        normals_button.set_custom_minimum_size(Vector2::new(100.0, 30.0));
+        clear_button.set_text("Clear All (C)");
+        clear_button.set_custom_minimum_size(Vector2::new(120.0, 30.0));
 
         // Add buttons to VBoxContainer
-        toolbar.add_child(&generate_button);
+        toolbar.add_child(&test_floor_button);
+        toolbar.add_child(&tower_button);
         toolbar.add_child(&clear_button);
-        toolbar.add_child(&merge_button);
-        toolbar.add_child(&weld_button);
-        toolbar.add_child(&decimate_button);
-        toolbar.add_child(&normals_button);
 
         // Add VBoxContainer to MarginContainer
         margin_container.add_child(&toolbar);
 
         // Connect button signals
         let plugin_ref = self.to_gd();
-        generate_button.connect(
+        test_floor_button.connect(
             "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_generate_pressed"),
+            &Callable::from_object_method(&plugin_ref, "on_test_floor_pressed"),
+        );
+        tower_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_tower_pressed"),
         );
         clear_button.connect(
             "pressed",
             &Callable::from_object_method(&plugin_ref, "on_clear_pressed"),
-        );
-        merge_button.connect(
-            "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_merge_pressed"),
-        );
-        weld_button.connect(
-            "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_weld_pressed"),
-        );
-        decimate_button.connect(
-            "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_decimate_pressed"),
-        );
-        normals_button.connect(
-            "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_normals_pressed"),
         );
 
         // Add MarginContainer to the spatial editor side left
@@ -125,23 +92,17 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         self.margin_container = Some(margin_container);
         self.toolbar = Some(toolbar);
-        self.generate_button = Some(generate_button);
+        self.test_floor_button = Some(test_floor_button);
+        self.tower_button = Some(tower_button);
         self.clear_button = Some(clear_button);
-        self.merge_button = Some(merge_button);
-        self.weld_button = Some(weld_button);
-        self.decimate_button = Some(decimate_button);
-        self.normals_button = Some(normals_button);
         godot_print!("PixyTerrainPlugin: toolbar added to SPATIAL_EDITOR_SIDE_LEFT");
     }
 
     fn exit_tree(&mut self) {
-        // Clean up child refs (they'll be freed with parent, but clear refs)
-        self.generate_button = None;
+        // Clean up child refs
+        self.test_floor_button = None;
+        self.tower_button = None;
         self.clear_button = None;
-        self.merge_button = None;
-        self.weld_button = None;
-        self.decimate_button = None;
-        self.normals_button = None;
         self.toolbar = None;
 
         // Remove and free the margin container (and all children)
@@ -156,10 +117,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
     fn handles(&self, object: Gd<Object>) -> bool {
         let class_name = object.get_class();
-        godot_print!(
-            "PixyTerrainPlugin: handles called for class: {}",
-            class_name
-        );
+        godot_print!("PixyTerrainPlugin: handles called for class: {}", class_name);
         class_name == "PixyTerrain"
     }
 
@@ -179,7 +137,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
     }
 
     fn make_visible(&mut self, visible: bool) {
-        // Gaurd against false-positive hides during child modifications (bug #40166)
+        // Guard against false-positive hides during child modifications (bug #40166)
         if !visible && self.is_modifying {
             return;
         }
@@ -202,8 +160,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
         if let Ok(key_event) = event.try_cast::<InputEventKey>() {
             if key_event.is_pressed() && !key_event.is_echo() {
                 match key_event.get_keycode() {
-                    godot::global::Key::G => {
-                        self.do_generate();
+                    godot::global::Key::T => {
+                        self.do_create_test_floor();
+                        return AfterGuiInput::STOP.ord();
+                    }
+                    godot::global::Key::W => {
+                        self.do_create_test_tower();
                         return AfterGuiInput::STOP.ord();
                     }
                     godot::global::Key::C => {
@@ -222,51 +184,21 @@ impl IEditorPlugin for PixyTerrainPlugin {
 #[godot_api]
 impl PixyTerrainPlugin {
     #[func]
-    fn on_generate_pressed(&mut self) {
-        godot_print!("PixyTerrainPlugin: Generate button pressed");
-        self.do_generate();
+    fn on_test_floor_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Test Floor button pressed");
+        self.do_create_test_floor();
+    }
+
+    #[func]
+    fn on_tower_pressed(&mut self) {
+        godot_print!("PixyTerrainPlugin: Tower button pressed");
+        self.do_create_test_tower();
     }
 
     #[func]
     fn on_clear_pressed(&mut self) {
         godot_print!("PixyTerrainPlugin: Clear button pressed");
         self.do_clear();
-    }
-
-    #[func]
-    fn on_merge_pressed(&mut self) {
-        godot_print!("PixyTerrainPlugin: Merge & Export button pressed");
-        self.call_terrain_method("merge_and_export");
-    }
-
-    #[func]
-    fn on_weld_pressed(&mut self) {
-        godot_print!("PixyTerrainPlugin: Weld Seams button pressed");
-        self.call_terrain_method("weld_seams");
-    }
-
-    #[func]
-    fn on_decimate_pressed(&mut self) {
-        godot_print!("PixyTerrainPlugin: Decimate button pressed");
-        // decimate_mesh requires a target_triangles parameter
-        if let Some(ref terrain) = self.current_terrain {
-            if terrain.is_instance_valid() {
-                let mut terrain_clone = terrain.clone();
-                if terrain_clone.has_method("decimate_mesh") {
-                    self.is_modifying = true;
-                    // Read the decimation target from the terrain's export variable
-                    let target = terrain_clone.get("decimation_target_triangles");
-                    terrain_clone.call("decimate_mesh", &[target]);
-                    self.is_modifying = false;
-                }
-            }
-        }
-    }
-
-    #[func]
-    fn on_normals_pressed(&mut self) {
-        godot_print!("PixyTerrainPlugin: Recompute Normals button pressed");
-        self.call_terrain_method("recompute_normals");
     }
 }
 
@@ -291,11 +223,15 @@ impl PixyTerrainPlugin {
         }
     }
 
-    fn do_generate(&mut self) {
-        self.call_terrain_method("regenerate");
+    fn do_create_test_floor(&mut self) {
+        self.call_terrain_method("create_test_floor");
+    }
+
+    fn do_create_test_tower(&mut self) {
+        self.call_terrain_method("create_test_tower");
     }
 
     fn do_clear(&mut self) {
-        self.call_terrain_method("clear");
+        self.call_terrain_method("clear_all");
     }
 }
