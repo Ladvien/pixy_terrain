@@ -190,6 +190,16 @@ pub struct PixyTerrain {
     #[init(val = 0)]
     brush_flatten_direction: i32,
 
+    /// Minimum radius for curvature preview mesh (prevents tiny previews on small brushes)
+    #[export]
+    #[init(val = 3.0)]
+    curvature_preview_min_radius: f32,
+
+    /// Maximum radius for curvature preview mesh (prevents enormous previews on large brushes)
+    #[export]
+    #[init(val = 10.0)]
+    curvature_preview_max_radius: f32,
+
     // ════════════════════════════════════════════════
     // Undo/Redo Settings
     // ════════════════════════════════════════════════
@@ -604,6 +614,9 @@ impl PixyTerrain {
             2 => FlattenDirection::Down,
             _ => FlattenDirection::Both,
         });
+        let total_cells_x = (self.map_width_x.max(1) * self.chunk_subdivisions.max(1)) as i32;
+        let total_cells_z = (self.map_width_z.max(1) * self.chunk_subdivisions.max(1)) as i32;
+        brush.set_terrain_bounds(total_cells_x, total_cells_z);
         self.brush = Some(brush);
 
         self.undo_history = Some(UndoHistory::new(self.max_undo_steps.max(1) as usize));
@@ -1182,6 +1195,11 @@ impl PixyTerrain {
                 2 => FlattenDirection::Down,
                 _ => FlattenDirection::Both,
             });
+            let total_cells_x =
+                (self.map_width_x.max(1) * self.chunk_subdivisions.max(1)) as i32;
+            let total_cells_z =
+                (self.map_width_z.max(1) * self.chunk_subdivisions.max(1)) as i32;
+            brush.set_terrain_bounds(total_cells_x, total_cells_z);
 
             brush.begin_stroke(world_pos.x, world_pos.y, world_pos.z);
             true
@@ -1579,6 +1597,7 @@ impl PixyTerrain {
     /// Commit geometry modification from brush to modification layer
     fn commit_geometry_modification(&mut self) {
         let Some(ref brush) = self.brush else { return };
+        let Some(ref noise) = self.noise_field else { return };
         let Some(ref mod_layer) = self.modification_layer else {
             return;
         };
@@ -1591,7 +1610,7 @@ impl PixyTerrain {
         // Clone for writing; read from the original to get correct current SDF
         let existing = mod_layer.as_ref();
         let mut new_mod_layer = existing.clone();
-        let affected_chunks = brush.apply_geometry(existing, &mut new_mod_layer);
+        let affected_chunks = brush.apply_geometry(noise, existing, &mut new_mod_layer);
 
         // Store the updated layer
         self.modification_layer = Some(Arc::new(new_mod_layer));
@@ -1842,8 +1861,12 @@ impl PixyTerrain {
 
         self.ensure_preview_nodes();
 
-        // Update footprint overlay
-        if let Some(ref mut preview) = self.brush_preview {
+        // Update footprint overlay (hidden during curvature adjustment to avoid occluding the dome)
+        if brush_clone.phase == BrushPhase::AdjustingCurvature {
+            if let Some(ref mut footprint_node) = self.preview_footprint {
+                footprint_node.set_visible(false);
+            }
+        } else if let Some(ref mut preview) = self.brush_preview {
             preview.update_material(&brush_clone);
 
             if let Some(mesh) = preview.generate_mesh(&brush_clone) {
@@ -1873,15 +1896,30 @@ impl PixyTerrain {
             let raising = fp.height_delta > 0.0;
 
             let plane_mesh = if brush_clone.phase == BrushPhase::AdjustingCurvature {
+                // Clamp preview radius so it's visible on tiny brushes and not enormous on large ones
+                let cx = (min_x + max_x) * 0.5;
+                let cz = (min_z + max_z) * 0.5;
+                let half_x = (max_x - min_x) * 0.5;
+                let half_z = (max_z - min_z) * 0.5;
+                let actual_radius = half_x.max(half_z);
+                let clamped_radius = actual_radius.clamp(
+                    self.curvature_preview_min_radius,
+                    self.curvature_preview_max_radius,
+                );
+                let clamped_min_x = cx - clamped_radius;
+                let clamped_max_x = cx + clamped_radius;
+                let clamped_min_z = cz - clamped_radius;
+                let clamped_max_z = cz + clamped_radius;
+
                 BrushPreview::generate_curved_height_plane_mesh(
-                    min_x,
-                    max_x,
-                    min_z,
-                    max_z,
+                    clamped_min_x,
+                    clamped_max_x,
+                    clamped_min_z,
+                    clamped_max_z,
                     fp.base_y,
                     fp.height_delta,
                     brush_clone.curvature,
-                    brush_clone.size,
+                    clamped_radius,
                     brush_clone.shape,
                 )
             } else {
