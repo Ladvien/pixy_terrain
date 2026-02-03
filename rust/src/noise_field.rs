@@ -1,6 +1,8 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use std::sync::Arc;
 
+use crate::terrain_modifications::ModificationLayer;
+
 /// Noise-based sign distance field for terrain generation
 /// Negative = inside terrain (solid)
 /// Positive = outside terrain (air)
@@ -137,6 +139,17 @@ impl NoiseField {
 
     pub fn set_csg_blend_width(&mut self, width: f32) {
         self.csg_blend_width = width;
+    }
+
+    /// Sample the SDF with terrain modifications applied.
+    /// This is used during mesh generation to incorporate brush edits.
+    ///
+    /// The modification layer is sampled using trilinear interpolation and
+    /// the result is added to the base SDF value.
+    pub fn sample_with_mods(&self, x: f32, y: f32, z: f32, mods: &ModificationLayer) -> f32 {
+        let base_sdf = self.sample(x, y, z);
+        let mod_delta = mods.sample(x, y, z);
+        base_sdf + mod_delta
     }
 
     /// Signed distance function for an axis-aligned box
@@ -367,6 +380,8 @@ mod tests {
             1.0,
             32.0,
             0,
+            None,
+            None,
         );
         assert!(
             !terrain_result.vertices.is_empty(),
@@ -382,6 +397,8 @@ mod tests {
             1.0,
             32.0,
             0,
+            None,
+            None,
         );
         assert!(
             !floor_result.vertices.is_empty(),
@@ -408,6 +425,8 @@ mod tests {
             1.0,
             32.0,
             0,
+            None,
+            None,
         );
         // This chunk has no surface crossings (terrain is above, floor is at boundary)
         // It might be empty or have only wall geometry at X=0, Z=0
@@ -448,6 +467,8 @@ mod tests {
             1.0,
             32.0,
             0,
+            None,
+            None,
         );
 
         assert!(
@@ -538,6 +559,8 @@ mod tests {
             1.0,
             chunk_size,
             0,
+            None,
+            None,
         );
 
         assert!(
@@ -555,6 +578,8 @@ mod tests {
             1.0,
             chunk_size,
             0,
+            None,
+            None,
         );
 
         assert!(
@@ -590,6 +615,7 @@ mod tests {
                 &noise,
                 ChunkCoord::new(-1, y, 5), // X=-1 guard chunk, Z=5 (middle)
                 0, 1.0, chunk_size, 0,
+                None, None,
             );
 
             let world_y_min = y as f32 * chunk_size;
@@ -619,6 +645,7 @@ mod tests {
             &noise,
             ChunkCoord::new(-1, 0, 5),
             0, 1.0, chunk_size, 0,
+            None, None,
         );
         assert!(
             !y0_chunk.vertices.is_empty(),

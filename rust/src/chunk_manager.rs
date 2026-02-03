@@ -6,10 +6,12 @@ use std::sync::Arc;
 use crossbeam::channel::{Receiver, Sender};
 use godot::prelude::godot_print;
 
-use crate::chunk::{self, Chunk, ChunkCoord, ChunkState, MeshResult};
+use crate::chunk::{Chunk, ChunkCoord, ChunkState, MeshResult};
 use crate::lod::LODConfig;
 use crate::mesh_worker::MeshRequest;
 use crate::noise_field::NoiseField;
+use crate::terrain_modifications::ModificationLayer;
+use crate::texture_layer::TextureLayer;
 
 pub struct ChunkManager {
     chunks: HashMap<ChunkCoord, Chunk>,
@@ -57,12 +59,23 @@ impl ChunkManager {
         camera_pos: [f32; 3],
         noise_field: &Arc<NoiseField>,
     ) -> Vec<MeshResult> {
+        self.update_with_layers(camera_pos, noise_field, None, None)
+    }
+
+    /// Update with optional modification and texture layers
+    pub fn update_with_layers(
+        &mut self,
+        camera_pos: [f32; 3],
+        noise_field: &Arc<NoiseField>,
+        modifications: Option<&Arc<ModificationLayer>>,
+        textures: Option<&Arc<TextureLayer>>,
+    ) -> Vec<MeshResult> {
         self.current_frame += 1;
         let desired = self.compute_desired_chunks(camera_pos);
 
         let mut requests_sent = 0;
         for (coord, desired_lod) in &desired {
-            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field, &desired) {
+            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field, &desired, modifications, textures) {
                 requests_sent += 1;
             }
         }
@@ -138,9 +151,14 @@ impl ChunkManager {
         desired_lod: u8,
         noise_field: &Arc<NoiseField>,
         desired: &HashMap<ChunkCoord, u8>,
+        modifications: Option<&Arc<ModificationLayer>>,
+        textures: Option<&Arc<TextureLayer>>,
     ) -> bool {
         let needs_request = match self.chunks.get(&coord) {
-            Some(chunk) => chunk.lod_level != desired_lod && chunk.state != ChunkState::Pending,
+            Some(chunk) => {
+                chunk.state == ChunkState::Unloaded
+                    || (chunk.lod_level != desired_lod && chunk.state != ChunkState::Pending)
+            }
             None => true,
         };
 
@@ -154,6 +172,8 @@ impl ChunkManager {
                 noise_field: Arc::clone(noise_field),
                 base_voxel_size: self.base_voxel_size,
                 chunk_size: self.chunk_size(),
+                modifications: modifications.map(Arc::clone),
+                textures: textures.map(Arc::clone),
             };
 
             if self.request_tx.try_send(request).is_ok() {
@@ -237,6 +257,43 @@ impl ChunkManager {
 
     pub fn clear_all_chunks(&mut self) {
         self.chunks.clear();
+    }
+
+    /// Mark chunks as needing regeneration (e.g., after terrain modifications)
+    /// Returns the number of chunks marked dirty
+    pub fn mark_chunks_dirty(&mut self, coords: &[ChunkCoord]) -> usize {
+        let mut count = 0;
+        for coord in coords {
+            if let Some(chunk) = self.chunks.get_mut(coord) {
+                // Reset to trigger re-request on next update
+                if chunk.state == ChunkState::Active || chunk.state == ChunkState::Ready {
+                    chunk.state = ChunkState::Unloaded;
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Force regeneration of a specific chunk
+    pub fn request_chunk_regeneration(
+        &mut self,
+        coord: ChunkCoord,
+        noise_field: &Arc<NoiseField>,
+        modifications: Option<&Arc<ModificationLayer>>,
+        textures: Option<&Arc<TextureLayer>>,
+    ) -> bool {
+        // Mark as unloaded to force re-request
+        if let Some(chunk) = self.chunks.get_mut(&coord) {
+            chunk.state = ChunkState::Unloaded;
+        }
+
+        // Get desired LOD from current chunk or default to 0
+        let desired_lod = self.chunks.get(&coord).map_or(0, |c| c.lod_level);
+
+        // Create empty desired map for transition calculation (simplified)
+        let desired = HashMap::new();
+        self.ensure_chunk_requested(coord, desired_lod, noise_field, &desired, modifications, textures)
     }
 
     pub fn chunk_count(&self) -> usize {
@@ -351,6 +408,7 @@ mod tests {
             normals: vec![[0.0, 1.0, 0.0]],
             indices: vec![0],
             transition_sides: 0,
+            colors: vec![[1.0, 0.0, 0.0, 0.0]],
         };
         res_tx.send(result).unwrap();
 

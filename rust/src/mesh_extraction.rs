@@ -5,6 +5,8 @@ use transvoxel::voxel_source::{Block, BlockDims};
 
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::noise_field::NoiseField;
+use crate::terrain_modifications::ModificationLayer;
+use crate::texture_layer::TextureLayer;
 
 /// Extract mesh for a single chunk
 pub fn extract_chunk_mesh(
@@ -14,12 +16,14 @@ pub fn extract_chunk_mesh(
     base_voxel_size: f32,
     chunk_size: f32,
     transition_sides: u8,
+    modifications: Option<&ModificationLayer>,
+    textures: Option<&TextureLayer>,
 ) -> MeshResult {
     let origin = coord.to_world_position(chunk_size);
     let voxel_size = base_voxel_size * (1 << lod_level) as f32;
     let subdivisions = (chunk_size / voxel_size) as usize;
 
-    // Block defines hte world region to extract
+    // Block defines the world region to extract
     let block = Block {
         dims: BlockDims {
             base: [origin[0], origin[1], origin[2]],
@@ -31,7 +35,14 @@ pub fn extract_chunk_mesh(
     let transitions = transition_sides_from_u8(transition_sides);
 
     // Closure implements DataField automatically
-    let mut field = |x: f32, y: f32, z: f32| -> f32 { noise.sample(x, y, z) };
+    // Use sample_with_mods if modifications are provided
+    let mut field = |x: f32, y: f32, z: f32| -> f32 {
+        if let Some(mods) = modifications {
+            noise.sample_with_mods(x, y, z, mods)
+        } else {
+            noise.sample(x, y, z)
+        }
+    };
 
     let builder = extract_from_field(
         &mut field,
@@ -65,6 +76,20 @@ pub fn extract_chunk_mesh(
         })
         .collect();
 
+    // Generate vertex colors from texture layer
+    let colors: Vec<[f32; 4]> = if let Some(tex_layer) = textures {
+        vertices
+            .iter()
+            .map(|v| {
+                let weights = tex_layer.sample(v[0], v[1], v[2]);
+                weights.to_color()
+            })
+            .collect()
+    } else {
+        // Default: full weight on texture 0
+        vec![[1.0, 0.0, 0.0, 0.0]; vertices.len()]
+    };
+
     let indices: Vec<i32> = mesh.triangle_indices.iter().map(|&i| i as i32).collect();
 
     MeshResult {
@@ -74,6 +99,7 @@ pub fn extract_chunk_mesh(
         normals,
         indices,
         transition_sides,
+        colors,
     }
 }
 

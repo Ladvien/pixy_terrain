@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::mesh_extraction::extract_chunk_mesh;
 use crate::noise_field::NoiseField;
+use crate::terrain_modifications::ModificationLayer;
+use crate::texture_layer::TextureLayer;
 
 // Debug counters
 static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
@@ -30,6 +32,10 @@ pub struct MeshRequest {
     pub noise_field: Arc<NoiseField>,
     pub base_voxel_size: f32,
     pub chunk_size: f32,
+    /// Optional modification layer for terrain edits
+    pub modifications: Option<Arc<ModificationLayer>>,
+    /// Optional texture layer for multi-texture blending
+    pub textures: Option<Arc<TextureLayer>>,
 }
 
 /// Worker pool for parallel mesh generation
@@ -148,6 +154,8 @@ fn generate_mesh_for_request(request: &MeshRequest) -> MeshResult {
         request.base_voxel_size,
         request.chunk_size,
         request.transition_sides,
+        request.modifications.as_deref(),
+        request.textures.as_deref(),
     )
 }
 
@@ -217,6 +225,8 @@ mod tests {
             noise_field: noise,
             base_voxel_size: 1.0,
             chunk_size: 32.0,
+            modifications: None,
+            textures: None,
         };
 
         pool.request_sender()
@@ -252,6 +262,8 @@ mod tests {
                 noise_field: Arc::clone(&noise),
                 base_voxel_size: 1.0,
                 chunk_size: 32.0,
+                modifications: None,
+                textures: None,
             };
             pool.request_sender().send(request).unwrap();
         }
@@ -280,6 +292,8 @@ mod tests {
                 noise_field: Arc::clone(&noise),
                 base_voxel_size: 1.0,
                 chunk_size: 32.0,
+                modifications: None,
+                textures: None,
             };
 
             match pool.request_sender().try_send(request) {

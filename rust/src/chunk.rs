@@ -49,6 +49,8 @@ pub struct MeshResult {
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<i32>,
     pub transition_sides: u8,
+    /// Vertex colors for texture blending (RGBA = texture weights for 4 textures)
+    pub colors: Vec<[f32; 4]>,
 }
 
 impl MeshResult {

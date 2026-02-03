@@ -7,12 +7,15 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::brush::{Brush, BrushAction, BrushMode, BrushPhase, BrushShape};
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
 use crate::lod::LODConfig;
 use crate::mesh_postprocess::{CombinedMesh, MeshPostProcessor};
 use crate::mesh_worker::MeshWorkerPool;
 use crate::noise_field::NoiseField;
+use crate::terrain_modifications::ModificationLayer;
+use crate::texture_layer::TextureLayer;
 type VariantArray = Array<Variant>;
 
 /// Main terrain editor node - displays voxel-based terrain using transvoxel meshing
@@ -137,6 +140,40 @@ pub struct PixyTerrain {
     auto_process_on_export: bool,
 
     // ════════════════════════════════════════════════
+    // Brush Settings
+    // ════════════════════════════════════════════════
+    #[export_group(name = "Brush Settings")]
+    /// Enable brush painting mode
+    #[export]
+    #[init(val = false)]
+    brush_enabled: bool,
+
+    /// Brush operating mode: 0 = Geometry, 1 = Texture
+    #[export]
+    #[init(val = 0)]
+    brush_mode: i32,
+
+    /// Brush shape: 0 = Square, 1 = Round
+    #[export]
+    #[init(val = 1)]
+    brush_shape: i32,
+
+    /// Brush size in world units
+    #[export]
+    #[init(val = 5.0)]
+    brush_size: f32,
+
+    /// Brush strength (0-1)
+    #[export]
+    #[init(val = 1.0)]
+    brush_strength: f32,
+
+    /// Selected texture index for texture painting (0-3)
+    #[export]
+    #[init(val = 0)]
+    selected_texture_index: i32,
+
+    // ════════════════════════════════════════════════
     // Debug
     // ════════════════════════════════════════════════
     #[export_group(name = "Debug")]
@@ -250,6 +287,18 @@ pub struct PixyTerrain {
 
     #[init(val = None)]
     cached_material: Option<Gd<Material>>,
+
+    /// Terrain modification layer (sparse storage of brush edits)
+    #[init(val = None)]
+    modification_layer: Option<Arc<ModificationLayer>>,
+
+    /// Texture layer for multi-texture painting
+    #[init(val = None)]
+    texture_layer: Option<Arc<TextureLayer>>,
+
+    /// Brush state machine
+    #[init(val = None)]
+    brush: Option<Brush>,
 }
 
 #[godot_api]
@@ -445,6 +494,20 @@ impl PixyTerrain {
         self.worker_pool = Some(worker_pool);
         self.chunk_manager = Some(chunk_manager);
 
+        // Create modification and texture layers
+        let resolution = self.chunk_subdivisions.max(1) as u32;
+        self.modification_layer = Some(Arc::new(ModificationLayer::new(resolution, self.voxel_size)));
+        self.texture_layer = Some(Arc::new(TextureLayer::new(resolution, self.voxel_size)));
+
+        // Initialize brush with current settings
+        let mut brush = Brush::new(self.voxel_size);
+        brush.set_mode(if self.brush_mode == 0 { BrushMode::Geometry } else { BrushMode::Texture });
+        brush.set_shape(if self.brush_shape == 0 { BrushShape::Square } else { BrushShape::Round });
+        brush.set_size(self.brush_size);
+        brush.set_strength(self.brush_strength);
+        brush.set_selected_texture(self.selected_texture_index.max(0) as usize);
+        self.brush = Some(brush);
+
         self.initialized = true;
 
         godot_print!(
@@ -465,7 +528,12 @@ impl PixyTerrain {
         let new_meshes = if let (Some(ref mut manager), Some(ref noise)) =
             (&mut self.chunk_manager, &self.noise_field)
         {
-            manager.update(camera_pos, noise)
+            manager.update_with_layers(
+                camera_pos,
+                noise,
+                self.modification_layer.as_ref(),
+                self.texture_layer.as_ref(),
+            )
         } else {
             Vec::new()
         };
@@ -532,6 +600,15 @@ impl PixyTerrain {
                 .collect::<Vec<_>>()[..],
         );
 
+        // Vertex colors for texture blending (RGBA = texture weights)
+        let colors = PackedColorArray::from(
+            &result
+                .colors
+                .iter()
+                .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]))
+                .collect::<Vec<_>>()[..],
+        );
+
         let indices = PackedInt32Array::from(&result.indices[..]);
 
         let mut mesh = ArrayMesh::new_gd();
@@ -543,6 +620,8 @@ impl PixyTerrain {
                 arrays.push(&vertices.to_variant());
             } else if i == ArrayType::NORMAL.ord() as usize {
                 arrays.push(&normals.to_variant());
+            } else if i == ArrayType::COLOR.ord() as usize {
+                arrays.push(&colors.to_variant());
             } else if i == ArrayType::INDEX.ord() as usize {
                 arrays.push(&indices.to_variant());
             } else {
@@ -717,6 +796,9 @@ impl PixyTerrain {
         self.worker_pool = None;
         self.chunk_manager = None;
         self.noise_field = None;
+        self.modification_layer = None;
+        self.texture_layer = None;
+        self.brush = None;
         self.initialized = false;
     }
 
@@ -938,6 +1020,147 @@ impl PixyTerrain {
 
         dict
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Brush Methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Begin a brush stroke at the given world position
+    /// Returns true if brush stroke started successfully
+    #[func]
+    pub fn brush_begin(&mut self, world_pos: Vector3) -> bool {
+        if !self.brush_enabled || !self.initialized {
+            return false;
+        }
+
+        // Update brush settings from exports
+        if let Some(ref mut brush) = self.brush {
+            brush.set_mode(if self.brush_mode == 0 { BrushMode::Geometry } else { BrushMode::Texture });
+            brush.set_shape(if self.brush_shape == 0 { BrushShape::Square } else { BrushShape::Round });
+            brush.set_size(self.brush_size);
+            brush.set_strength(self.brush_strength);
+            brush.set_selected_texture(self.selected_texture_index.max(0) as usize);
+
+            brush.begin_stroke(world_pos.x, world_pos.y, world_pos.z);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Continue a brush stroke (during drag)
+    #[func]
+    pub fn brush_continue(&mut self, world_pos: Vector3) {
+        if let Some(ref mut brush) = self.brush {
+            brush.continue_stroke(world_pos.x, world_pos.y, world_pos.z);
+        }
+    }
+
+    /// End the current brush stroke phase
+    /// Returns the action to take (0=None, 1=BeginHeightAdjust, 2=CommitGeometry, 3=CommitTexture)
+    #[func]
+    pub fn brush_end(&mut self, screen_y: f32) -> i32 {
+        if let Some(ref mut brush) = self.brush {
+            let action = brush.end_stroke(screen_y);
+            match action {
+                BrushAction::None => 0,
+                BrushAction::BeginHeightAdjust => 1,
+                BrushAction::CommitGeometry => {
+                    self.commit_geometry_modification();
+                    2
+                }
+                BrushAction::CommitTexture => {
+                    self.commit_texture_modification();
+                    3
+                }
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Update height delta during geometry mode height adjustment
+    #[func]
+    pub fn brush_adjust_height(&mut self, screen_y: f32) {
+        if let Some(ref mut brush) = self.brush {
+            brush.adjust_height(screen_y);
+        }
+    }
+
+    /// Cancel the current brush operation
+    #[func]
+    pub fn brush_cancel(&mut self) {
+        if let Some(ref mut brush) = self.brush {
+            brush.cancel();
+        }
+    }
+
+    /// Check if brush is currently active (in a non-idle phase)
+    #[func]
+    pub fn is_brush_active(&self) -> bool {
+        self.brush.as_ref().map_or(false, |b| b.is_active())
+    }
+
+    /// Get current brush phase (0=Idle, 1=PaintingArea, 2=AdjustingHeight, 3=Painting)
+    #[func]
+    pub fn get_brush_phase(&self) -> i32 {
+        if let Some(ref brush) = self.brush {
+            match brush.phase {
+                BrushPhase::Idle => 0,
+                BrushPhase::PaintingArea => 1,
+                BrushPhase::AdjustingHeight => 2,
+                BrushPhase::Painting => 3,
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Get brush footprint preview positions as PackedVector3Array
+    #[func]
+    pub fn get_brush_preview_positions(&self, world_y: f32) -> PackedVector3Array {
+        if let Some(ref brush) = self.brush {
+            let positions = brush.get_preview_positions(world_y);
+            PackedVector3Array::from(
+                &positions
+                    .iter()
+                    .map(|(x, y, z)| Vector3::new(*x, *y, *z))
+                    .collect::<Vec<_>>()[..],
+            )
+        } else {
+            PackedVector3Array::new()
+        }
+    }
+
+    /// Get current brush height delta (for geometry mode preview)
+    #[func]
+    pub fn get_brush_height_delta(&self) -> f32 {
+        self.brush.as_ref().map_or(0.0, |b| b.footprint.height_delta)
+    }
+
+    /// Clear all terrain modifications (brush edits)
+    #[func]
+    pub fn clear_modifications(&mut self) {
+        // Create fresh layers
+        let resolution = self.chunk_subdivisions.max(1) as u32;
+        self.modification_layer = Some(Arc::new(ModificationLayer::new(resolution, self.voxel_size)));
+        self.texture_layer = Some(Arc::new(TextureLayer::new(resolution, self.voxel_size)));
+
+        // Regenerate all chunks
+        self.regenerate();
+    }
+
+    /// Get total number of terrain modifications
+    #[func]
+    pub fn get_modification_count(&self) -> i64 {
+        self.modification_layer.as_ref().map_or(0, |m| m.total_modifications()) as i64
+    }
+
+    /// Get total number of textured voxels
+    #[func]
+    pub fn get_texture_count(&self) -> i64 {
+        self.texture_layer.as_ref().map_or(0, |t| t.total_textured()) as i64
+    }
 }
 
 impl PixyTerrain {
@@ -981,6 +1204,7 @@ impl PixyTerrain {
             normals: combined.normals.clone(),
             indices: combined.indices.iter().map(|&i| i as i32).collect(),
             transition_sides: 0,
+            colors: vec![[1.0, 0.0, 0.0, 0.0]; combined.vertices.len()],
         };
         self.uploaded_meshes.insert(combined_coord, mesh_result);
     }
@@ -1087,5 +1311,73 @@ impl PixyTerrain {
         }
 
         Ok(())
+    }
+
+    /// Commit geometry modification from brush to modification layer
+    fn commit_geometry_modification(&mut self) {
+        let Some(ref brush) = self.brush else { return };
+        let Some(ref mod_layer) = self.modification_layer else { return };
+
+        // Clone the mod layer to get a mutable version
+        let mut new_mod_layer = (**mod_layer).clone();
+        let affected_chunks = brush.apply_geometry(&mut new_mod_layer);
+
+        // Store the updated layer
+        self.modification_layer = Some(Arc::new(new_mod_layer));
+
+        // Mark affected chunks for regeneration
+        self.mark_chunks_for_regeneration(&affected_chunks);
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Committed geometry modification, {} chunks affected, {} total mods",
+                affected_chunks.len(),
+                self.modification_layer.as_ref().map_or(0, |m| m.total_modifications())
+            );
+        }
+    }
+
+    /// Commit texture modification from brush to texture layer
+    fn commit_texture_modification(&mut self) {
+        let Some(ref brush) = self.brush else { return };
+        let Some(ref tex_layer) = self.texture_layer else { return };
+
+        // Clone the texture layer to get a mutable version
+        let mut new_tex_layer = (**tex_layer).clone();
+        let affected_chunks = brush.apply_texture(&mut new_tex_layer);
+
+        // Store the updated layer
+        self.texture_layer = Some(Arc::new(new_tex_layer));
+
+        // Mark affected chunks for regeneration
+        self.mark_chunks_for_regeneration(&affected_chunks);
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Committed texture modification, {} chunks affected, {} total textured",
+                affected_chunks.len(),
+                self.texture_layer.as_ref().map_or(0, |t| t.total_textured())
+            );
+        }
+    }
+
+    /// Mark chunks for regeneration after brush modifications
+    fn mark_chunks_for_regeneration(&mut self, chunks: &[ChunkCoord]) {
+        if chunks.is_empty() {
+            return;
+        }
+
+        // Remove affected chunk nodes to force re-upload
+        for coord in chunks {
+            if let Some(mut node) = self.chunk_nodes.remove(coord) {
+                node.queue_free();
+            }
+            self.uploaded_meshes.remove(coord);
+        }
+
+        // Mark chunks dirty in the chunk manager
+        if let Some(ref mut manager) = self.chunk_manager {
+            manager.mark_chunks_dirty(chunks);
+        }
     }
 }
