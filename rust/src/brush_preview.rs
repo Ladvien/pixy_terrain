@@ -8,12 +8,12 @@ use godot::classes::rendering_server::ArrayType;
 use godot::classes::{ArrayMesh, Shader, ShaderMaterial};
 use godot::prelude::*;
 
-use crate::brush::{Brush, BrushMode, BrushPhase};
+use crate::brush::{Brush, BrushMode, BrushPhase, BrushShape};
 
 /// Shader source for brush preview visualization
 const BRUSH_PREVIEW_SHADER: &str = r#"
 shader_type spatial;
-render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+render_mode blend_add, depth_draw_never, depth_test_disabled, cull_disabled, unshaded;
 
 uniform vec4 brush_color : source_color = vec4(0.0, 0.8, 1.0, 0.3);
 uniform vec4 height_positive_color : source_color = vec4(0.0, 1.0, 0.0, 0.3);
@@ -44,7 +44,7 @@ void fragment() {
 /// Shader source for the height plane visualization (transparent quad at target height)
 const HEIGHT_PLANE_SHADER: &str = r#"
 shader_type spatial;
-render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+render_mode blend_add, depth_draw_never, depth_test_disabled, cull_disabled, unshaded;
 
 uniform vec4 plane_color : source_color = vec4(0.0, 1.0, 0.0, 0.25);
 
@@ -60,10 +60,16 @@ void fragment() {
 /// Colors for different brush modes and phases
 #[derive(Clone, Copy, Debug)]
 pub struct BrushColors {
-    /// Color for geometry mode brush
-    pub geometry_color: [f32; 4],
+    /// Color for elevation mode brush
+    pub elevation_color: [f32; 4],
     /// Color for texture mode brush
     pub texture_color: [f32; 4],
+    /// Color for flatten mode brush
+    pub flatten_color: [f32; 4],
+    /// Color for plateau mode brush
+    pub plateau_color: [f32; 4],
+    /// Color for smooth mode brush
+    pub smooth_color: [f32; 4],
     /// Color for positive height delta (raising terrain)
     pub height_positive: [f32; 4],
     /// Color for negative height delta (lowering terrain)
@@ -73,10 +79,13 @@ pub struct BrushColors {
 impl Default for BrushColors {
     fn default() -> Self {
         Self {
-            geometry_color: [0.0, 0.8, 1.0, 0.3],   // Cyan
-            texture_color: [1.0, 0.5, 0.0, 0.3],    // Orange
-            height_positive: [0.0, 1.0, 0.0, 0.3],  // Green
-            height_negative: [1.0, 0.0, 0.0, 0.3],  // Red
+            elevation_color: [0.0, 0.8, 1.0, 0.3], // Cyan
+            texture_color: [1.0, 0.5, 0.0, 0.3],   // Orange
+            flatten_color: [0.8, 0.8, 0.0, 0.3],   // Yellow
+            plateau_color: [0.8, 0.0, 0.8, 0.3],   // Purple
+            smooth_color: [0.0, 0.8, 0.4, 0.3],    // Green-teal
+            height_positive: [0.0, 1.0, 0.0, 0.3], // Green
+            height_negative: [1.0, 0.0, 0.0, 0.3], // Red
         }
     }
 }
@@ -119,10 +128,10 @@ impl BrushPreview {
         material.set_shader_parameter(
             "brush_color",
             &Color::from_rgba(
-                self.colors.geometry_color[0],
-                self.colors.geometry_color[1],
-                self.colors.geometry_color[2],
-                self.colors.geometry_color[3],
+                self.colors.elevation_color[0],
+                self.colors.elevation_color[1],
+                self.colors.elevation_color[2],
+                self.colors.elevation_color[3],
             )
             .to_variant(),
         );
@@ -160,8 +169,11 @@ impl BrushPreview {
 
         // Set color based on mode
         let color = match brush.mode {
-            BrushMode::Geometry => self.colors.geometry_color,
+            BrushMode::Elevation => self.colors.elevation_color,
             BrushMode::Texture => self.colors.texture_color,
+            BrushMode::Flatten => self.colors.flatten_color,
+            BrushMode::Plateau => self.colors.plateau_color,
+            BrushMode::Smooth => self.colors.smooth_color,
         };
         material.set_shader_parameter(
             "brush_color",
@@ -169,7 +181,8 @@ impl BrushPreview {
         );
 
         // Set height preview parameters
-        let show_height = brush.phase == BrushPhase::AdjustingHeight;
+        let show_height = brush.phase == BrushPhase::AdjustingHeight
+            || brush.phase == BrushPhase::AdjustingCurvature;
         material.set_shader_parameter("show_height_preview", &show_height.to_variant());
         material.set_shader_parameter("height_delta", &brush.footprint.height_delta.to_variant());
     }
@@ -182,7 +195,7 @@ impl BrushPreview {
 
         self.ensure_material();
 
-        let positions = brush.get_preview_positions(brush.footprint.base_y + 0.1);
+        let positions = brush.get_preview_positions(brush.footprint.base_y);
         if positions.is_empty() {
             return None;
         }
@@ -285,19 +298,23 @@ impl BrushPreview {
         max_z: f32,
         y: f32,
     ) -> Gd<ArrayMesh> {
-        let vertices = PackedVector3Array::from(&[
-            Vector3::new(min_x, y, min_z),
-            Vector3::new(max_x, y, min_z),
-            Vector3::new(max_x, y, max_z),
-            Vector3::new(min_x, y, max_z),
-        ][..]);
+        let vertices = PackedVector3Array::from(
+            &[
+                Vector3::new(min_x, y, min_z),
+                Vector3::new(max_x, y, min_z),
+                Vector3::new(max_x, y, max_z),
+                Vector3::new(min_x, y, max_z),
+            ][..],
+        );
 
-        let normals = PackedVector3Array::from(&[
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, 1.0, 0.0),
-        ][..]);
+        let normals = PackedVector3Array::from(
+            &[
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ][..],
+        );
 
         let indices = PackedInt32Array::from(&[0, 1, 2, 0, 2, 3][..]);
 
@@ -320,6 +337,124 @@ impl BrushPreview {
         mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
         mesh
     }
+    /// Generate a tessellated quad mesh with curvature applied to vertex heights.
+    ///
+    /// curvature > 0: dome (center higher than edges)
+    /// curvature < 0: bowl (center lower than edges)
+    /// curvature == 0: flat plane
+    pub fn generate_curved_height_plane_mesh(
+        min_x: f32,
+        max_x: f32,
+        min_z: f32,
+        max_z: f32,
+        base_y: f32,
+        height_delta: f32,
+        curvature: f32,
+        brush_size: f32,
+        brush_shape: BrushShape,
+    ) -> Gd<ArrayMesh> {
+        let subdivisions: usize = 16;
+        let cx = (min_x + max_x) * 0.5;
+        let cz = (min_z + max_z) * 0.5;
+        let radius = brush_size;
+
+        let num_verts = (subdivisions + 1) * (subdivisions + 1);
+        let mut vertices = Vec::with_capacity(num_verts);
+        let mut normals = Vec::with_capacity(num_verts);
+        let mut indices = Vec::with_capacity(subdivisions * subdivisions * 6);
+
+        let dx = (max_x - min_x) / subdivisions as f32;
+        let dz = (max_z - min_z) / subdivisions as f32;
+
+        // Generate vertices
+        for iz in 0..=subdivisions {
+            for ix in 0..=subdivisions {
+                let x = min_x + ix as f32 * dx;
+                let z = min_z + iz as f32 * dz;
+
+                let dist = match brush_shape {
+                    BrushShape::Round => ((x - cx).powi(2) + (z - cz).powi(2)).sqrt(),
+                    BrushShape::Square => (x - cx).abs().max((z - cz).abs()),
+                };
+                let ratio = (dist / radius).clamp(0.0, 1.0);
+
+                let curvature_factor = if curvature.abs() > 0.001 {
+                    let t = Brush::smootherstep(ratio);
+                    if curvature > 0.0 {
+                        1.0 - curvature * t
+                    } else {
+                        1.0 + curvature * (1.0 - t)
+                    }
+                } else {
+                    1.0
+                };
+
+                let y = base_y + height_delta * curvature_factor;
+                vertices.push(Vector3::new(x, y, z));
+                // Normals will be computed per-face below
+                normals.push(Vector3::new(0.0, 1.0, 0.0));
+            }
+        }
+
+        // Generate indices
+        let row = (subdivisions + 1) as i32;
+        for iz in 0..subdivisions {
+            for ix in 0..subdivisions {
+                let i = (iz * (subdivisions + 1) + ix) as i32;
+                // Triangle 1
+                indices.push(i);
+                indices.push(i + row);
+                indices.push(i + 1);
+                // Triangle 2
+                indices.push(i + 1);
+                indices.push(i + row);
+                indices.push(i + row + 1);
+            }
+        }
+
+        // Compute per-vertex normals from adjacent faces
+        let mut normal_accum = vec![Vector3::ZERO; vertices.len()];
+        for tri in indices.chunks(3) {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let v0 = vertices[i0];
+            let v1 = vertices[i1];
+            let v2 = vertices[i2];
+            let edge1 = v1 - v0;
+            let edge2 = v2 - v0;
+            let face_normal = edge1.cross(edge2);
+            normal_accum[i0] += face_normal;
+            normal_accum[i1] += face_normal;
+            normal_accum[i2] += face_normal;
+        }
+        for (i, n) in normal_accum.iter().enumerate() {
+            let len = n.length();
+            normals[i] = if len > 0.0001 { *n / len } else { Vector3::UP };
+        }
+
+        // Build mesh
+        let packed_vertices = PackedVector3Array::from(&vertices[..]);
+        let packed_normals = PackedVector3Array::from(&normals[..]);
+        let packed_indices = PackedInt32Array::from(&indices[..]);
+
+        let mut mesh = ArrayMesh::new_gd();
+        let num_arrays = ArrayType::MAX.ord() as usize;
+        let mut arrays: Array<Variant> = Array::new();
+
+        for i in 0..num_arrays {
+            if i == ArrayType::VERTEX.ord() as usize {
+                arrays.push(&packed_vertices.to_variant());
+            } else if i == ArrayType::NORMAL.ord() as usize {
+                arrays.push(&packed_normals.to_variant());
+            } else if i == ArrayType::INDEX.ord() as usize {
+                arrays.push(&packed_indices.to_variant());
+            } else {
+                arrays.push(&Variant::nil());
+            }
+        }
+
+        mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+        mesh
+    }
 }
 
 #[cfg(test)]
@@ -329,7 +464,7 @@ mod tests {
     #[test]
     fn test_brush_colors_default() {
         let colors = BrushColors::default();
-        assert!(colors.geometry_color[3] > 0.0); // Has alpha
+        assert!(colors.elevation_color[3] > 0.0); // Has alpha
         assert!(colors.texture_color[3] > 0.0);
     }
 

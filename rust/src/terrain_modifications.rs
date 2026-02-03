@@ -170,7 +170,13 @@ impl ModificationLayer {
     }
 
     /// Convert local cell position and chunk to world position (cell center)
-    pub fn local_to_world(&self, chunk: ChunkCoord, local_x: u32, local_y: u32, local_z: u32) -> (f32, f32, f32) {
+    pub fn local_to_world(
+        &self,
+        chunk: ChunkCoord,
+        local_x: u32,
+        local_y: u32,
+        local_z: u32,
+    ) -> (f32, f32, f32) {
         let world_x = chunk.x as f32 * self.chunk_size + (local_x as f32 + 0.5) * self.voxel_size;
         let world_y = chunk.y as f32 * self.chunk_size + (local_y as f32 + 0.5) * self.voxel_size;
         let world_z = chunk.z as f32 * self.chunk_size + (local_z as f32 + 0.5) * self.voxel_size;
@@ -193,7 +199,9 @@ impl ModificationLayer {
         let chunk = self.world_to_chunk(x, y, z);
         let local_index = self.world_to_local_index(x, y, z);
 
-        self.chunks.get(&chunk).and_then(|mods| mods.get(local_index))
+        self.chunks
+            .get(&chunk)
+            .and_then(|mods| mods.get(local_index))
     }
 
     /// Remove modification at a world position
@@ -319,11 +327,17 @@ mod tests {
         assert_eq!(lower_mod.apply(base_sdf), 7.0); // 5.0 + 2.0 = 7.0
 
         // Partial blend
-        let partial_mod = VoxelMod { sdf_delta: -10.0, blend: 0.5 };
+        let partial_mod = VoxelMod {
+            sdf_delta: -10.0,
+            blend: 0.5,
+        };
         assert_eq!(partial_mod.apply(base_sdf), 0.0); // 5.0 + (-10.0 * 0.5) = 0.0
 
         // Zero blend (no effect)
-        let no_effect = VoxelMod { sdf_delta: -10.0, blend: 0.0 };
+        let no_effect = VoxelMod {
+            sdf_delta: -10.0,
+            blend: 0.0,
+        };
         assert_eq!(no_effect.apply(base_sdf), 5.0);
     }
 
@@ -379,7 +393,10 @@ mod tests {
 
         // Sample at the exact position should return the modification
         let sample = layer.sample(10.5, 10.5, 10.5);
-        assert!(sample < 0.0, "Should have negative delta for raised terrain");
+        assert!(
+            sample < 0.0,
+            "Should have negative delta for raised terrain"
+        );
 
         // Sample far away should return 0
         let far_sample = layer.sample(100.0, 100.0, 100.0);

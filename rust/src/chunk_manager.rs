@@ -75,7 +75,14 @@ impl ChunkManager {
 
         let mut requests_sent = 0;
         for (coord, desired_lod) in &desired {
-            if self.ensure_chunk_requested(*coord, *desired_lod, noise_field, &desired, modifications, textures) {
+            if self.ensure_chunk_requested(
+                *coord,
+                *desired_lod,
+                noise_field,
+                &desired,
+                modifications,
+                textures,
+            ) {
                 requests_sent += 1;
             }
         }
@@ -293,7 +300,14 @@ impl ChunkManager {
 
         // Create empty desired map for transition calculation (simplified)
         let desired = HashMap::new();
-        self.ensure_chunk_requested(coord, desired_lod, noise_field, &desired, modifications, textures)
+        self.ensure_chunk_requested(
+            coord,
+            desired_lod,
+            noise_field,
+            &desired,
+            modifications,
+            textures,
+        )
     }
 
     pub fn chunk_count(&self) -> usize {
@@ -324,7 +338,9 @@ mod tests {
     }
 
     fn test_noise() -> Arc<crate::noise_field::NoiseField> {
-        Arc::new(crate::noise_field::NoiseField::new(42, 4, 0.02, 10.0, 0.0, 32.0, None))
+        Arc::new(crate::noise_field::NoiseField::new(
+            42, 4, 0.02, 10.0, 0.0, 32.0, None,
+        ))
     }
 
     #[test]
@@ -540,25 +556,10 @@ mod tests {
         println!("Z=10 chunks (wall): {}", z_max.len());
 
         // All boundary chunks should be present (view distance is 512 > terrain size 320)
-        assert!(
-            !x_neg1.is_empty(),
-            "Should have X=-1 wall chunks"
-        );
-        assert!(
-            !z_neg1.is_empty(),
-            "Should have Z=-1 wall chunks"
-        );
-        assert!(
-            !y_neg1.is_empty(),
-            "Should have Y=-1 floor chunks"
-        );
-        assert!(
-            !x_max.is_empty(),
-            "Should have X=max wall chunks"
-        );
-        assert!(
-            !z_max.is_empty(),
-            "Should have Z=max wall chunks"
-        );
+        assert!(!x_neg1.is_empty(), "Should have X=-1 wall chunks");
+        assert!(!z_neg1.is_empty(), "Should have Z=-1 wall chunks");
+        assert!(!y_neg1.is_empty(), "Should have Y=-1 floor chunks");
+        assert!(!x_max.is_empty(), "Should have X=max wall chunks");
+        assert!(!z_max.is_empty(), "Should have Z=max wall chunks");
     }
 }

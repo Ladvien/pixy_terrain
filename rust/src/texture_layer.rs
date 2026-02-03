@@ -298,7 +298,9 @@ impl TextureLayer {
             for w in &mut total_weights {
                 *w /= total_influence;
             }
-            TextureWeights { weights: total_weights }
+            TextureWeights {
+                weights: total_weights,
+            }
         } else {
             // No texture data - return default
             TextureWeights::default()
@@ -348,7 +350,9 @@ mod tests {
 
     #[test]
     fn test_texture_weights_normalize() {
-        let mut weights = TextureWeights { weights: [2.0, 2.0, 0.0, 0.0] };
+        let mut weights = TextureWeights {
+            weights: [2.0, 2.0, 0.0, 0.0],
+        };
         weights.normalize();
         assert!((weights.weights[0] - 0.5).abs() < 0.001);
         assert!((weights.weights[1] - 0.5).abs() < 0.001);

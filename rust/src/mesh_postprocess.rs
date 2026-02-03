@@ -71,9 +71,12 @@ impl MeshPostProcessor {
                 let (i0, i1, i2) = (tri[0], tri[1], tri[2]);
 
                 // Skip entire triangle if any index is invalid
-                if i0 < 0 || i0 >= chunk_vertex_count
-                    || i1 < 0 || i1 >= chunk_vertex_count
-                    || i2 < 0 || i2 >= chunk_vertex_count
+                if i0 < 0
+                    || i0 >= chunk_vertex_count
+                    || i1 < 0
+                    || i1 >= chunk_vertex_count
+                    || i2 < 0
+                    || i2 >= chunk_vertex_count
                 {
                     continue;
                 }

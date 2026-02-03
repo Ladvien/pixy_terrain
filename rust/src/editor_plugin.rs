@@ -532,6 +532,19 @@ impl IEditorPlugin for PixyTerrainPlugin {
                         self.select_texture(3);
                         return AfterGuiInput::STOP.ord();
                     }
+                    godot::global::Key::Z => {
+                        let ctrl_or_cmd = key_event.is_ctrl_pressed()
+                            || key_event.is_meta_pressed();
+                        if ctrl_or_cmd && key_event.is_shift_pressed() {
+                            // Ctrl+Shift+Z / Cmd+Shift+Z = Redo
+                            self.call_terrain_method("redo");
+                            return AfterGuiInput::STOP.ord();
+                        } else if ctrl_or_cmd {
+                            // Ctrl+Z / Cmd+Z = Undo
+                            self.call_terrain_method("undo");
+                            return AfterGuiInput::STOP.ord();
+                        }
+                    }
                     godot::global::Key::ESCAPE => {
                         if self.is_brush_active() {
                             self.brush_cancel();
@@ -560,9 +573,10 @@ impl IEditorPlugin for PixyTerrainPlugin {
                 self.last_screen_y = screen_pos.y;
 
                 if mouse_button.is_pressed() {
-                    // During height adjustment phase, consume the press
-                    // so the release triggers commit
-                    if self.get_brush_phase() == 2 {
+                    // During height/curvature adjustment phases, consume the press
+                    // so the release triggers the next transition
+                    let phase = self.get_brush_phase();
+                    if phase == 2 || phase == 4 {
                         return AfterGuiInput::STOP.ord();
                     }
                     if let Some(hit_pos) = self.raycast_terrain(&camera, screen_pos) {
@@ -573,7 +587,8 @@ impl IEditorPlugin for PixyTerrainPlugin {
                 } else {
                     if self.brush_dragging || self.is_brush_active() {
                         let action = self.brush_end(screen_pos.y);
-                        if action != 1 {
+                        // Keep dragging for height adjust (1) and curvature adjust (7)
+                        if action != 1 && action != 7 {
                             self.brush_dragging = false;
                         }
                         return AfterGuiInput::STOP.ord();
@@ -595,6 +610,9 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
             if brush_phase == 2 {
                 self.brush_adjust_height(screen_pos.y);
+                return AfterGuiInput::STOP.ord();
+            } else if brush_phase == 4 {
+                self.brush_adjust_curvature(screen_pos.y);
                 return AfterGuiInput::STOP.ord();
             } else if self.brush_dragging && (brush_phase == 1 || brush_phase == 3) {
                 if let Some(hit_pos) = self.raycast_terrain(&camera, screen_pos) {
@@ -1043,6 +1061,10 @@ impl PixyTerrainPlugin {
 
     fn brush_adjust_height(&mut self, screen_y: f32) {
         self.call_terrain_method_with_args("brush_adjust_height", &[screen_y.to_variant()]);
+    }
+
+    fn brush_adjust_curvature(&mut self, screen_y: f32) {
+        self.call_terrain_method_with_args("brush_adjust_curvature", &[screen_y.to_variant()]);
     }
 
     fn brush_cancel(&mut self) {

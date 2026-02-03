@@ -174,7 +174,8 @@ impl NoiseField {
         ];
 
         // Outside distance (when any component is positive)
-        let outside = (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
+        let outside =
+            (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
         // Inside distance (when all components are negative)
         let inside = q[0].max(q[1]).max(q[2]).min(0.0);
 
@@ -430,10 +431,7 @@ mod tests {
         );
         // This chunk has no surface crossings (terrain is above, floor is at boundary)
         // It might be empty or have only wall geometry at X=0, Z=0
-        let has_floor_in_chunk0 = no_floor_result
-            .vertices
-            .iter()
-            .any(|v| v[1].abs() < 1.0);
+        let has_floor_in_chunk0 = no_floor_result.vertices.iter().any(|v| v[1].abs() < 1.0);
         assert!(
             !has_floor_in_chunk0,
             "Chunk (0,0,0) should not have floor vertices at Y=0"
@@ -502,18 +500,18 @@ mod tests {
 
         let box_min = [0.0, 0.0, 0.0];
         let box_max = [
-            map_width as f32 * chunk_size,   // 320
-            map_height as f32 * chunk_size,  // 128
-            map_depth as f32 * chunk_size,   // 320
+            map_width as f32 * chunk_size,  // 320
+            map_height as f32 * chunk_size, // 128
+            map_depth as f32 * chunk_size,  // 320
         ];
 
         let noise = NoiseField::new(
-            42,                    // seed
-            4,                     // octaves
-            0.02,                  // frequency
-            32.0,                  // amplitude (default)
-            0.0,                   // height_offset (default)
-            32.0,                  // terrain_floor_y (default)
+            42,   // seed
+            4,    // octaves
+            0.02, // frequency
+            32.0, // amplitude (default)
+            0.0,  // height_offset (default)
+            32.0, // terrain_floor_y (default)
             Some((box_min, box_max)),
         );
 
@@ -567,7 +565,9 @@ mod tests {
             !wall_chunk.vertices.is_empty(),
             "X=-1 guard chunk should generate wall geometry. \
              SDF at wall: {}, inside: {}, outside: {}",
-            sdf_on_wall, sdf_inside_wall, sdf_outside_wall
+            sdf_on_wall,
+            sdf_inside_wall,
+            sdf_outside_wall
         );
 
         // Test floor chunk Y=-1
@@ -598,7 +598,12 @@ mod tests {
         let box_max = [320.0, 128.0, 320.0];
 
         let noise = NoiseField::new(
-            42, 4, 0.02, 32.0, 0.0, 32.0,
+            42,
+            4,
+            0.02,
+            32.0,
+            0.0,
+            32.0,
             Some(([0.0, 0.0, 0.0], box_max)),
         );
 
@@ -614,8 +619,12 @@ mod tests {
             let chunk = extract_chunk_mesh(
                 &noise,
                 ChunkCoord::new(-1, y, 5), // X=-1 guard chunk, Z=5 (middle)
-                0, 1.0, chunk_size, 0,
-                None, None,
+                0,
+                1.0,
+                chunk_size,
+                0,
+                None,
+                None,
             );
 
             let world_y_min = y as f32 * chunk_size;
@@ -623,7 +632,9 @@ mod tests {
 
             println!(
                 "Chunk (-1, {}, 5) [Y={:.0}..{:.0}]: {} vertices, {} triangles",
-                y, world_y_min, world_y_max,
+                y,
+                world_y_min,
+                world_y_max,
                 chunk.vertices.len(),
                 chunk.indices.len() / 3
             );
@@ -644,8 +655,12 @@ mod tests {
         let y0_chunk = extract_chunk_mesh(
             &noise,
             ChunkCoord::new(-1, 0, 5),
-            0, 1.0, chunk_size, 0,
-            None, None,
+            0,
+            1.0,
+            chunk_size,
+            0,
+            None,
+            None,
         );
         assert!(
             !y0_chunk.vertices.is_empty(),

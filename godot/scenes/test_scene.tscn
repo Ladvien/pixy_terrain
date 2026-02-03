@@ -1,6 +1,10 @@
 [gd_scene format=3 uid="uid://c1234test"]
 
 [ext_resource type="Script" uid="uid://bfrw1dqdf2h30" path="res://scripts/orbit_camera.gd" id="1_orbit"]
+[ext_resource type="Texture2D" uid="uid://bolp4ibeuh1lk" path="res://textures/grass/grass_color.png" id="2_qjeyg"]
+[ext_resource type="Texture2D" uid="uid://bn54w8wie075e" path="res://textures/grass/grass_normal.png" id="3_3qnke"]
+[ext_resource type="Texture2D" uid="uid://bdbg1pbcwsjn" path="res://textures/grass/grass_roughness.png" id="4_wtsjf"]
+[ext_resource type="Texture2D" uid="uid://bfoopscvfiu8w" path="res://textures/grass/grass_ao.png" id="5_rnaij"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -23,8 +27,7 @@ ambient_light_color = Color(0.5, 0.5, 0.5, 1)
 environment = SubResource("Environment_env")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1064348885]
-transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 10, 0)
-shadow_enabled = true
+transform = Transform3D(0.86601907, -0.2500069, 0.43302143, 0.4653979, 0.08642563, -0.88087195, 0.18279994, 0.9643792, 0.19119897, 0, 112.31506, 0)
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1223478353]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 15, 25)
@@ -32,4 +35,14 @@ current = true
 fov = 60.0
 script = ExtResource("1_orbit")
 
-[node name="PixyTerrain" type="PixyTerrain" parent="."]
+[node name="PixyTerrain" type="PixyTerrain" parent="." unique_id=1116637688]
+noise_amplitude = 2.0
+brush_enabled = true
+brush_size = 25.0
+brush_strength = 0.5
+brush_step_size = 6.0
+brush_feather = 0.35
+terrain_albedo = ExtResource("2_qjeyg")
+terrain_normal = ExtResource("3_3qnke")
+terrain_roughness = ExtResource("4_wtsjf")
+terrain_ao = ExtResource("5_rnaij")

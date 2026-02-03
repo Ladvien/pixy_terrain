@@ -61,6 +61,8 @@ pub enum BrushPhase {
     AdjustingHeight,
     /// Texture mode: actively painting texture (click + drag)
     Painting,
+    /// Geometry mode: adjusting curvature after height is set (move up/down for dome/bowl)
+    AdjustingCurvature,
 }
 
 /// A 2D cell position on the terrain (XZ plane)
@@ -254,6 +256,10 @@ pub struct Brush {
     pub feather: f32,
     /// Direction constraint for flatten/plateau operations
     pub flatten_direction: FlattenDirection,
+    /// Curvature amount: -1.0 (bowl) to 1.0 (dome), 0.0 = flat
+    pub curvature: f32,
+    /// Starting mouse Y position for curvature adjustment
+    pub curvature_adjust_start_y: f32,
 }
 
 impl Default for Brush {
@@ -272,6 +278,8 @@ impl Default for Brush {
             step_size: 4.0,
             feather: 0.0,
             flatten_direction: FlattenDirection::Both,
+            curvature: 0.0,
+            curvature_adjust_start_y: 0.0,
         }
     }
 }
@@ -317,6 +325,9 @@ impl Brush {
                 let delta_y = world_y - self.height_adjust_start_y;
                 self.footprint.height_delta = delta_y;
             }
+            BrushPhase::AdjustingCurvature => {
+                // Curvature is adjusted via adjust_curvature(), not world position
+            }
             BrushPhase::Idle => {}
         }
     }
@@ -332,6 +343,13 @@ impl Brush {
                 BrushAction::BeginHeightAdjust
             }
             BrushPhase::AdjustingHeight => {
+                // Transition to curvature adjustment phase
+                self.phase = BrushPhase::AdjustingCurvature;
+                self.curvature_adjust_start_y = screen_y;
+                self.curvature = 0.0;
+                BrushAction::BeginCurvatureAdjust
+            }
+            BrushPhase::AdjustingCurvature => {
                 // Commit the geometry modification
                 self.phase = BrushPhase::Idle;
                 BrushAction::CommitGeometry
@@ -354,6 +372,7 @@ impl Brush {
     pub fn cancel(&mut self) {
         self.footprint.clear();
         self.phase = BrushPhase::Idle;
+        self.curvature = 0.0;
     }
 
     /// Update height delta during adjustment phase
@@ -361,6 +380,15 @@ impl Brush {
         if self.phase == BrushPhase::AdjustingHeight {
             let delta_pixels = screen_y - self.height_adjust_start_y;
             self.footprint.height_delta = -delta_pixels * self.height_sensitivity;
+        }
+    }
+
+    /// Update curvature during curvature adjustment phase
+    pub fn adjust_curvature(&mut self, screen_y: f32) {
+        if self.phase == BrushPhase::AdjustingCurvature {
+            let delta_pixels = screen_y - self.curvature_adjust_start_y;
+            // Down = positive curvature (dome), up = negative (bowl)
+            self.curvature = (delta_pixels * self.height_sensitivity * 0.5).clamp(-1.0, 1.0);
         }
     }
 
@@ -396,7 +424,14 @@ impl Brush {
     }
 
     /// Apply the current geometry modification to the modification layer
-    pub fn apply_geometry(&self, mods: &mut ModificationLayer) -> Vec<ChunkCoord> {
+    ///
+    /// Reads from `existing_mods` to get current state, writes accumulated results to `new_mods`.
+    /// This ensures sequential brush operations stack correctly (e.g., flatten then smooth then elevate).
+    pub fn apply_geometry(
+        &self,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) -> Vec<ChunkCoord> {
         if self.footprint.is_empty() || self.footprint.height_delta.abs() < 0.001 {
             return Vec::new();
         }
@@ -408,7 +443,20 @@ impl Brush {
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
             let falloff = self.compute_falloff(wx, wz, cx, cz);
-            let cell_height = height_delta * falloff;
+            let curvature_factor = if self.curvature.abs() > 0.001 {
+                let dist = ((wx - cx).powi(2) + (wz - cz).powi(2)).sqrt();
+                let ratio = (dist / self.size).clamp(0.0, 1.0);
+                if self.curvature > 0.0 {
+                    // Dome: 1.0 at center, (1-curvature) at edge
+                    1.0 - self.curvature * Self::smootherstep(ratio)
+                } else {
+                    // Bowl: (1+curvature) at center, 1.0 at edge
+                    1.0 + self.curvature * (1.0 - Self::smootherstep(ratio))
+                }
+            } else {
+                1.0
+            };
+            let cell_height = height_delta * falloff * curvature_factor;
 
             let core_min = base_y + cell_height.min(0.0);
             let core_max = base_y + cell_height.max(0.0);
@@ -422,14 +470,19 @@ impl Brush {
                 // Negate for SDF: positive height → negative SDF (adds material),
                 // negative height → positive SDF (removes material)
                 let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
-                let modification = VoxelMod::new(-cell_height * y_falloff, self.strength);
-                mods.set_at_world(wx, y, wz, modification);
+                let existing_mod_val = existing_mods
+                    .get_at_world(wx, y, wz)
+                    .map(|m| m.sdf_delta * m.blend)
+                    .unwrap_or(0.0);
+                let delta = -cell_height * y_falloff * self.strength;
+                let new_mod_val = existing_mod_val + delta;
+                new_mods.set_at_world(wx, y, wz, VoxelMod::new(new_mod_val, 1.0));
                 y += self.voxel_size;
             }
         }
 
         self.footprint
-            .affected_chunks(mods.chunk_size(), self.voxel_size)
+            .affected_chunks(new_mods.chunk_size(), self.voxel_size)
     }
 
     /// Apply the current texture paint to the texture layer
@@ -570,7 +623,10 @@ impl Brush {
             let mut y = y_min;
             while y <= y_max {
                 let noise_base = noise.sample(wx, y, wz);
-                let existing_mod_val = existing_mods.sample(wx, y, wz);
+                let existing_mod_val = existing_mods
+                    .get_at_world(wx, y, wz)
+                    .map(|m| m.sdf_delta * m.blend)
+                    .unwrap_or(0.0);
                 let desired_sdf = y - base_y;
                 let target_mod = desired_sdf - noise_base;
                 let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
@@ -653,7 +709,10 @@ impl Brush {
             let mut y = y_min;
             while y <= y_max {
                 let noise_base = noise.sample(wx, y, wz);
-                let existing_mod_val = existing_mods.sample(wx, y, wz);
+                let existing_mod_val = existing_mods
+                    .get_at_world(wx, y, wz)
+                    .map(|m| m.sdf_delta * m.blend)
+                    .unwrap_or(0.0);
                 let desired_sdf = y - target_y;
                 let target_mod = desired_sdf - noise_base;
                 let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
@@ -746,8 +805,13 @@ impl Brush {
                 let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
                 let sdf_delta = laplacian * self.strength * falloff * y_falloff;
 
-                if sdf_delta.abs() > 0.0001 {
-                    new_mods.set_at_world(wx, y, wz, VoxelMod::new(sdf_delta, 1.0));
+                let existing_mod_val = existing_mods
+                    .get_at_world(wx, y, wz)
+                    .map(|m| m.sdf_delta * m.blend)
+                    .unwrap_or(0.0);
+                let new_mod_val = existing_mod_val + sdf_delta;
+                if (new_mod_val - existing_mod_val).abs() > 0.0001 {
+                    new_mods.set_at_world(wx, y, wz, VoxelMod::new(new_mod_val, 1.0));
                 }
 
                 y += vs;
@@ -822,6 +886,8 @@ pub enum BrushAction {
     CommitPlateau,
     /// Commit smooth modification
     CommitSmooth,
+    /// Begin curvature adjustment phase (geometry mode)
+    BeginCurvatureAdjust,
 }
 
 #[cfg(test)]
@@ -858,8 +924,17 @@ mod tests {
         brush.adjust_height(50.0); // Move up 50 pixels
         assert!(brush.footprint.height_delta.abs() > 0.0);
 
-        // End second phase (commit)
+        // End second phase (transition to curvature adjust)
         let action = brush.end_stroke(50.0);
+        assert_eq!(action, BrushAction::BeginCurvatureAdjust);
+        assert_eq!(brush.phase, BrushPhase::AdjustingCurvature);
+
+        // Adjust curvature
+        brush.adjust_curvature(60.0); // Move down 10 pixels → dome
+        assert!(brush.curvature.abs() > 0.0);
+
+        // End third phase (commit)
+        let action = brush.end_stroke(60.0);
         assert_eq!(action, BrushAction::CommitGeometry);
         assert_eq!(brush.phase, BrushPhase::Idle);
     }

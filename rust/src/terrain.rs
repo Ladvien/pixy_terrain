@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::brush::{Brush, BrushAction, BrushMode, BrushPhase, BrushShape};
+use crate::brush::{Brush, BrushAction, BrushMode, BrushPhase, BrushShape, FlattenDirection};
 use crate::brush_preview::BrushPreview;
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
@@ -17,6 +17,7 @@ use crate::mesh_worker::MeshWorkerPool;
 use crate::noise_field::NoiseField;
 use crate::terrain_modifications::ModificationLayer;
 use crate::texture_layer::TextureLayer;
+use crate::undo::UndoHistory;
 type VariantArray = Array<Variant>;
 
 /// Main terrain editor node - displays voxel-based terrain using transvoxel meshing
@@ -149,7 +150,7 @@ pub struct PixyTerrain {
     #[init(val = false)]
     brush_enabled: bool,
 
-    /// Brush operating mode: 0 = Geometry, 1 = Texture
+    /// Brush operating mode: 0 = Elevation, 1 = Texture, 2 = Flatten, 3 = Plateau, 4 = Smooth
     #[export]
     #[init(val = 0)]
     brush_mode: i32,
@@ -173,6 +174,30 @@ pub struct PixyTerrain {
     #[export]
     #[init(val = 0)]
     selected_texture_index: i32,
+
+    /// Step size for plateau brush mode (world units per discrete level)
+    #[export]
+    #[init(val = 4.0)]
+    brush_step_size: f32,
+
+    /// Brush feather: 0.0 = hard edge (pixel-art default), 1.0 = full smootherstep falloff
+    #[export]
+    #[init(val = 0.0)]
+    brush_feather: f32,
+
+    /// Flatten direction: 0 = Both, 1 = Up (remove above), 2 = Down (add below)
+    #[export]
+    #[init(val = 0)]
+    brush_flatten_direction: i32,
+
+    // ════════════════════════════════════════════════
+    // Undo/Redo Settings
+    // ════════════════════════════════════════════════
+    #[export_group(name = "Undo/Redo")]
+    /// Maximum number of undo steps to keep
+    #[export]
+    #[init(val = 50)]
+    max_undo_steps: u32,
 
     // ════════════════════════════════════════════════
     // Debug
@@ -312,6 +337,10 @@ pub struct PixyTerrain {
     /// Brush preview generator
     #[init(val = None)]
     brush_preview: Option<BrushPreview>,
+
+    /// Undo/redo history for modification layer snapshots
+    #[init(val = None)]
+    undo_history: Option<UndoHistory>,
 }
 
 #[godot_api]
@@ -348,11 +377,21 @@ impl PixyTerrain {
             stencil_write_mat.set_shader(&stencil_write_shader);
 
             // Cross-section parameters for stencil write pass
-            stencil_write_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            stencil_write_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            stencil_write_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            stencil_write_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             stencil_write_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            stencil_write_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            stencil_write_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
             // ═══════════════════════════════════════════════════════════════════
             // Pass 2: Main Terrain - front faces with triplanar PBR texturing
@@ -384,14 +423,25 @@ impl PixyTerrain {
             }
 
             // UV scale becomes triplanar scale (use X component for uniform scaling)
-            terrain_mat.set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
+            terrain_mat
+                .set_shader_parameter("triplanar_scale", &self.texture_uv_scale.x.to_variant());
 
             // Cross-section parameters for terrain pass
-            terrain_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            terrain_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
-            terrain_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
+            terrain_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            terrain_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
+            terrain_mat
+                .set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             terrain_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            terrain_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            terrain_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
             // ═══════════════════════════════════════════════════════════════════
             // Pass 3: Stencil Cap - flat cap at clip plane where stencil == 255
@@ -402,11 +452,20 @@ impl PixyTerrain {
             cap_mat.set_shader(&cap_shader);
 
             // Cross-section parameters for cap pass
-            cap_mat.set_shader_parameter("cross_section_enabled", &self.cross_section_enabled.to_variant());
-            cap_mat.set_shader_parameter("clip_plane_position", &self.clip_plane_position.to_variant());
+            cap_mat.set_shader_parameter(
+                "cross_section_enabled",
+                &self.cross_section_enabled.to_variant(),
+            );
+            cap_mat.set_shader_parameter(
+                "clip_plane_position",
+                &self.clip_plane_position.to_variant(),
+            );
             cap_mat.set_shader_parameter("clip_plane_normal", &self.clip_plane_normal.to_variant());
             cap_mat.set_shader_parameter("clip_offset", &self.clip_offset.to_variant());
-            cap_mat.set_shader_parameter("clip_camera_relative", &self.clip_camera_relative.to_variant());
+            cap_mat.set_shader_parameter(
+                "clip_camera_relative",
+                &self.clip_camera_relative.to_variant(),
+            );
 
             // Underground texture (required for cap)
             if let Some(ref underground) = self.underground_albedo {
@@ -421,7 +480,8 @@ impl PixyTerrain {
 
             // Underground roughness map (optional)
             if let Some(ref roughness) = self.underground_roughness {
-                cap_mat.set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
+                cap_mat
+                    .set_shader_parameter("underground_roughness_texture", &roughness.to_variant());
                 cap_mat.set_shader_parameter("use_underground_roughness_map", &true.to_variant());
             }
 
@@ -431,7 +491,10 @@ impl PixyTerrain {
                 cap_mat.set_shader_parameter("use_underground_ao_map", &true.to_variant());
             }
 
-            cap_mat.set_shader_parameter("underground_triplanar_scale", &self.underground_uv_scale.to_variant());
+            cap_mat.set_shader_parameter(
+                "underground_triplanar_scale",
+                &self.underground_uv_scale.to_variant(),
+            );
 
             // ═══════════════════════════════════════════════════════════════════
             // Chain materials: stencil_write -> terrain -> stencil_cap
@@ -439,9 +502,9 @@ impl PixyTerrain {
             // Set render priorities for correct pass ordering
             // NOTE: next_pass materials aren't necessarily rendered immediately after parent
             // Per Godot PR #80710: "Users have to rely entirely on render_priority to get correct sorting"
-            stencil_write_mat.set_render_priority(-1);  // Render first (back faces mark stencil)
-            terrain_mat.set_render_priority(0);          // Render second (front faces clear stencil)
-            cap_mat.set_render_priority(1);              // Render last (cap where stencil == 255)
+            stencil_write_mat.set_render_priority(-1); // Render first (back faces mark stencil)
+            terrain_mat.set_render_priority(0); // Render second (front faces clear stencil)
+            cap_mat.set_render_priority(1); // Render last (cap where stencil == 255)
 
             terrain_mat.set_next_pass(&cap_mat.upcast::<Material>());
             stencil_write_mat.set_next_pass(&terrain_mat.upcast::<Material>());
@@ -510,17 +573,40 @@ impl PixyTerrain {
 
         // Create modification and texture layers
         let resolution = self.chunk_subdivisions.max(1) as u32;
-        self.modification_layer = Some(Arc::new(ModificationLayer::new(resolution, self.voxel_size)));
+        self.modification_layer = Some(Arc::new(ModificationLayer::new(
+            resolution,
+            self.voxel_size,
+        )));
         self.texture_layer = Some(Arc::new(TextureLayer::new(resolution, self.voxel_size)));
 
         // Initialize brush with current settings
         let mut brush = Brush::new(self.voxel_size);
-        brush.set_mode(if self.brush_mode == 0 { BrushMode::Geometry } else { BrushMode::Texture });
-        brush.set_shape(if self.brush_shape == 0 { BrushShape::Square } else { BrushShape::Round });
+        brush.set_mode(match self.brush_mode {
+            0 => BrushMode::Elevation,
+            1 => BrushMode::Texture,
+            2 => BrushMode::Flatten,
+            3 => BrushMode::Plateau,
+            4 => BrushMode::Smooth,
+            _ => BrushMode::Elevation,
+        });
+        brush.set_shape(if self.brush_shape == 0 {
+            BrushShape::Square
+        } else {
+            BrushShape::Round
+        });
         brush.set_size(self.brush_size);
         brush.set_strength(self.brush_strength);
         brush.set_selected_texture(self.selected_texture_index.max(0) as usize);
+        brush.set_step_size(self.brush_step_size);
+        brush.set_feather(self.brush_feather);
+        brush.set_flatten_direction(match self.brush_flatten_direction {
+            1 => FlattenDirection::Up,
+            2 => FlattenDirection::Down,
+            _ => FlattenDirection::Both,
+        });
         self.brush = Some(brush);
+
+        self.undo_history = Some(UndoHistory::new(self.max_undo_steps.max(1) as usize));
 
         self.initialized = true;
 
@@ -737,7 +823,12 @@ impl PixyTerrain {
         godot_print!("  Z=max (wall): {}", z_max);
 
         let cam_pos = self.get_camera_position();
-        godot_print!("Camera position: [{:.1}, {:.1}, {:.1}]", cam_pos[0], cam_pos[1], cam_pos[2]);
+        godot_print!(
+            "Camera position: [{:.1}, {:.1}, {:.1}]",
+            cam_pos[0],
+            cam_pos[1],
+            cam_pos[2]
+        );
 
         let chunk_size = self.voxel_size * self.chunk_subdivisions as f32;
         godot_print!("Chunk size: {}", chunk_size);
@@ -768,7 +859,10 @@ impl PixyTerrain {
 
                 // Test inside terrain (should be negative)
                 let sdf_inside = noise.sample(mid_x, 16.0, mid_z);
-                godot_print!("SDF inside terrain (Y=16): {:.2} (should be <0)", sdf_inside);
+                godot_print!(
+                    "SDF inside terrain (Y=16): {:.2} (should be <0)",
+                    sdf_inside
+                );
             } else {
                 godot_print!("WARNING: Box bounds are None! Walls/floor won't generate.");
             }
@@ -819,13 +913,19 @@ impl PixyTerrain {
         }
         self.brush_preview = None;
 
-        // 6. Drop systems
+        // 6. Clear undo history
+        if let Some(ref mut history) = self.undo_history {
+            history.clear();
+        }
+
+        // 7. Drop systems
         self.worker_pool = None;
         self.chunk_manager = None;
         self.noise_field = None;
         self.modification_layer = None;
         self.texture_layer = None;
         self.brush = None;
+        self.undo_history = None;
         self.initialized = false;
     }
 
@@ -841,11 +941,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(
-            self.weld_epsilon,
-            self.normal_angle_threshold,
-            target,
-        );
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -879,7 +976,8 @@ impl PixyTerrain {
             return;
         }
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -921,7 +1019,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -954,7 +1053,8 @@ impl PixyTerrain {
             return;
         }
 
-        let processor = MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -1003,11 +1103,8 @@ impl PixyTerrain {
             None
         };
 
-        let processor = MeshPostProcessor::new(
-            self.weld_epsilon,
-            self.normal_angle_threshold,
-            target,
-        );
+        let processor =
+            MeshPostProcessor::new(self.weld_epsilon, self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
 
@@ -1062,11 +1159,29 @@ impl PixyTerrain {
 
         // Update brush settings from exports
         if let Some(ref mut brush) = self.brush {
-            brush.set_mode(if self.brush_mode == 0 { BrushMode::Geometry } else { BrushMode::Texture });
-            brush.set_shape(if self.brush_shape == 0 { BrushShape::Square } else { BrushShape::Round });
+            brush.set_mode(match self.brush_mode {
+                0 => BrushMode::Elevation,
+                1 => BrushMode::Texture,
+                2 => BrushMode::Flatten,
+                3 => BrushMode::Plateau,
+                4 => BrushMode::Smooth,
+                _ => BrushMode::Elevation,
+            });
+            brush.set_shape(if self.brush_shape == 0 {
+                BrushShape::Square
+            } else {
+                BrushShape::Round
+            });
             brush.set_size(self.brush_size);
             brush.set_strength(self.brush_strength);
             brush.set_selected_texture(self.selected_texture_index.max(0) as usize);
+            brush.set_step_size(self.brush_step_size);
+            brush.set_feather(self.brush_feather);
+            brush.set_flatten_direction(match self.brush_flatten_direction {
+                1 => FlattenDirection::Up,
+                2 => FlattenDirection::Down,
+                _ => FlattenDirection::Both,
+            });
 
             brush.begin_stroke(world_pos.x, world_pos.y, world_pos.z);
             true
@@ -1084,7 +1199,7 @@ impl PixyTerrain {
     }
 
     /// End the current brush stroke phase
-    /// Returns the action to take (0=None, 1=BeginHeightAdjust, 2=CommitGeometry, 3=CommitTexture)
+    /// Returns the action to take (0=None, 1=BeginHeightAdjust, 2=CommitGeometry, 3=CommitTexture, 4=CommitFlatten, 5=CommitPlateau, 6=CommitSmooth, 7=BeginCurvatureAdjust)
     #[func]
     pub fn brush_end(&mut self, screen_y: f32) -> i32 {
         if let Some(ref mut brush) = self.brush {
@@ -1100,6 +1215,19 @@ impl PixyTerrain {
                     self.commit_texture_modification();
                     3
                 }
+                BrushAction::CommitFlatten => {
+                    self.commit_flatten_modification();
+                    4
+                }
+                BrushAction::CommitPlateau => {
+                    self.commit_plateau_modification();
+                    5
+                }
+                BrushAction::CommitSmooth => {
+                    self.commit_smooth_modification();
+                    6
+                }
+                BrushAction::BeginCurvatureAdjust => 7,
             }
         } else {
             0
@@ -1112,6 +1240,20 @@ impl PixyTerrain {
         if let Some(ref mut brush) = self.brush {
             brush.adjust_height(screen_y);
         }
+    }
+
+    /// Update curvature during geometry mode curvature adjustment
+    #[func]
+    pub fn brush_adjust_curvature(&mut self, screen_y: f32) {
+        if let Some(ref mut brush) = self.brush {
+            brush.adjust_curvature(screen_y);
+        }
+    }
+
+    /// Get current brush curvature value
+    #[func]
+    pub fn get_brush_curvature(&self) -> f32 {
+        self.brush.as_ref().map_or(0.0, |b| b.curvature)
     }
 
     /// Cancel the current brush operation
@@ -1128,7 +1270,7 @@ impl PixyTerrain {
         self.brush.as_ref().map_or(false, |b| b.is_active())
     }
 
-    /// Get current brush phase (0=Idle, 1=PaintingArea, 2=AdjustingHeight, 3=Painting)
+    /// Get current brush phase (0=Idle, 1=PaintingArea, 2=AdjustingHeight, 3=Painting, 4=AdjustingCurvature)
     #[func]
     pub fn get_brush_phase(&self) -> i32 {
         if let Some(ref brush) = self.brush {
@@ -1137,6 +1279,7 @@ impl PixyTerrain {
                 BrushPhase::PaintingArea => 1,
                 BrushPhase::AdjustingHeight => 2,
                 BrushPhase::Painting => 3,
+                BrushPhase::AdjustingCurvature => 4,
             }
         } else {
             0
@@ -1162,7 +1305,9 @@ impl PixyTerrain {
     /// Get current brush height delta (for geometry mode preview)
     #[func]
     pub fn get_brush_height_delta(&self) -> f32 {
-        self.brush.as_ref().map_or(0.0, |b| b.footprint.height_delta)
+        self.brush
+            .as_ref()
+            .map_or(0.0, |b| b.footprint.height_delta)
     }
 
     /// Clear all terrain modifications (brush edits)
@@ -1170,7 +1315,10 @@ impl PixyTerrain {
     pub fn clear_modifications(&mut self) {
         // Create fresh layers
         let resolution = self.chunk_subdivisions.max(1) as u32;
-        self.modification_layer = Some(Arc::new(ModificationLayer::new(resolution, self.voxel_size)));
+        self.modification_layer = Some(Arc::new(ModificationLayer::new(
+            resolution,
+            self.voxel_size,
+        )));
         self.texture_layer = Some(Arc::new(TextureLayer::new(resolution, self.voxel_size)));
 
         // Regenerate all chunks
@@ -1180,13 +1328,101 @@ impl PixyTerrain {
     /// Get total number of terrain modifications
     #[func]
     pub fn get_modification_count(&self) -> i64 {
-        self.modification_layer.as_ref().map_or(0, |m| m.total_modifications()) as i64
+        self.modification_layer
+            .as_ref()
+            .map_or(0, |m| m.total_modifications()) as i64
     }
 
     /// Get total number of textured voxels
     #[func]
     pub fn get_texture_count(&self) -> i64 {
-        self.texture_layer.as_ref().map_or(0, |t| t.total_textured()) as i64
+        self.texture_layer
+            .as_ref()
+            .map_or(0, |t| t.total_textured()) as i64
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Undo/Redo Methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Undo the last terrain modification.
+    /// Returns true if an undo was performed.
+    #[func]
+    pub fn undo(&mut self) -> bool {
+        let current = match self.modification_layer {
+            Some(ref layer) => Arc::clone(layer),
+            None => return false,
+        };
+
+        let restored = match self.undo_history {
+            Some(ref mut history) => history.undo(current),
+            None => return false,
+        };
+
+        if let Some(previous) = restored {
+            self.modification_layer = Some(previous);
+            self.regenerate_all_modified_chunks();
+            if self.debug_logging {
+                let (undo_n, redo_n) = self
+                    .undo_history
+                    .as_ref()
+                    .map_or((0, 0), |h| (h.undo_count(), h.redo_count()));
+                godot_print!(
+                    "PixyTerrain: Undo ({}+{} steps remaining)",
+                    undo_n,
+                    redo_n
+                );
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo the last undone terrain modification.
+    /// Returns true if a redo was performed.
+    #[func]
+    pub fn redo(&mut self) -> bool {
+        let current = match self.modification_layer {
+            Some(ref layer) => Arc::clone(layer),
+            None => return false,
+        };
+
+        let restored = match self.undo_history {
+            Some(ref mut history) => history.redo(current),
+            None => return false,
+        };
+
+        if let Some(next) = restored {
+            self.modification_layer = Some(next);
+            self.regenerate_all_modified_chunks();
+            if self.debug_logging {
+                let (undo_n, redo_n) = self
+                    .undo_history
+                    .as_ref()
+                    .map_or((0, 0), |h| (h.undo_count(), h.redo_count()));
+                godot_print!(
+                    "PixyTerrain: Redo ({}+{} steps remaining)",
+                    undo_n,
+                    redo_n
+                );
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if undo is available
+    #[func]
+    pub fn can_undo(&self) -> bool {
+        self.undo_history.as_ref().map_or(false, |h| h.can_undo())
+    }
+
+    /// Check if redo is available
+    #[func]
+    pub fn can_redo(&self) -> bool {
+        self.undo_history.as_ref().map_or(false, |h| h.can_redo())
     }
 }
 
@@ -1343,11 +1579,19 @@ impl PixyTerrain {
     /// Commit geometry modification from brush to modification layer
     fn commit_geometry_modification(&mut self) {
         let Some(ref brush) = self.brush else { return };
-        let Some(ref mod_layer) = self.modification_layer else { return };
+        let Some(ref mod_layer) = self.modification_layer else {
+            return;
+        };
 
-        // Clone the mod layer to get a mutable version
-        let mut new_mod_layer = (**mod_layer).clone();
-        let affected_chunks = brush.apply_geometry(&mut new_mod_layer);
+        // Save current state for undo before modifying
+        if let Some(ref mut history) = self.undo_history {
+            history.push(Arc::clone(mod_layer));
+        }
+
+        // Clone for writing; read from the original to get correct current SDF
+        let existing = mod_layer.as_ref();
+        let mut new_mod_layer = existing.clone();
+        let affected_chunks = brush.apply_geometry(existing, &mut new_mod_layer);
 
         // Store the updated layer
         self.modification_layer = Some(Arc::new(new_mod_layer));
@@ -1359,7 +1603,9 @@ impl PixyTerrain {
             godot_print!(
                 "PixyTerrain: Committed geometry modification, {} chunks affected, {} total mods",
                 affected_chunks.len(),
-                self.modification_layer.as_ref().map_or(0, |m| m.total_modifications())
+                self.modification_layer
+                    .as_ref()
+                    .map_or(0, |m| m.total_modifications())
             );
         }
     }
@@ -1367,7 +1613,16 @@ impl PixyTerrain {
     /// Commit texture modification from brush to texture layer
     fn commit_texture_modification(&mut self) {
         let Some(ref brush) = self.brush else { return };
-        let Some(ref tex_layer) = self.texture_layer else { return };
+        let Some(ref tex_layer) = self.texture_layer else {
+            return;
+        };
+
+        // Save current mod layer state for undo (texture changes are bundled with mod state)
+        if let (Some(ref mut history), Some(ref mod_layer)) =
+            (&mut self.undo_history, &self.modification_layer)
+        {
+            history.push(Arc::clone(mod_layer));
+        }
 
         // Clone the texture layer to get a mutable version
         let mut new_tex_layer = (**tex_layer).clone();
@@ -1386,6 +1641,133 @@ impl PixyTerrain {
                 self.texture_layer.as_ref().map_or(0, |t| t.total_textured())
             );
         }
+    }
+
+    /// Commit flatten modification from brush to modification layer
+    fn commit_flatten_modification(&mut self) {
+        let Some(ref brush) = self.brush else { return };
+        let Some(ref mod_layer) = self.modification_layer else {
+            return;
+        };
+        let Some(ref noise) = self.noise_field else {
+            return;
+        };
+
+        // Save current state for undo before modifying
+        if let Some(ref mut history) = self.undo_history {
+            history.push(Arc::clone(mod_layer));
+        }
+
+        // Clone for writing; read from the original to get correct current SDF
+        let existing = mod_layer.as_ref();
+        let mut new_mod_layer = existing.clone();
+        let affected_chunks = brush.apply_flatten(noise, existing, &mut new_mod_layer);
+
+        self.modification_layer = Some(Arc::new(new_mod_layer));
+        self.mark_chunks_for_regeneration(&affected_chunks);
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Committed flatten modification, {} chunks affected, {} total mods",
+                affected_chunks.len(),
+                self.modification_layer
+                    .as_ref()
+                    .map_or(0, |m| m.total_modifications())
+            );
+        }
+    }
+
+    /// Commit plateau modification from brush to modification layer
+    fn commit_plateau_modification(&mut self) {
+        let Some(ref brush) = self.brush else { return };
+        let Some(ref mod_layer) = self.modification_layer else {
+            return;
+        };
+        let Some(ref noise) = self.noise_field else {
+            return;
+        };
+
+        // Save current state for undo before modifying
+        if let Some(ref mut history) = self.undo_history {
+            history.push(Arc::clone(mod_layer));
+        }
+
+        // Clone for writing; read from the original to get correct current SDF
+        let existing = mod_layer.as_ref();
+        let mut new_mod_layer = existing.clone();
+        let affected_chunks = brush.apply_plateau(noise, existing, &mut new_mod_layer);
+
+        self.modification_layer = Some(Arc::new(new_mod_layer));
+        self.mark_chunks_for_regeneration(&affected_chunks);
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Committed plateau modification, {} chunks affected, {} total mods",
+                affected_chunks.len(),
+                self.modification_layer
+                    .as_ref()
+                    .map_or(0, |m| m.total_modifications())
+            );
+        }
+    }
+
+    /// Commit smooth modification from brush to modification layer
+    fn commit_smooth_modification(&mut self) {
+        let Some(ref brush) = self.brush else { return };
+        let Some(ref mod_layer) = self.modification_layer else {
+            return;
+        };
+        let Some(ref noise) = self.noise_field else {
+            return;
+        };
+
+        // Save current state for undo before modifying
+        if let Some(ref mut history) = self.undo_history {
+            history.push(Arc::clone(mod_layer));
+        }
+
+        // Clone for writing; read from the original to get correct current SDF
+        let existing = mod_layer.as_ref();
+        let mut new_mod_layer = existing.clone();
+        let affected_chunks = brush.apply_smooth(noise, existing, &mut new_mod_layer);
+
+        self.modification_layer = Some(Arc::new(new_mod_layer));
+        self.mark_chunks_for_regeneration(&affected_chunks);
+
+        if self.debug_logging {
+            godot_print!(
+                "PixyTerrain: Committed smooth modification, {} chunks affected, {} total mods",
+                affected_chunks.len(),
+                self.modification_layer
+                    .as_ref()
+                    .map_or(0, |m| m.total_modifications())
+            );
+        }
+    }
+
+    /// Regenerate all chunks that could be affected by the current or previous modifications.
+    /// Used after undo/redo to refresh the entire modified region.
+    fn regenerate_all_modified_chunks(&mut self) {
+        // Collect all chunk coords that have modifications in the current layer
+        let mod_chunks: Vec<ChunkCoord> = self
+            .modification_layer
+            .as_ref()
+            .map(|layer| layer.modified_chunks().cloned().collect())
+            .unwrap_or_default();
+
+        // Also regenerate all currently loaded chunks since undo may remove mods
+        // from chunks that previously had them
+        let loaded_chunks: Vec<ChunkCoord> = self.chunk_nodes.keys().cloned().collect();
+
+        // Combine both sets
+        let mut all_chunks: Vec<ChunkCoord> = mod_chunks;
+        for coord in loaded_chunks {
+            if !all_chunks.contains(&coord) {
+                all_chunks.push(coord);
+            }
+        }
+
+        self.mark_chunks_for_regeneration(&all_chunks);
     }
 
     /// Mark chunks for regeneration after brush modifications
@@ -1444,7 +1826,10 @@ impl PixyTerrain {
                 self.hide_preview();
                 return;
             }
-            BrushPhase::PaintingArea | BrushPhase::AdjustingHeight | BrushPhase::Painting => {}
+            BrushPhase::PaintingArea
+            | BrushPhase::AdjustingHeight
+            | BrushPhase::AdjustingCurvature
+            | BrushPhase::Painting => {}
         }
 
         if brush.footprint.is_empty() {
@@ -1472,10 +1857,12 @@ impl PixyTerrain {
             }
         }
 
-        // Update height plane (only during AdjustingHeight phase)
-        if brush_clone.phase == BrushPhase::AdjustingHeight
-            && brush_clone.footprint.height_delta.abs() > 0.001
-        {
+        // Update height plane (during AdjustingHeight and AdjustingCurvature phases)
+        let show_height_plane = (brush_clone.phase == BrushPhase::AdjustingHeight
+            || brush_clone.phase == BrushPhase::AdjustingCurvature)
+            && brush_clone.footprint.height_delta.abs() > 0.001;
+
+        if show_height_plane {
             let fp = &brush_clone.footprint;
             let vs = brush_clone.voxel_size;
             let min_x = fp.min_x as f32 * vs;
@@ -1485,8 +1872,21 @@ impl PixyTerrain {
             let target_y = fp.base_y + fp.height_delta;
             let raising = fp.height_delta > 0.0;
 
-            let plane_mesh =
-                BrushPreview::generate_height_plane_mesh(min_x, max_x, min_z, max_z, target_y);
+            let plane_mesh = if brush_clone.phase == BrushPhase::AdjustingCurvature {
+                BrushPreview::generate_curved_height_plane_mesh(
+                    min_x,
+                    max_x,
+                    min_z,
+                    max_z,
+                    fp.base_y,
+                    fp.height_delta,
+                    brush_clone.curvature,
+                    brush_clone.size,
+                    brush_clone.shape,
+                )
+            } else {
+                BrushPreview::generate_height_plane_mesh(min_x, max_x, min_z, max_z, target_y)
+            };
             let plane_mat = BrushPreview::create_height_plane_material(raising);
 
             if let Some(ref mut plane_node) = self.preview_height_plane {

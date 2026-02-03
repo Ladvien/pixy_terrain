@@ -13,6 +13,7 @@ mod noise_field;
 mod terrain;
 mod terrain_modifications;
 mod texture_layer;
+mod undo;
 
 struct PixyTerrainExtension;
 
