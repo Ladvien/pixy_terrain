@@ -35,21 +35,77 @@ Two-part system:
 
 ### How It Works
 
-1. Each frame, position a quad mesh at `clip_plane_position`, oriented along `clip_plane_normal` (perpendicular to camera forward)
-2. Terrain renders normally but discards fragments beyond the clip plane
-3. Cap quad renders with the interior texture, masked to only show where terrain exists (via depth or stencil test)
+**Three-pass render pipeline:**
+
+| Pass | Material | render_priority | Purpose |
+|------|----------|-----------------|---------|
+| 1 | Terrain (front faces) | -1 | Render visible terrain, clip below plane |
+| 2 | Terrain back-face stencil | 0 | Write stencil=1 where back-faces visible |
+| 3 | Cap quad | 1 | Render cap only where stencil=1 |
+
+1. **Terrain front faces** render normally with clip plane discard
+2. **Terrain back faces** write stencil=1 (marks where interior is visible through the cut)
+3. **Cap quad** at clip plane position reads stencil, renders solid texture only where stencil=1
+
+### Technical Implementation
+
+**Godot 4.5+ stencil_mode directive:**
+
+Back-face stencil writer:
+```glsl
+shader_type spatial;
+render_mode cull_front, depth_draw_never, unshaded;
+stencil_mode write, compare_always, 1;
+// Discard below clip plane, write stencil where visible
+```
+
+Cap quad stencil reader:
+```glsl
+shader_type spatial;
+render_mode unshaded, depth_draw_never;
+stencil_mode read, compare_equal, 1;
+// ALPHA = 0.999 required to force alpha pass for stencil read
+```
+
+**Critical gotchas:**
+- Stencil reference must be ≥1 (buffer initializes to 0 each frame)
+- Cap shader needs `ALPHA = 0.999` to enter alpha pass where stencil read works
+- Use `ImmediateMesh` from Rust for efficient per-frame quad updates
+
+**Z-fighting prevention:**
+```glsl
+// In cap vertex shader - offset 0.5-1cm toward camera
+vec3 dir_to_cam = normalize(CAMERA_POSITION_WORLD - world_position);
+world_position += dir_to_cam * 0.01;
+```
+
+**World-space UV projection for cap texture:**
+```glsl
+// Build orthonormal basis on clip plane, project world position
+vec3 tangent = normalize(cross(up, clip_plane_normal));
+vec3 bitangent = cross(clip_plane_normal, tangent);
+vec2 uv = vec2(dot(offset, tangent), dot(offset, bitangent)) * uv_scale;
+```
+
+**Global shader uniforms** keep terrain and cap synchronized:
+```rust
+RenderingServer::singleton().global_shader_parameter_set(
+    "clip_plane_position", &position.to_variant()
+);
+```
 
 ### Key Decisions
 
-- **Separate mesh vs. shader-only**: Separate mesh because the cap must be a flat plane at a specific position, not a re-rendering of terrain geometry
-- **Depth/stencil masking**: Cap quad needs to know where terrain exists. Options: depth test against already-rendered terrain, or stencil written by back faces. TBD during implementation.
+- **Stencil + separate quad**: Back faces write stencil to mark interior, cap quad reads stencil. This gives pixel-perfect masking AND a flat cap surface.
+- **ImmediateMesh**: Efficient for simple 6-vertex quad updated each frame from Rust
+- **Global uniforms**: Single source of truth for clip plane params across all shaders
 - **Camera-relative positioning**: Quad position updates each frame based on camera position + offset
 
 ## Alternatives Considered
 
-### Stencil-only (current implementation)
+### Stencil-only with terrain geometry (current broken implementation)
 
-**Approach:** Three-pass stencil technique where back faces write stencil, front faces clear it, and a third pass renders the cap where stencil remains.
+**Approach:** Three-pass stencil technique where back faces write stencil, front faces clear it, and a third pass re-renders terrain geometry where stencil remains.
 
 **Pros:**
 - No extra geometry to manage
@@ -58,9 +114,9 @@ Two-part system:
 **Cons:**
 - Pass 3 renders terrain geometry, not a flat plane
 - Results in fog-like interior instead of solid cap
-- Harder to debug (stencil state is invisible)
+- The terrain's back faces at those pixels are clipped anyway
 
-**Why not:** Fundamentally can't produce a flat cap surface without significant rework. The stencil identifies *where* to draw but draws the wrong *what*.
+**Why not:** The cap pass renders on *terrain mesh* via `next_pass`, which draws back-face triangles — not a flat plane. Stencil identifies *where* to draw but draws the wrong *what*.
 
 ### Full-screen post-process
 
@@ -88,10 +144,15 @@ Two-part system:
 
 ## Risks & Open Questions
 
-- **Depth fighting**: Cap quad and terrain edge might z-fight at the clip boundary. May need slight offset or polygon offset.
-- **Masking the quad**: How exactly to hide the quad where there's no terrain? Stencil from back faces seems cleanest, but need to verify.
-- **Quad sizing**: Should the quad be sized to terrain bounds, or oversized and rely on masking?
-- **UV mapping on cap**: How to texture the flat cap? World-space UVs projected onto the plane? Triplanar?
+**Resolved:**
+- **Masking the quad**: Stencil from back faces — pixel-perfect, proven technique
+- **UV mapping on cap**: World-space projection onto clip plane with orthonormal basis
+- **Z-fighting**: Vertex offset toward camera (0.5-1cm)
+
+**Still open:**
+- **Quad sizing**: Oversized quad relying on stencil mask, or dynamically sized to terrain bounds?
+- **Performance validation**: Confirm three-pass approach is acceptable on target hardware
+- **Godot 4.5+ requirement**: Stencil_mode is 4.5+. If targeting 4.3-4.4, need depth-buffer fallback.
 
 ## Implementation Notes
 
