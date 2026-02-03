@@ -3,7 +3,7 @@ use godot::classes::editor_plugin::CustomControlContainer;
 use godot::classes::{
     Button, Camera3D, EditorPlugin, HBoxContainer, HSlider, IEditorPlugin, InputEvent,
     InputEventKey, InputEventMouseButton, InputEventMouseMotion, Label, MarginContainer,
-    PhysicsRayQueryParameters3D, VSeparator, VBoxContainer,
+    PhysicsRayQueryParameters3D, VBoxContainer, VSeparator,
 };
 use godot::global::MouseButton;
 use godot::prelude::*;
@@ -39,11 +39,23 @@ pub struct PixyTerrainPlugin {
     #[init(val = None)]
     brush_toggle_button: Option<Gd<Button>>,
     #[init(val = None)]
-    geometry_mode_button: Option<Gd<Button>>,
+    elevation_mode_button: Option<Gd<Button>>,
     #[init(val = None)]
     texture_mode_button: Option<Gd<Button>>,
     #[init(val = None)]
+    flatten_mode_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    plateau_mode_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    smooth_mode_button: Option<Gd<Button>>,
+    #[init(val = None)]
+    strength_slider: Option<Gd<HSlider>>,
+    #[init(val = None)]
     brush_size_slider: Option<Gd<HSlider>>,
+    #[init(val = None)]
+    step_size_slider: Option<Gd<HSlider>>,
+    #[init(val = None)]
+    feather_slider: Option<Gd<HSlider>>,
     #[init(val = [None, None, None, None])]
     texture_buttons: [Option<Gd<Button>>; 4],
 
@@ -114,12 +126,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
         toolbar.add_child(&brush_toggle_button);
 
         // Mode buttons — stacked vertically
-        let mut geometry_mode_button = Button::new_alloc();
-        geometry_mode_button.set_text("Geometry");
-        geometry_mode_button.set_toggle_mode(true);
-        geometry_mode_button.set_pressed(true);
-        geometry_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
-        geometry_mode_button.set_tooltip_text("Geometry Mode - Sculpt terrain height");
+        let mut elevation_mode_button = Button::new_alloc();
+        elevation_mode_button.set_text("Elevation (E)");
+        elevation_mode_button.set_toggle_mode(true);
+        elevation_mode_button.set_pressed(true);
+        elevation_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        elevation_mode_button.set_tooltip_text("Elevation Mode - Sculpt terrain height");
 
         let mut texture_mode_button = Button::new_alloc();
         texture_mode_button.set_text("Texture");
@@ -127,8 +139,43 @@ impl IEditorPlugin for PixyTerrainPlugin {
         texture_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
         texture_mode_button.set_tooltip_text("Texture Mode - Paint terrain textures");
 
-        toolbar.add_child(&geometry_mode_button);
+        let mut flatten_mode_button = Button::new_alloc();
+        flatten_mode_button.set_text("Flatten (F)");
+        flatten_mode_button.set_toggle_mode(true);
+        flatten_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        flatten_mode_button.set_tooltip_text("Flatten Mode - Level terrain to click height");
+
+        let mut plateau_mode_button = Button::new_alloc();
+        plateau_mode_button.set_text("Plateau (P)");
+        plateau_mode_button.set_toggle_mode(true);
+        plateau_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        plateau_mode_button.set_tooltip_text("Plateau Mode - Snap terrain to step heights");
+
+        let mut smooth_mode_button = Button::new_alloc();
+        smooth_mode_button.set_text("Smooth (S)");
+        smooth_mode_button.set_toggle_mode(true);
+        smooth_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        smooth_mode_button.set_tooltip_text("Smooth Mode - Laplacian smoothing on terrain");
+
+        toolbar.add_child(&elevation_mode_button);
         toolbar.add_child(&texture_mode_button);
+        toolbar.add_child(&flatten_mode_button);
+        toolbar.add_child(&plateau_mode_button);
+        toolbar.add_child(&smooth_mode_button);
+
+        // Strength slider
+        let mut strength_label = Label::new_alloc();
+        strength_label.set_text("Strength:");
+        toolbar.add_child(&strength_label);
+
+        let mut strength_slider = HSlider::new_alloc();
+        strength_slider.set_min(0.0);
+        strength_slider.set_max(1.0);
+        strength_slider.set_step(0.05);
+        strength_slider.set_value(1.0);
+        strength_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
+        strength_slider.set_tooltip_text("Brush strength (0.0 - 1.0)");
+        toolbar.add_child(&strength_slider);
 
         // Brush size slider
         let mut size_label = Label::new_alloc();
@@ -143,6 +190,34 @@ impl IEditorPlugin for PixyTerrainPlugin {
         brush_size_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
         brush_size_slider.set_tooltip_text("Brush size ([ / ] keys)");
         toolbar.add_child(&brush_size_slider);
+
+        // Step size slider (for Plateau mode)
+        let mut step_size_label = Label::new_alloc();
+        step_size_label.set_text("Step Size:");
+        toolbar.add_child(&step_size_label);
+
+        let mut step_size_slider = HSlider::new_alloc();
+        step_size_slider.set_min(0.5);
+        step_size_slider.set_max(32.0);
+        step_size_slider.set_step(0.5);
+        step_size_slider.set_value(4.0);
+        step_size_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
+        step_size_slider.set_tooltip_text("Step size for plateau mode (world units per level)");
+        toolbar.add_child(&step_size_slider);
+
+        // Feather slider
+        let mut feather_label = Label::new_alloc();
+        feather_label.set_text("Feather:");
+        toolbar.add_child(&feather_label);
+
+        let mut feather_slider = HSlider::new_alloc();
+        feather_slider.set_min(0.0);
+        feather_slider.set_max(1.0);
+        feather_slider.set_step(0.05);
+        feather_slider.set_value(0.0);
+        feather_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
+        feather_slider.set_tooltip_text("Brush feather (0.0 = hard edge, 1.0 = full falloff)");
+        toolbar.add_child(&feather_slider);
 
         // Texture selection buttons
         let mut tex_label = Label::new_alloc();
@@ -222,9 +297,9 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "toggled",
             &Callable::from_object_method(&plugin_ref, "on_brush_toggled"),
         );
-        geometry_mode_button.connect(
+        elevation_mode_button.connect(
             "pressed",
-            &Callable::from_object_method(&plugin_ref, "on_geometry_mode_pressed"),
+            &Callable::from_object_method(&plugin_ref, "on_elevation_mode_pressed"),
         );
         texture_mode_button.connect(
             "pressed",
@@ -233,6 +308,30 @@ impl IEditorPlugin for PixyTerrainPlugin {
         brush_size_slider.connect(
             "value_changed",
             &Callable::from_object_method(&plugin_ref, "on_brush_size_changed"),
+        );
+        flatten_mode_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_flatten_mode_pressed"),
+        );
+        plateau_mode_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_plateau_mode_pressed"),
+        );
+        smooth_mode_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_smooth_mode_pressed"),
+        );
+        strength_slider.connect(
+            "value_changed",
+            &Callable::from_object_method(&plugin_ref, "on_strength_changed"),
+        );
+        step_size_slider.connect(
+            "value_changed",
+            &Callable::from_object_method(&plugin_ref, "on_step_size_changed"),
+        );
+        feather_slider.connect(
+            "value_changed",
+            &Callable::from_object_method(&plugin_ref, "on_feather_changed"),
         );
 
         // Texture buttons
@@ -280,9 +379,15 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.decimate_button = Some(decimate_button);
         self.normals_button = Some(normals_button);
         self.brush_toggle_button = Some(brush_toggle_button);
-        self.geometry_mode_button = Some(geometry_mode_button);
+        self.elevation_mode_button = Some(elevation_mode_button);
         self.texture_mode_button = Some(texture_mode_button);
+        self.flatten_mode_button = Some(flatten_mode_button);
+        self.plateau_mode_button = Some(plateau_mode_button);
+        self.smooth_mode_button = Some(smooth_mode_button);
+        self.strength_slider = Some(strength_slider);
         self.brush_size_slider = Some(brush_size_slider);
+        self.step_size_slider = Some(step_size_slider);
+        self.feather_slider = Some(feather_slider);
         self.texture_buttons = texture_buttons;
 
         godot_print!("PixyTerrainPlugin: toolbar added with brush controls");
@@ -297,9 +402,15 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.decimate_button = None;
         self.normals_button = None;
         self.brush_toggle_button = None;
-        self.geometry_mode_button = None;
+        self.elevation_mode_button = None;
         self.texture_mode_button = None;
+        self.flatten_mode_button = None;
+        self.plateau_mode_button = None;
+        self.smooth_mode_button = None;
+        self.strength_slider = None;
         self.brush_size_slider = None;
+        self.step_size_slider = None;
+        self.feather_slider = None;
         self.texture_buttons = [None, None, None, None];
         self.toolbar = None;
 
@@ -365,6 +476,36 @@ impl IEditorPlugin for PixyTerrainPlugin {
                     }
                     godot::global::Key::B => {
                         self.toggle_brush();
+                        return AfterGuiInput::STOP.ord();
+                    }
+                    godot::global::Key::E => {
+                        self.ensure_brush_enabled();
+                        self.set_brush_mode(0);
+                        self.update_mode_buttons(0);
+                        return AfterGuiInput::STOP.ord();
+                    }
+                    godot::global::Key::F => {
+                        self.ensure_brush_enabled();
+                        let current_mode = self.get_terrain_property("brush_mode").to::<i32>();
+                        if current_mode == 2 {
+                            self.cycle_flatten_direction();
+                        } else {
+                            self.set_terrain_property("brush_flatten_direction", 0.to_variant());
+                            self.set_brush_mode(2);
+                        }
+                        self.update_mode_buttons(2);
+                        return AfterGuiInput::STOP.ord();
+                    }
+                    godot::global::Key::P => {
+                        self.ensure_brush_enabled();
+                        self.set_brush_mode(3);
+                        self.update_mode_buttons(3);
+                        return AfterGuiInput::STOP.ord();
+                    }
+                    godot::global::Key::S => {
+                        self.ensure_brush_enabled();
+                        self.set_brush_mode(4);
+                        self.update_mode_buttons(4);
                         return AfterGuiInput::STOP.ord();
                     }
                     godot::global::Key::BRACKETLEFT => {
@@ -490,24 +631,68 @@ impl PixyTerrainPlugin {
     #[func]
     fn on_brush_toggled(&mut self, enabled: bool) {
         self.set_terrain_property("brush_enabled", enabled.to_variant());
-        godot_print!("PixyTerrainPlugin: Brush {}", if enabled { "enabled" } else { "disabled" });
+        godot_print!(
+            "PixyTerrainPlugin: Brush {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     #[func]
-    fn on_geometry_mode_pressed(&mut self) {
-        self.set_brush_mode(0); // Geometry mode
-        self.update_mode_buttons(true);
+    fn on_elevation_mode_pressed(&mut self) {
+        self.set_brush_mode(0);
+        self.update_mode_buttons(0);
     }
 
     #[func]
     fn on_texture_mode_pressed(&mut self) {
-        self.set_brush_mode(1); // Texture mode
-        self.update_mode_buttons(false);
+        self.set_brush_mode(1);
+        self.update_mode_buttons(1);
+    }
+
+    #[func]
+    fn on_flatten_mode_pressed(&mut self) {
+        let current_mode = self.get_terrain_property("brush_mode").to::<i32>();
+        if current_mode == 2 {
+            // Already in flatten mode — cycle direction
+            self.cycle_flatten_direction();
+        } else {
+            // Switch to flatten mode, reset direction to Both
+            self.set_terrain_property("brush_flatten_direction", 0.to_variant());
+            self.set_brush_mode(2);
+        }
+        self.update_mode_buttons(2);
+    }
+
+    #[func]
+    fn on_plateau_mode_pressed(&mut self) {
+        self.set_brush_mode(3);
+        self.update_mode_buttons(3);
+    }
+
+    #[func]
+    fn on_smooth_mode_pressed(&mut self) {
+        self.set_brush_mode(4);
+        self.update_mode_buttons(4);
     }
 
     #[func]
     fn on_brush_size_changed(&mut self, value: f64) {
         self.set_terrain_property("brush_size", (value as f32).to_variant());
+    }
+
+    #[func]
+    fn on_strength_changed(&mut self, value: f64) {
+        self.set_terrain_property("brush_strength", (value as f32).to_variant());
+    }
+
+    #[func]
+    fn on_step_size_changed(&mut self, value: f64) {
+        self.set_terrain_property("brush_step_size", (value as f32).to_variant());
+    }
+
+    #[func]
+    fn on_feather_changed(&mut self, value: f64) {
+        self.set_terrain_property("brush_feather", (value as f32).to_variant());
     }
 
     #[func]
@@ -640,20 +825,57 @@ impl PixyTerrainPlugin {
             btn.set_pressed(new_value);
         }
 
-        godot_print!("PixyTerrainPlugin: Brush {}", if new_value { "enabled" } else { "disabled" });
+        godot_print!(
+            "PixyTerrainPlugin: Brush {}",
+            if new_value { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Ensure brush is enabled (auto-enable if disabled)
+    fn ensure_brush_enabled(&mut self) {
+        let current = self.get_terrain_property("brush_enabled").to::<bool>();
+        if !current {
+            self.set_terrain_property("brush_enabled", true.to_variant());
+            if let Some(ref mut btn) = self.brush_toggle_button {
+                btn.set_pressed(true);
+            }
+        }
     }
 
     fn set_brush_mode(&mut self, mode: i32) {
         self.set_terrain_property("brush_mode", mode.to_variant());
     }
 
-    fn update_mode_buttons(&mut self, geometry_active: bool) {
-        if let Some(ref mut geo_btn) = self.geometry_mode_button {
-            geo_btn.set_pressed(geometry_active);
+    fn update_mode_buttons(&mut self, active_mode: i32) {
+        if let Some(ref mut btn) = self.elevation_mode_button {
+            btn.set_pressed(active_mode == 0);
         }
-        if let Some(ref mut tex_btn) = self.texture_mode_button {
-            tex_btn.set_pressed(!geometry_active);
+        if let Some(ref mut btn) = self.texture_mode_button {
+            btn.set_pressed(active_mode == 1);
         }
+        if let Some(ref mut btn) = self.flatten_mode_button {
+            btn.set_pressed(active_mode == 2);
+        }
+        if let Some(ref mut btn) = self.plateau_mode_button {
+            btn.set_pressed(active_mode == 3);
+        }
+        if let Some(ref mut btn) = self.smooth_mode_button {
+            btn.set_pressed(active_mode == 4);
+        }
+
+        // Reset flatten direction when switching away from flatten
+        if active_mode != 2 {
+            self.set_terrain_property("brush_flatten_direction", 0.to_variant());
+        }
+
+        // Update flatten button text to show direction
+        let flatten_dir = self
+            .get_terrain_property("brush_flatten_direction")
+            .to::<i32>();
+        self.update_flatten_button_text(flatten_dir);
+
+        // Update slider editability per mode
+        self.update_slider_states(active_mode);
     }
 
     fn adjust_brush_size(&mut self, delta: f32) {
@@ -682,6 +904,48 @@ impl PixyTerrainPlugin {
         }
     }
 
+    /// Cycle flatten direction: Both → Up → Down → Both
+    fn cycle_flatten_direction(&mut self) {
+        let current = self
+            .get_terrain_property("brush_flatten_direction")
+            .to::<i32>();
+        let next = (current + 1) % 3;
+        self.set_terrain_property("brush_flatten_direction", next.to_variant());
+    }
+
+    /// Update flatten mode button text to reflect current direction
+    fn update_flatten_button_text(&mut self, direction: i32) {
+        let text = match direction {
+            1 => "Flatten: Up (F)",
+            2 => "Flatten: Down (F)",
+            _ => "Flatten (F)",
+        };
+        if let Some(ref mut btn) = self.flatten_mode_button {
+            btn.set_text(text);
+        }
+    }
+
+    /// Enable/disable sliders based on which are applicable for the current mode
+    fn update_slider_states(&mut self, mode: i32) {
+        // Strength: all except Texture (mode 1)
+        let has_strength = mode != 1;
+        // Step size: Plateau only (mode 3)
+        let has_step_size = mode == 3;
+        // Feather: all except Texture (mode 1)
+        let has_feather = mode != 1;
+
+        if let Some(ref mut s) = self.strength_slider {
+            s.set_editable(has_strength);
+        }
+        // size_slider is always editable
+        if let Some(ref mut s) = self.step_size_slider {
+            s.set_editable(has_step_size);
+        }
+        if let Some(ref mut s) = self.feather_slider {
+            s.set_editable(has_feather);
+        }
+    }
+
     /// Sync UI state from terrain node (called when selecting terrain)
     fn sync_ui_from_terrain(&mut self) {
         // Sync brush enabled
@@ -690,17 +954,46 @@ impl PixyTerrainPlugin {
             btn.set_pressed(brush_enabled);
         }
 
-        // Sync brush mode
+        // Sync brush mode (0=Elevation, 1=Texture, 2=Flatten, 3=Plateau, 4=Smooth)
         let brush_mode = self.get_terrain_property("brush_mode").to::<i32>();
-        self.update_mode_buttons(brush_mode == 0);
+        self.update_mode_buttons(brush_mode);
+
+        // Sync strength
+        let strength = self.get_terrain_property("brush_strength").to::<f32>();
+        if let Some(ref mut slider) = self.strength_slider {
+            slider.set_value_no_signal(strength as f64);
+        }
 
         // Sync brush size
         let brush_size = self.get_terrain_property("brush_size").to::<f32>();
         self.update_size_slider(brush_size);
 
+        // Sync step size
+        let step_size = self.get_terrain_property("brush_step_size").to::<f32>();
+        if let Some(ref mut slider) = self.step_size_slider {
+            slider.set_value_no_signal(step_size as f64);
+        }
+
+        // Sync feather
+        let feather = self.get_terrain_property("brush_feather").to::<f32>();
+        if let Some(ref mut slider) = self.feather_slider {
+            slider.set_value_no_signal(feather as f64);
+        }
+
         // Sync selected texture
-        let selected_tex = self.get_terrain_property("selected_texture_index").to::<i32>();
+        let selected_tex = self
+            .get_terrain_property("selected_texture_index")
+            .to::<i32>();
         self.update_texture_buttons(selected_tex.max(0) as usize);
+
+        // Sync flatten direction into flatten button text
+        let flatten_dir = self
+            .get_terrain_property("brush_flatten_direction")
+            .to::<i32>();
+        self.update_flatten_button_text(flatten_dir);
+
+        // Update slider editability per current mode
+        self.update_slider_states(brush_mode);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

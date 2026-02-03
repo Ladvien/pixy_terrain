@@ -1,23 +1,42 @@
 //! Brush system for terrain painting.
 //!
 //! Supports two modes:
-//! - Geometry Mode: Two-phase painting (paint area → set height) for sculpting terrain
+//! - Elevation Mode: Two-phase painting (paint area → set height) for sculpting terrain
 //! - Texture Mode: Paint different textures onto terrain surface
 
 use std::collections::HashSet;
 
 use crate::chunk::ChunkCoord;
+use crate::noise_field::NoiseField;
 use crate::terrain_modifications::{ModificationLayer, VoxelMod};
 use crate::texture_layer::{TextureLayer, TextureWeights};
 
 /// Brush operating mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BrushMode {
-    /// Geometry sculpting mode: paint area, then adjust height
+    /// Elevation sculpting mode: paint area, then adjust height
     #[default]
-    Geometry,
+    Elevation,
     /// Texture painting mode: paint textures onto terrain surface
     Texture,
+    /// Flatten mode: paint area, then flatten to click height on release
+    Flatten,
+    /// Plateau mode: paint area, then snap each cell to nearest step_size multiple on release
+    Plateau,
+    /// Smooth mode: Laplacian smoothing on the SDF field
+    Smooth,
+}
+
+/// Direction constraint for flatten/plateau operations
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FlattenDirection {
+    /// Flatten both above and below the target plane
+    #[default]
+    Both,
+    /// Only remove material above the target plane (make SDF more positive)
+    Up,
+    /// Only add material below the target plane (make SDF more negative)
+    Down,
 }
 
 /// Shape of the brush footprint
@@ -135,6 +154,19 @@ impl BrushFootprint {
         self.height_delta = 0.0;
     }
 
+    /// Compute the XZ centroid of the footprint in world coordinates
+    pub fn compute_centroid(&self, voxel_size: f32) -> (f32, f32) {
+        if self.cells.is_empty() {
+            return (0.0, 0.0);
+        }
+        let (sum_x, sum_z) = self.cells.iter().fold((0.0f64, 0.0f64), |(sx, sz), cell| {
+            let (wx, _, wz) = cell.to_world(0.0, voxel_size);
+            (sx + wx as f64, sz + wz as f64)
+        });
+        let n = self.cells.len() as f64;
+        ((sum_x / n) as f32, (sum_z / n) as f32)
+    }
+
     /// Get affected chunk coordinates
     pub fn affected_chunks(&self, chunk_size: f32, voxel_size: f32) -> Vec<ChunkCoord> {
         if self.cells.is_empty() {
@@ -154,6 +186,36 @@ impl BrushFootprint {
             let y_max = self.base_y + self.height_delta.max(0.0) + voxel_size;
             let min_chunk_y = (y_min / chunk_size).floor() as i32;
             let max_chunk_y = (y_max / chunk_size).floor() as i32;
+            for cy in (min_chunk_y - 1)..=(max_chunk_y + 1) {
+                chunks.insert(ChunkCoord::new(chunk_x, cy, chunk_z));
+            }
+        }
+
+        chunks.into_iter().collect()
+    }
+
+    /// Get affected chunk coordinates for an explicit Y range (used by flatten/plateau)
+    pub fn affected_chunks_for_y_range(
+        &self,
+        chunk_size: f32,
+        voxel_size: f32,
+        y_min: f32,
+        y_max: f32,
+    ) -> Vec<ChunkCoord> {
+        if self.cells.is_empty() {
+            return Vec::new();
+        }
+
+        let mut chunks = HashSet::new();
+        let chunk_cells = (chunk_size / voxel_size) as i32;
+
+        let min_chunk_y = (y_min / chunk_size).floor() as i32;
+        let max_chunk_y = (y_max / chunk_size).floor() as i32;
+
+        for cell in &self.cells {
+            let chunk_x = cell.x.div_euclid(chunk_cells);
+            let chunk_z = cell.z.div_euclid(chunk_cells);
+
             for cy in (min_chunk_y - 1)..=(max_chunk_y + 1) {
                 chunks.insert(ChunkCoord::new(chunk_x, cy, chunk_z));
             }
@@ -186,12 +248,18 @@ pub struct Brush {
     pub height_sensitivity: f32,
     /// Voxel size for coordinate calculations
     pub voxel_size: f32,
+    /// Step size for plateau mode (world units per discrete level)
+    pub step_size: f32,
+    /// Feather: 0.0 = hard edge (pixel-art default), 1.0 = full smootherstep falloff
+    pub feather: f32,
+    /// Direction constraint for flatten/plateau operations
+    pub flatten_direction: FlattenDirection,
 }
 
 impl Default for Brush {
     fn default() -> Self {
         Self {
-            mode: BrushMode::Geometry,
+            mode: BrushMode::Elevation,
             shape: BrushShape::Round,
             size: 5.0,
             strength: 1.0,
@@ -201,6 +269,9 @@ impl Default for Brush {
             height_adjust_start_y: 0.0,
             height_sensitivity: 0.1,
             voxel_size: 1.0,
+            step_size: 4.0,
+            feather: 0.0,
+            flatten_direction: FlattenDirection::Both,
         }
     }
 }
@@ -224,11 +295,11 @@ impl Brush {
         self.footprint.base_y = world_y;
 
         match self.mode {
-            BrushMode::Geometry => {
+            BrushMode::Elevation => {
                 self.phase = BrushPhase::PaintingArea;
                 self.add_cells_at(world_x, world_z);
             }
-            BrushMode::Texture => {
+            BrushMode::Texture | BrushMode::Flatten | BrushMode::Plateau | BrushMode::Smooth => {
                 self.phase = BrushPhase::Painting;
                 self.add_cells_at(world_x, world_z);
             }
@@ -266,9 +337,14 @@ impl Brush {
                 BrushAction::CommitGeometry
             }
             BrushPhase::Painting => {
-                // Commit the texture paint
                 self.phase = BrushPhase::Idle;
-                BrushAction::CommitTexture
+                match self.mode {
+                    BrushMode::Texture => BrushAction::CommitTexture,
+                    BrushMode::Flatten => BrushAction::CommitFlatten,
+                    BrushMode::Plateau => BrushAction::CommitPlateau,
+                    BrushMode::Smooth => BrushAction::CommitSmooth,
+                    _ => BrushAction::CommitTexture,
+                }
             }
             BrushPhase::Idle => BrushAction::None,
         }
@@ -325,20 +401,28 @@ impl Brush {
             return Vec::new();
         }
 
-        // Negate height_delta for SDF: positive height → negative SDF (adds material),
-        // negative height → positive SDF (removes material)
-        let modification = VoxelMod::new(-self.footprint.height_delta, self.strength);
-
         let base_y = self.footprint.base_y;
         let height_delta = self.footprint.height_delta;
+        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
 
         for cell in self.footprint.iter() {
+            let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
+            let falloff = self.compute_falloff(wx, wz, cx, cz);
+            let cell_height = height_delta * falloff;
+
+            let core_min = base_y + cell_height.min(0.0);
+            let core_max = base_y + cell_height.max(0.0);
+            let y_padding = 2.0 * self.voxel_size;
+
             // Apply modification at multiple Y levels around the affected area
-            let y_min = (base_y + height_delta.min(0.0) - self.voxel_size).floor();
-            let y_max = (base_y + height_delta.max(0.0) + self.voxel_size).ceil();
+            let y_min = (core_min - y_padding).floor();
+            let y_max = (core_max + y_padding).ceil();
             let mut y = y_min;
             while y <= y_max {
-                let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
+                // Negate for SDF: positive height → negative SDF (adds material),
+                // negative height → positive SDF (removes material)
+                let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
+                let modification = VoxelMod::new(-cell_height * y_falloff, self.strength);
                 mods.set_at_world(wx, y, wz, modification);
                 y += self.voxel_size;
             }
@@ -402,6 +486,323 @@ impl Brush {
     pub fn set_selected_texture(&mut self, index: usize) {
         self.selected_texture = index;
     }
+
+    /// Set step size for plateau mode
+    pub fn set_step_size(&mut self, step_size: f32) {
+        self.step_size = step_size.max(0.1);
+    }
+
+    /// Set feather amount (0.0 = hard edge, 1.0 = full falloff)
+    pub fn set_feather(&mut self, feather: f32) {
+        self.feather = feather.clamp(0.0, 1.0);
+    }
+
+    /// Set flatten direction constraint
+    pub fn set_flatten_direction(&mut self, direction: FlattenDirection) {
+        self.flatten_direction = direction;
+    }
+
+    /// Quintic smootherstep (C² continuous — zero 1st and 2nd derivatives at 0 and 1).
+    /// Avoids the ring/banding artifacts that linear or cubic smoothstep produce.
+    pub fn smootherstep(t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    }
+
+    /// Compute feather falloff at a world XZ position relative to centroid.
+    /// Returns 1.0 at center, falling to (1 - feather) at the brush edge.
+    pub fn compute_falloff(&self, wx: f32, wz: f32, center_x: f32, center_z: f32) -> f32 {
+        if self.feather <= 0.0 {
+            return 1.0;
+        }
+        let dist = ((wx - center_x).powi(2) + (wz - center_z).powi(2)).sqrt();
+        let ratio = (dist / self.size).clamp(0.0, 1.0);
+        1.0 - self.feather * Self::smootherstep(ratio)
+    }
+
+    /// Compute Y-axis feather falloff.
+    /// Returns 1.0 inside the core zone, tapering to (1 - feather) at the padding boundary.
+    pub fn compute_y_falloff(&self, y: f32, core_min: f32, core_max: f32, padding: f32) -> f32 {
+        if self.feather <= 0.0 || padding <= 0.0 {
+            return 1.0;
+        }
+        // Distance from the core zone (0 if inside)
+        let y_dist = if y < core_min {
+            core_min - y
+        } else if y > core_max {
+            y - core_max
+        } else {
+            0.0
+        };
+        let ratio = (y_dist / padding).clamp(0.0, 1.0);
+        1.0 - self.feather * Self::smootherstep(ratio)
+    }
+
+    /// Apply flatten modification: force terrain to a horizontal plane at base_y
+    ///
+    /// For each voxel in the footprint's Y range, computes the SDF delta needed
+    /// to make the final SDF equal to `y - base_y` (a horizontal plane).
+    pub fn apply_flatten(
+        &self,
+        noise: &NoiseField,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) -> Vec<ChunkCoord> {
+        if self.footprint.is_empty() {
+            return Vec::new();
+        }
+
+        let base_y = self.footprint.base_y;
+        let amplitude = noise.get_amplitude();
+        let y_range = amplitude + 4.0 * self.voxel_size;
+        let y_min = (base_y - y_range).floor();
+        let y_max = (base_y + y_range).ceil();
+        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
+
+        let core_min = base_y - self.voxel_size;
+        let core_max = base_y + self.voxel_size;
+        let y_padding = 4.0 * self.voxel_size;
+
+        for cell in self.footprint.iter() {
+            let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
+            let falloff = self.compute_falloff(wx, wz, cx, cz);
+
+            let mut y = y_min;
+            while y <= y_max {
+                let noise_base = noise.sample(wx, y, wz);
+                let existing_mod_val = existing_mods.sample(wx, y, wz);
+                let desired_sdf = y - base_y;
+                let target_mod = desired_sdf - noise_base;
+                let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
+                let blend = self.strength * falloff * y_falloff;
+                let new_mod = existing_mod_val + (target_mod - existing_mod_val) * blend;
+
+                // Apply direction filter
+                let sdf_change = new_mod - existing_mod_val;
+                let filtered_mod = match self.flatten_direction {
+                    FlattenDirection::Both => new_mod,
+                    FlattenDirection::Up => {
+                        if sdf_change > 0.0 {
+                            new_mod
+                        } else {
+                            existing_mod_val
+                        }
+                    }
+                    FlattenDirection::Down => {
+                        if sdf_change < 0.0 {
+                            new_mod
+                        } else {
+                            existing_mod_val
+                        }
+                    }
+                };
+
+                if (filtered_mod - existing_mod_val).abs() > 0.0001 {
+                    new_mods.set_at_world(wx, y, wz, VoxelMod::new(filtered_mod, 1.0));
+                }
+
+                y += self.voxel_size;
+            }
+        }
+
+        self.footprint.affected_chunks_for_y_range(
+            new_mods.chunk_size(),
+            self.voxel_size,
+            y_min,
+            y_max,
+        )
+    }
+
+    /// Apply plateau modification: snap each cell's surface to the nearest step_size multiple
+    ///
+    /// For each XZ cell, finds the current surface height via SDF zero-crossing search,
+    /// rounds it to the nearest `step_size` multiple, then flattens to that height.
+    pub fn apply_plateau(
+        &self,
+        noise: &NoiseField,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) -> Vec<ChunkCoord> {
+        if self.footprint.is_empty() {
+            return Vec::new();
+        }
+
+        let base_y = self.footprint.base_y;
+        let amplitude = noise.get_amplitude();
+        let y_range = amplitude + 4.0 * self.voxel_size;
+        let y_min = (base_y - y_range).floor();
+        let y_max = (base_y + y_range).ceil();
+        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
+
+        for cell in self.footprint.iter() {
+            let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
+            let falloff = self.compute_falloff(wx, wz, cx, cz);
+
+            // Find the current surface height at this XZ column
+            let surface_y =
+                Self::find_surface_y(noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size);
+
+            // Snap to nearest step_size multiple
+            let target_y = (surface_y / self.step_size).round() * self.step_size;
+
+            let core_min = target_y - self.voxel_size;
+            let core_max = target_y + self.voxel_size;
+            let y_padding = 4.0 * self.voxel_size;
+
+            // Apply flatten-style SDF override toward target_y
+            let mut y = y_min;
+            while y <= y_max {
+                let noise_base = noise.sample(wx, y, wz);
+                let existing_mod_val = existing_mods.sample(wx, y, wz);
+                let desired_sdf = y - target_y;
+                let target_mod = desired_sdf - noise_base;
+                let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
+                let blend = self.strength * falloff * y_falloff;
+                let new_mod = existing_mod_val + (target_mod - existing_mod_val) * blend;
+
+                // Apply direction filter
+                let sdf_change = new_mod - existing_mod_val;
+                let filtered_mod = match self.flatten_direction {
+                    FlattenDirection::Both => new_mod,
+                    FlattenDirection::Up => {
+                        if sdf_change > 0.0 {
+                            new_mod
+                        } else {
+                            existing_mod_val
+                        }
+                    }
+                    FlattenDirection::Down => {
+                        if sdf_change < 0.0 {
+                            new_mod
+                        } else {
+                            existing_mod_val
+                        }
+                    }
+                };
+
+                if (filtered_mod - existing_mod_val).abs() > 0.0001 {
+                    new_mods.set_at_world(wx, y, wz, VoxelMod::new(filtered_mod, 1.0));
+                }
+
+                y += self.voxel_size;
+            }
+        }
+
+        self.footprint.affected_chunks_for_y_range(
+            new_mods.chunk_size(),
+            self.voxel_size,
+            y_min,
+            y_max,
+        )
+    }
+
+    /// Apply Laplacian smoothing to the SDF field.
+    ///
+    /// For each voxel in the footprint's Y range, samples the 6 face-adjacent neighbors,
+    /// computes the Laplacian (neighbor average minus current value), and applies a
+    /// weighted delta to smooth out sharp features.
+    pub fn apply_smooth(
+        &self,
+        noise: &NoiseField,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) -> Vec<ChunkCoord> {
+        if self.footprint.is_empty() {
+            return Vec::new();
+        }
+
+        let base_y = self.footprint.base_y;
+        let amplitude = noise.get_amplitude();
+        let y_range = amplitude + 4.0 * self.voxel_size;
+        let y_min = (base_y - y_range).floor();
+        let y_max = (base_y + y_range).ceil();
+        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
+
+        let core_min = base_y - self.voxel_size;
+        let core_max = base_y + self.voxel_size;
+        let y_padding = 4.0 * self.voxel_size;
+
+        let vs = self.voxel_size;
+
+        for cell in self.footprint.iter() {
+            let (wx, _, wz) = cell.to_world(0.0, vs);
+            let falloff = self.compute_falloff(wx, wz, cx, cz);
+
+            let mut y = y_min;
+            while y <= y_max {
+                let current_sdf = noise.sample_with_mods(wx, y, wz, existing_mods);
+
+                // Sample 6 face-adjacent neighbors
+                let n_xp = noise.sample_with_mods(wx + vs, y, wz, existing_mods);
+                let n_xn = noise.sample_with_mods(wx - vs, y, wz, existing_mods);
+                let n_yp = noise.sample_with_mods(wx, y + vs, wz, existing_mods);
+                let n_yn = noise.sample_with_mods(wx, y - vs, wz, existing_mods);
+                let n_zp = noise.sample_with_mods(wx, y, wz + vs, existing_mods);
+                let n_zn = noise.sample_with_mods(wx, y, wz - vs, existing_mods);
+
+                let neighbor_avg = (n_xp + n_xn + n_yp + n_yn + n_zp + n_zn) / 6.0;
+                let laplacian = neighbor_avg - current_sdf;
+
+                let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
+                let sdf_delta = laplacian * self.strength * falloff * y_falloff;
+
+                if sdf_delta.abs() > 0.0001 {
+                    new_mods.set_at_world(wx, y, wz, VoxelMod::new(sdf_delta, 1.0));
+                }
+
+                y += vs;
+            }
+        }
+
+        self.footprint.affected_chunks_for_y_range(
+            new_mods.chunk_size(),
+            self.voxel_size,
+            y_min,
+            y_max,
+        )
+    }
+
+    /// Find the surface Y position at a given XZ column by searching for SDF zero-crossing.
+    ///
+    /// Walks from y_max downward in voxel_size steps, finds the first positive→negative
+    /// SDF transition, then bisects 8 iterations for sub-voxel accuracy.
+    fn find_surface_y(
+        noise: &NoiseField,
+        mods: &ModificationLayer,
+        wx: f32,
+        wz: f32,
+        y_min: f32,
+        y_max: f32,
+        voxel_size: f32,
+    ) -> f32 {
+        let mut prev_sdf = noise.sample_with_mods(wx, y_max, wz, mods);
+        let mut y = y_max - voxel_size;
+
+        // Walk downward looking for sign change (positive → negative = entering solid)
+        while y >= y_min {
+            let sdf = noise.sample_with_mods(wx, y, wz, mods);
+            if prev_sdf >= 0.0 && sdf < 0.0 {
+                // Found a crossing between y and y+voxel_size. Bisect for precision.
+                let mut lo = y;
+                let mut hi = y + voxel_size;
+                for _ in 0..8 {
+                    let mid = (lo + hi) * 0.5;
+                    let mid_sdf = noise.sample_with_mods(wx, mid, wz, mods);
+                    if mid_sdf < 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                return (lo + hi) * 0.5;
+            }
+            prev_sdf = sdf;
+            y -= voxel_size;
+        }
+
+        // No crossing found — fall back to base_y
+        (y_min + y_max) * 0.5
+    }
 }
 
 /// Action returned when ending a brush stroke
@@ -415,6 +816,12 @@ pub enum BrushAction {
     CommitGeometry,
     /// Commit texture paint
     CommitTexture,
+    /// Commit flatten modification
+    CommitFlatten,
+    /// Commit plateau modification
+    CommitPlateau,
+    /// Commit smooth modification
+    CommitSmooth,
 }
 
 #[cfg(test)]
@@ -424,7 +831,7 @@ mod tests {
     #[test]
     fn test_brush_default() {
         let brush = Brush::default();
-        assert_eq!(brush.mode, BrushMode::Geometry);
+        assert_eq!(brush.mode, BrushMode::Elevation);
         assert_eq!(brush.shape, BrushShape::Round);
         assert_eq!(brush.phase, BrushPhase::Idle);
         assert!(!brush.is_active());
@@ -517,5 +924,162 @@ mod tests {
 
         let chunks = footprint.affected_chunks(32.0, 1.0);
         assert!(chunks.len() >= 2, "Should affect multiple chunks");
+    }
+
+    #[test]
+    fn test_brush_flatten_workflow() {
+        let mut brush = Brush::new(1.0);
+        brush.set_mode(BrushMode::Flatten);
+        brush.set_size(2.0);
+
+        // Begin stroke (goes to Painting phase for flatten)
+        brush.begin_stroke(5.0, 10.0, 5.0);
+        assert_eq!(brush.phase, BrushPhase::Painting);
+
+        // Continue stroke
+        brush.continue_stroke(7.0, 10.0, 7.0);
+
+        // End stroke → CommitFlatten
+        let action = brush.end_stroke(100.0);
+        assert_eq!(action, BrushAction::CommitFlatten);
+        assert_eq!(brush.phase, BrushPhase::Idle);
+    }
+
+    #[test]
+    fn test_brush_plateau_workflow() {
+        let mut brush = Brush::new(1.0);
+        brush.set_mode(BrushMode::Plateau);
+        brush.set_size(2.0);
+        brush.set_step_size(4.0);
+
+        // Begin stroke (goes to Painting phase for plateau)
+        brush.begin_stroke(5.0, 10.0, 5.0);
+        assert_eq!(brush.phase, BrushPhase::Painting);
+
+        // Continue stroke
+        brush.continue_stroke(7.0, 10.0, 7.0);
+
+        // End stroke → CommitPlateau
+        let action = brush.end_stroke(100.0);
+        assert_eq!(action, BrushAction::CommitPlateau);
+        assert_eq!(brush.phase, BrushPhase::Idle);
+    }
+
+    #[test]
+    fn test_brush_step_size_clamped() {
+        let mut brush = Brush::new(1.0);
+        brush.set_step_size(0.0);
+        assert!(brush.step_size >= 0.1);
+        brush.set_step_size(-5.0);
+        assert!(brush.step_size >= 0.1);
+        brush.set_step_size(8.0);
+        assert_eq!(brush.step_size, 8.0);
+    }
+
+    #[test]
+    fn test_footprint_affected_chunks_for_y_range() {
+        let mut footprint = BrushFootprint::new();
+        footprint.add_cell(CellXZ::new(5, 5));
+
+        let chunks = footprint.affected_chunks_for_y_range(32.0, 1.0, -10.0, 50.0);
+        assert!(!chunks.is_empty(), "Should have affected chunks");
+        // Y range -10 to 50 with chunk_size 32: chunks at Y=-1, 0, 1 (plus padding)
+        assert!(chunks.len() >= 3, "Should span multiple Y chunks");
+    }
+
+    #[test]
+    fn test_smootherstep_boundaries() {
+        // C² continuous: zero derivatives at 0 and 1
+        assert!((Brush::smootherstep(0.0)).abs() < 0.001);
+        assert!((Brush::smootherstep(1.0) - 1.0).abs() < 0.001);
+        assert!((Brush::smootherstep(0.5) - 0.5).abs() < 0.001); // symmetric midpoint
+    }
+
+    #[test]
+    fn test_feather_zero_is_hard_edge() {
+        let mut brush = Brush::new(1.0);
+        brush.set_feather(0.0);
+        // All cells should get falloff = 1.0 regardless of distance
+        assert!((brush.compute_falloff(5.0, 0.0, 0.0, 0.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_feather_full_falloff() {
+        let mut brush = Brush::new(1.0);
+        brush.size = 10.0;
+        brush.set_feather(1.0);
+        // Center = full strength
+        assert!((brush.compute_falloff(0.0, 0.0, 0.0, 0.0) - 1.0).abs() < 0.001);
+        // Edge = zero strength
+        assert!(brush.compute_falloff(10.0, 0.0, 0.0, 0.0) < 0.01);
+    }
+
+    #[test]
+    fn test_feather_clamped() {
+        let mut brush = Brush::new(1.0);
+        brush.set_feather(-0.5);
+        assert_eq!(brush.feather, 0.0);
+        brush.set_feather(1.5);
+        assert_eq!(brush.feather, 1.0);
+        brush.set_feather(0.5);
+        assert_eq!(brush.feather, 0.5);
+    }
+
+    #[test]
+    fn test_y_falloff_inside_core() {
+        let mut brush = Brush::new(1.0);
+        brush.set_feather(1.0);
+        // Inside core zone: falloff = 1.0
+        assert!((brush.compute_y_falloff(5.0, 3.0, 7.0, 2.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_y_falloff_at_padding_edge() {
+        let mut brush = Brush::new(1.0);
+        brush.set_feather(1.0);
+        // At the far edge of padding (core_max + padding): falloff ≈ 0.0
+        assert!(brush.compute_y_falloff(9.0, 3.0, 7.0, 2.0) < 0.01);
+        // At the far edge below (core_min - padding):
+        assert!(brush.compute_y_falloff(1.0, 3.0, 7.0, 2.0) < 0.01);
+    }
+
+    #[test]
+    fn test_y_falloff_zero_feather() {
+        let mut brush = Brush::new(1.0);
+        brush.set_feather(0.0);
+        // No feather: always 1.0 regardless of Y position
+        assert!((brush.compute_y_falloff(100.0, 3.0, 7.0, 2.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_brush_smooth_workflow() {
+        let mut brush = Brush::new(1.0);
+        brush.set_mode(BrushMode::Smooth);
+        brush.set_size(2.0);
+
+        // Begin stroke (goes to Painting phase for smooth)
+        brush.begin_stroke(5.0, 10.0, 5.0);
+        assert_eq!(brush.phase, BrushPhase::Painting);
+
+        // Continue stroke
+        brush.continue_stroke(7.0, 10.0, 7.0);
+
+        // End stroke → CommitSmooth
+        let action = brush.end_stroke(100.0);
+        assert_eq!(action, BrushAction::CommitSmooth);
+        assert_eq!(brush.phase, BrushPhase::Idle);
+    }
+
+    #[test]
+    fn test_flatten_direction_default_is_both() {
+        let brush = Brush::default();
+        assert_eq!(brush.flatten_direction, FlattenDirection::Both);
+    }
+
+    #[test]
+    fn test_flatten_direction_up() {
+        let mut brush = Brush::new(1.0);
+        brush.set_flatten_direction(FlattenDirection::Up);
+        assert_eq!(brush.flatten_direction, FlattenDirection::Up);
     }
 }
