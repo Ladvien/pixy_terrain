@@ -264,6 +264,8 @@ pub struct Brush {
     pub max_cell_x: i32,
     /// Maximum cell Z index (exclusive) for terrain bounds clamping
     pub max_cell_z: i32,
+    /// World-space XZ centers of each brush stamp (polyline for stroke path)
+    pub stroke_centers: Vec<(f32, f32)>,
 }
 
 impl Default for Brush {
@@ -286,6 +288,7 @@ impl Default for Brush {
             curvature_adjust_start_y: 0.0,
             max_cell_x: i32::MAX,
             max_cell_z: i32::MAX,
+            stroke_centers: Vec::new(),
         }
     }
 }
@@ -306,6 +309,7 @@ impl Brush {
     /// Start a brush stroke at the given world position
     pub fn begin_stroke(&mut self, world_x: f32, world_y: f32, world_z: f32) {
         self.footprint.clear();
+        self.stroke_centers.clear();
         self.footprint.base_y = world_y;
 
         match self.mode {
@@ -377,6 +381,7 @@ impl Brush {
     /// Cancel the current brush operation
     pub fn cancel(&mut self) {
         self.footprint.clear();
+        self.stroke_centers.clear();
         self.phase = BrushPhase::Idle;
         self.curvature = 0.0;
     }
@@ -400,6 +405,7 @@ impl Brush {
 
     /// Add cells at a world XZ position based on brush shape and size
     fn add_cells_at(&mut self, world_x: f32, world_z: f32) {
+        self.stroke_centers.push((world_x, world_z));
         let center_cell_x = (world_x / self.voxel_size).floor() as i32;
         let center_cell_z = (world_z / self.voxel_size).floor() as i32;
         let radius_cells = (self.size / self.voxel_size).ceil() as i32;
@@ -479,16 +485,15 @@ impl Brush {
         if y_min >= y_max {
             return Vec::new();
         }
-        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
 
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
             // Grid-aligned position for noise sampling (matches mesh generation)
             let grid_x = cell.x as f32 * self.voxel_size;
             let grid_z = cell.z as f32 * self.voxel_size;
-            let falloff = self.compute_falloff(wx, wz, cx, cz);
+            let falloff = self.compute_stroke_falloff(wx, wz);
             let curvature_factor = if self.curvature.abs() > 0.001 {
-                let dist = ((wx - cx).powi(2) + (wz - cz).powi(2)).sqrt();
+                let dist = self.min_distance_to_stroke(wx, wz);
                 let ratio = (dist / self.size).clamp(0.0, 1.0);
                 if self.curvature > 0.0 {
                     // Dome: 1.0 at center, (1-curvature) at edge
@@ -647,6 +652,58 @@ impl Brush {
         1.0 - self.feather * Self::smootherstep(ratio)
     }
 
+    /// Squared distance from point (px, pz) to line segment (ax, az)–(bx, bz).
+    fn point_to_segment_dist_sq(px: f32, pz: f32, ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
+        let dx = bx - ax;
+        let dz = bz - az;
+        let len_sq = dx * dx + dz * dz;
+        if len_sq < 1e-12 {
+            // Degenerate segment (a == b): point distance
+            return (px - ax).powi(2) + (pz - az).powi(2);
+        }
+        // Project point onto line, clamp to [0,1]
+        let t = ((px - ax) * dx + (pz - az) * dz) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+        let proj_x = ax + t * dx;
+        let proj_z = az + t * dz;
+        (px - proj_x).powi(2) + (pz - proj_z).powi(2)
+    }
+
+    /// Minimum distance from point (px, pz) to the stroke polyline.
+    /// With a single center, degenerates to point distance (preserving dome for single-click).
+    pub fn min_distance_to_stroke(&self, px: f32, pz: f32) -> f32 {
+        let centers = &self.stroke_centers;
+        if centers.is_empty() {
+            return f32::MAX;
+        }
+        if centers.len() == 1 {
+            let (cx, cz) = centers[0];
+            return ((px - cx).powi(2) + (pz - cz).powi(2)).sqrt();
+        }
+        let mut min_sq = f32::MAX;
+        for i in 0..centers.len() - 1 {
+            let (ax, az) = centers[i];
+            let (bx, bz) = centers[i + 1];
+            let d_sq = Self::point_to_segment_dist_sq(px, pz, ax, az, bx, bz);
+            if d_sq < min_sq {
+                min_sq = d_sq;
+            }
+        }
+        min_sq.sqrt()
+    }
+
+    /// Compute feather falloff using distance to the stroke polyline.
+    /// Same logic as `compute_falloff` but measures distance to the nearest
+    /// stroke segment instead of to a single centroid.
+    pub fn compute_stroke_falloff(&self, wx: f32, wz: f32) -> f32 {
+        if self.feather <= 0.0 {
+            return 1.0;
+        }
+        let dist = self.min_distance_to_stroke(wx, wz);
+        let ratio = (dist / self.size).clamp(0.0, 1.0);
+        1.0 - self.feather * Self::smootherstep(ratio)
+    }
+
     /// Compute Y-axis feather falloff.
     /// Returns 1.0 inside the core zone, tapering to (1 - feather) at the padding boundary.
     pub fn compute_y_falloff(&self, y: f32, core_min: f32, core_max: f32, padding: f32) -> f32 {
@@ -693,11 +750,9 @@ impl Brush {
         if y_min >= y_max {
             return Vec::new();
         }
-        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
-
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
-            let falloff = self.compute_falloff(wx, wz, cx, cz);
+            let falloff = self.compute_stroke_falloff(wx, wz);
             let original_surface_y = Self::find_surface_y(
                 noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size,
             );
@@ -801,11 +856,9 @@ impl Brush {
         if y_min >= y_max {
             return Vec::new();
         }
-        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
-
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
-            let falloff = self.compute_falloff(wx, wz, cx, cz);
+            let falloff = self.compute_stroke_falloff(wx, wz);
 
             // Find the current surface height at this XZ column
             let original_surface_y =
@@ -911,8 +964,6 @@ impl Brush {
         if y_min >= y_max {
             return Vec::new();
         }
-        let (cx, cz) = self.footprint.compute_centroid(self.voxel_size);
-
         let core_min = base_y - self.voxel_size;
         let core_max = base_y + self.voxel_size;
         let y_padding = 4.0 * self.voxel_size;
@@ -921,7 +972,7 @@ impl Brush {
 
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, vs);
-            let falloff = self.compute_falloff(wx, wz, cx, cz);
+            let falloff = self.compute_stroke_falloff(wx, wz);
 
             let mut y = y_min;
             while y <= y_max {
@@ -1345,7 +1396,11 @@ mod tests {
         brush.set_feather(0.0);
 
         brush.footprint.clear();
+        brush.stroke_centers.clear();
         brush.footprint.add_cell(CellXZ::new(5, 5));
+        // Single stamp center at cell (5,5) world position
+        let (cwx, _, cwz) = CellXZ::new(5, 5).to_world(0.0, voxel_size);
+        brush.stroke_centers.push((cwx, cwz));
         brush.footprint.base_y = 0.0;
         brush.footprint.height_delta = height_delta;
 
@@ -1454,10 +1509,13 @@ mod tests {
         brush.set_feather(0.0);
 
         brush.footprint.clear();
+        brush.stroke_centers.clear();
         brush.footprint.base_y = base_y;
         brush.footprint.height_delta = height_delta;
         for cell in &test_columns {
             brush.footprint.add_cell(*cell);
+            let (wx, _, wz) = cell.to_world(0.0, voxel_size);
+            brush.stroke_centers.push((wx, wz));
         }
 
         let chunks = brush.apply_geometry(&noise, &existing_mods, &mut new_mods);
@@ -1531,9 +1589,13 @@ mod tests {
 
         // Build footprint centered at (50, 50)
         brush.footprint.clear();
+        brush.stroke_centers.clear();
         brush.footprint.base_y = base_y;
         brush.footprint.height_delta = height_delta;
         let center = 50;
+        // Single stamp center at (50, 50) world position
+        let (sc_x, _, sc_z) = CellXZ::new(center, center).to_world(0.0, voxel_size);
+        brush.stroke_centers.push((sc_x, sc_z));
         let radius_cells = (brush.size / voxel_size).ceil() as i32;
         let radius_sq = brush.size * brush.size;
         for dz in -radius_cells..=radius_cells {
@@ -1703,5 +1765,156 @@ mod tests {
         let (clamped_min, clamped_max) = Brush::clamp_y_range(-20.0, 120.0, &noise);
         assert_eq!(clamped_min, -20.0);
         assert_eq!(clamped_max, 120.0);
+    }
+
+    #[test]
+    fn test_min_distance_single_center() {
+        // With one center, min_distance_to_stroke degenerates to point distance
+        let mut brush = Brush::new(1.0);
+        brush.stroke_centers.push((10.0, 20.0));
+
+        let dist = brush.min_distance_to_stroke(13.0, 24.0);
+        let expected = ((3.0f32).powi(2) + (4.0f32).powi(2)).sqrt(); // 5.0
+        assert!((dist - expected).abs() < 0.001, "dist={dist}, expected={expected}");
+    }
+
+    #[test]
+    fn test_min_distance_to_segment() {
+        let mut brush = Brush::new(1.0);
+        // Horizontal segment from (0,0) to (10,0)
+        brush.stroke_centers.push((0.0, 0.0));
+        brush.stroke_centers.push((10.0, 0.0));
+
+        // Perpendicular distance from (5, 3) to segment = 3.0
+        let dist = brush.min_distance_to_stroke(5.0, 3.0);
+        assert!((dist - 3.0).abs() < 0.001, "perpendicular dist={dist}");
+
+        // Beyond the end: (12, 0) → distance to endpoint (10, 0) = 2.0
+        let dist2 = brush.min_distance_to_stroke(12.0, 0.0);
+        assert!((dist2 - 2.0).abs() < 0.001, "beyond-end dist={dist2}");
+
+        // Before the start: (-3, 0) → distance to endpoint (0, 0) = 3.0
+        let dist3 = brush.min_distance_to_stroke(-3.0, 0.0);
+        assert!((dist3 - 3.0).abs() < 0.001, "before-start dist={dist3}");
+    }
+
+    #[test]
+    fn test_stroke_falloff_uniform_along_path() {
+        // Points directly on a long stroke path should all get falloff=1.0
+        let mut brush = Brush::new(1.0);
+        brush.size = 5.0;
+        brush.set_feather(1.0);
+
+        // Long horizontal stroke
+        brush.stroke_centers.push((0.0, 0.0));
+        brush.stroke_centers.push((50.0, 0.0));
+
+        // Points on the path should have distance 0 → falloff 1.0
+        for x in [0.0, 10.0, 25.0, 40.0, 50.0] {
+            let falloff = brush.compute_stroke_falloff(x, 0.0);
+            assert!(
+                (falloff - 1.0).abs() < 0.001,
+                "On-path point ({x}, 0) should have falloff=1.0, got {falloff}"
+            );
+        }
+
+        // Points perpendicular at brush-size distance should have near-zero falloff
+        for x in [10.0, 25.0, 40.0] {
+            let falloff = brush.compute_stroke_falloff(x, 5.0);
+            assert!(
+                falloff < 0.01,
+                "Edge-perpendicular point ({x}, 5) should have near-zero falloff, got {falloff}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stroke_centers_cleared_on_begin() {
+        let mut brush = Brush::new(1.0);
+        brush.set_size(2.0);
+        brush.set_shape(BrushShape::Square);
+
+        // First stroke
+        brush.begin_stroke(10.0, 5.0, 10.0);
+        brush.continue_stroke(20.0, 5.0, 20.0);
+        assert!(brush.stroke_centers.len() >= 2);
+
+        // Cancel and begin new stroke — centers should be cleared
+        brush.cancel();
+        assert!(brush.stroke_centers.is_empty(), "cancel should clear stroke_centers");
+
+        brush.begin_stroke(30.0, 5.0, 30.0);
+        assert_eq!(brush.stroke_centers.len(), 1, "begin_stroke should start fresh");
+    }
+
+    #[test]
+    fn test_elevation_ridge_not_dome() {
+        // A long elevation stroke should produce uniform surface height along the
+        // path, not a dome that tapers at the ends.
+        let voxel_size = 1.0;
+        let noise = NoiseField::new(42, 1, 0.01, 2.0, 0.0, 0.0, None);
+
+        let existing_mods = ModificationLayer::new(32, voxel_size);
+        let mut new_mods = ModificationLayer::new(32, voxel_size);
+
+        let mut brush = Brush::new(voxel_size);
+        brush.set_mode(BrushMode::Elevation);
+        brush.set_shape(BrushShape::Round);
+        brush.set_size(3.0);
+        brush.set_strength(1.0);
+        brush.set_feather(0.5);
+
+        // Simulate a long horizontal drag from x=10 to x=40 at z=20
+        brush.footprint.clear();
+        brush.stroke_centers.clear();
+        let z = 20;
+        for x in 10..=40 {
+            // Record a stamp center every few cells (simulating mouse movement)
+            if x % 3 == 0 || x == 10 || x == 40 {
+                let wx = x as f32 * voxel_size + voxel_size * 0.5;
+                let wz = z as f32 * voxel_size + voxel_size * 0.5;
+                brush.stroke_centers.push((wx, wz));
+            }
+            // Add cells within brush radius of the path
+            let radius_cells = (brush.size / voxel_size).ceil() as i32;
+            for dz in -radius_cells..=radius_cells {
+                let dist_z = dz as f32 * voxel_size;
+                if dist_z.abs() <= brush.size {
+                    brush.footprint.add_cell(CellXZ::new(x, z + dz));
+                }
+            }
+        }
+        brush.footprint.base_y = 0.0;
+        brush.footprint.height_delta = 8.0;
+
+        let chunks = brush.apply_geometry(&noise, &existing_mods, &mut new_mods);
+        assert!(!chunks.is_empty());
+
+        // Sample surface heights along the center of the path (z=20)
+        let y_search_min = -10.0;
+        let y_search_max = 20.0;
+        let mut surface_heights = Vec::new();
+        for x in [12, 20, 25, 30, 38] {
+            let gx = x as f32 * voxel_size;
+            let gz = z as f32 * voxel_size;
+            let sy = Brush::find_surface_y(
+                &noise, &new_mods, gx, gz, y_search_min, y_search_max, voxel_size,
+            );
+            surface_heights.push((x, sy));
+        }
+
+        // All points along the center of the path should have similar heights.
+        // With centroid-based falloff, end points would be much lower than the center.
+        let min_h = surface_heights.iter().map(|(_, h)| *h).fold(f32::MAX, f32::min);
+        let max_h = surface_heights.iter().map(|(_, h)| *h).fold(f32::MIN, f32::max);
+        let range = max_h - min_h;
+        assert!(
+            range < 2.0 * voxel_size,
+            "Surface heights along path center should be uniform.\n\
+             Heights: {:?}\n\
+             Range: {range} (should be < {})",
+            surface_heights,
+            2.0 * voxel_size,
+        );
     }
 }
