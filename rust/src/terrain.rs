@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::brush::{Brush, BrushAction, BrushMode, BrushPhase, BrushShape};
+use crate::brush_preview::BrushPreview;
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
 use crate::lod::LODConfig;
@@ -299,6 +300,18 @@ pub struct PixyTerrain {
     /// Brush state machine
     #[init(val = None)]
     brush: Option<Brush>,
+
+    /// Brush preview: footprint overlay mesh
+    #[init(val = None)]
+    preview_footprint: Option<Gd<MeshInstance3D>>,
+
+    /// Brush preview: height plane mesh
+    #[init(val = None)]
+    preview_height_plane: Option<Gd<MeshInstance3D>>,
+
+    /// Brush preview generator
+    #[init(val = None)]
+    brush_preview: Option<BrushPreview>,
 }
 
 #[godot_api]
@@ -313,6 +326,7 @@ impl INode3D for PixyTerrain {
             return;
         }
         self.update_terrain();
+        self.update_brush_preview();
     }
 }
 
@@ -792,7 +806,20 @@ impl PixyTerrain {
         self.pending_uploads.clear();
         self.uploaded_meshes.clear();
 
-        // 5. Drop systems
+        // 5. Free preview nodes
+        if let Some(mut node) = self.preview_footprint.take() {
+            if node.is_instance_valid() {
+                node.queue_free();
+            }
+        }
+        if let Some(mut node) = self.preview_height_plane.take() {
+            if node.is_instance_valid() {
+                node.queue_free();
+            }
+        }
+        self.brush_preview = None;
+
+        // 6. Drop systems
         self.worker_pool = None;
         self.chunk_manager = None;
         self.noise_field = None;
@@ -1378,6 +1405,109 @@ impl PixyTerrain {
         // Mark chunks dirty in the chunk manager
         if let Some(ref mut manager) = self.chunk_manager {
             manager.mark_chunks_dirty(chunks);
+        }
+    }
+
+    /// Ensure preview MeshInstance3D nodes and BrushPreview exist (lazy creation)
+    fn ensure_preview_nodes(&mut self) {
+        if self.brush_preview.is_none() {
+            self.brush_preview = Some(BrushPreview::new());
+        }
+
+        if self.preview_footprint.is_none() {
+            let mut node = MeshInstance3D::new_alloc();
+            node.set_name("BrushPreviewFootprint");
+            node.set_visible(false);
+            self.base_mut().add_child(&node);
+            self.preview_footprint = Some(node);
+        }
+
+        if self.preview_height_plane.is_none() {
+            let mut node = MeshInstance3D::new_alloc();
+            node.set_name("BrushPreviewHeightPlane");
+            node.set_visible(false);
+            self.base_mut().add_child(&node);
+            self.preview_height_plane = Some(node);
+        }
+    }
+
+    /// Update brush preview visualization based on current brush state
+    fn update_brush_preview(&mut self) {
+        let Some(ref brush) = self.brush else {
+            self.hide_preview();
+            return;
+        };
+
+        // Only show preview during active brush phases
+        match brush.phase {
+            BrushPhase::Idle => {
+                self.hide_preview();
+                return;
+            }
+            BrushPhase::PaintingArea | BrushPhase::AdjustingHeight | BrushPhase::Painting => {}
+        }
+
+        if brush.footprint.is_empty() {
+            self.hide_preview();
+            return;
+        }
+
+        // Clone brush data we need before mutable borrows
+        let brush_clone = brush.clone();
+
+        self.ensure_preview_nodes();
+
+        // Update footprint overlay
+        if let Some(ref mut preview) = self.brush_preview {
+            preview.update_material(&brush_clone);
+
+            if let Some(mesh) = preview.generate_mesh(&brush_clone) {
+                if let Some(ref mut footprint_node) = self.preview_footprint {
+                    footprint_node.set_mesh(&mesh);
+                    if let Some(mat) = preview.get_material() {
+                        footprint_node.set_surface_override_material(0, &mat.upcast::<Material>());
+                    }
+                    footprint_node.set_visible(true);
+                }
+            }
+        }
+
+        // Update height plane (only during AdjustingHeight phase)
+        if brush_clone.phase == BrushPhase::AdjustingHeight
+            && brush_clone.footprint.height_delta.abs() > 0.001
+        {
+            let fp = &brush_clone.footprint;
+            let vs = brush_clone.voxel_size;
+            let min_x = fp.min_x as f32 * vs;
+            let max_x = (fp.max_x + 1) as f32 * vs;
+            let min_z = fp.min_z as f32 * vs;
+            let max_z = (fp.max_z + 1) as f32 * vs;
+            let target_y = fp.base_y + fp.height_delta;
+            let raising = fp.height_delta > 0.0;
+
+            let plane_mesh =
+                BrushPreview::generate_height_plane_mesh(min_x, max_x, min_z, max_z, target_y);
+            let plane_mat = BrushPreview::create_height_plane_material(raising);
+
+            if let Some(ref mut plane_node) = self.preview_height_plane {
+                plane_node.set_mesh(&plane_mesh);
+                plane_node.set_surface_override_material(0, &plane_mat.upcast::<Material>());
+                plane_node.set_visible(true);
+            }
+        } else {
+            if let Some(ref mut plane_node) = self.preview_height_plane {
+                plane_node.set_visible(false);
+            }
+        }
+    }
+
+    /// Hide all preview nodes
+    fn hide_preview(&mut self) {
+        if let Some(ref mut node) = self.preview_footprint {
+            node.set_visible(false);
+        }
+        if let Some(ref mut node) = self.preview_height_plane {
+            node.set_visible(false);
         }
     }
 }

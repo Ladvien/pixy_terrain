@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Godot clip-plane / cross-sectional shaders
   - Walkthrough - https://www.ronja-tutorials.com/post/021-plane-clipping/
   - Godot Code - https://github.com/19PHOBOSS98/Godot-Planar-and-Box-Material-Cutoff-Shader
-- Please refer to documents in slop/research 4when planning
+- Please refer to documents in slop/research when planning
 
 ## Project Overview
 

@@ -41,6 +41,22 @@ void fragment() {
 }
 "#;
 
+/// Shader source for the height plane visualization (transparent quad at target height)
+const HEIGHT_PLANE_SHADER: &str = r#"
+shader_type spatial;
+render_mode blend_add, depth_draw_never, cull_disabled, unshaded;
+
+uniform vec4 plane_color : source_color = vec4(0.0, 1.0, 0.0, 0.25);
+
+void fragment() {
+    // Pulsing alpha for visual feedback
+    float pulse = 0.5 + 0.5 * sin(TIME * 3.0);
+    float alpha = plane_color.a * (0.6 + 0.4 * pulse);
+    ALBEDO = plane_color.rgb;
+    ALPHA = alpha;
+}
+"#;
+
 /// Colors for different brush modes and phases
 #[derive(Clone, Copy, Debug)]
 pub struct BrushColors {
@@ -240,6 +256,69 @@ impl BrushPreview {
         self.colors = colors;
         // Clear material to force recreation with new colors
         self.material = None;
+    }
+
+    /// Create a shader material for the height plane indicator.
+    /// Green when raising terrain, red when lowering.
+    pub fn create_height_plane_material(raising: bool) -> Gd<ShaderMaterial> {
+        let mut shader = Shader::new_gd();
+        shader.set_code(HEIGHT_PLANE_SHADER);
+
+        let mut material = ShaderMaterial::new_gd();
+        material.set_shader(&shader);
+
+        let color = if raising {
+            Color::from_rgba(0.0, 1.0, 0.0, 0.25) // Green
+        } else {
+            Color::from_rgba(1.0, 0.0, 0.0, 0.25) // Red
+        };
+        material.set_shader_parameter("plane_color", &color.to_variant());
+
+        material
+    }
+
+    /// Generate a single quad mesh at the given Y height covering the given XZ bounds.
+    pub fn generate_height_plane_mesh(
+        min_x: f32,
+        max_x: f32,
+        min_z: f32,
+        max_z: f32,
+        y: f32,
+    ) -> Gd<ArrayMesh> {
+        let vertices = PackedVector3Array::from(&[
+            Vector3::new(min_x, y, min_z),
+            Vector3::new(max_x, y, min_z),
+            Vector3::new(max_x, y, max_z),
+            Vector3::new(min_x, y, max_z),
+        ][..]);
+
+        let normals = PackedVector3Array::from(&[
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ][..]);
+
+        let indices = PackedInt32Array::from(&[0, 1, 2, 0, 2, 3][..]);
+
+        let mut mesh = ArrayMesh::new_gd();
+        let num_arrays = ArrayType::MAX.ord() as usize;
+        let mut arrays: Array<Variant> = Array::new();
+
+        for i in 0..num_arrays {
+            if i == ArrayType::VERTEX.ord() as usize {
+                arrays.push(&vertices.to_variant());
+            } else if i == ArrayType::NORMAL.ord() as usize {
+                arrays.push(&normals.to_variant());
+            } else if i == ArrayType::INDEX.ord() as usize {
+                arrays.push(&indices.to_variant());
+            } else {
+                arrays.push(&Variant::nil());
+            }
+        }
+
+        mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+        mesh
     }
 }
 

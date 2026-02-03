@@ -148,11 +148,14 @@ impl BrushFootprint {
             let chunk_x = cell.x.div_euclid(chunk_cells);
             let chunk_z = cell.z.div_euclid(chunk_cells);
 
-            // Add chunks at multiple Y levels (terrain can span multiple Y chunks)
-            // For now, add a reasonable range around base_y
-            let base_chunk_y = (self.base_y / chunk_size).floor() as i32;
-            for dy in -1..=2 {
-                chunks.insert(ChunkCoord::new(chunk_x, base_chunk_y + dy, chunk_z));
+            // Add chunks covering the full Y range of the modification
+            // (base_y to base_y + height_delta, with voxel_size padding)
+            let y_min = self.base_y + self.height_delta.min(0.0) - voxel_size;
+            let y_max = self.base_y + self.height_delta.max(0.0) + voxel_size;
+            let min_chunk_y = (y_min / chunk_size).floor() as i32;
+            let max_chunk_y = (y_max / chunk_size).floor() as i32;
+            for cy in (min_chunk_y - 1)..=(max_chunk_y + 1) {
+                chunks.insert(ChunkCoord::new(chunk_x, cy, chunk_z));
             }
         }
 
@@ -322,13 +325,9 @@ impl Brush {
             return Vec::new();
         }
 
-        let modification = if self.footprint.height_delta > 0.0 {
-            // Raising terrain: negative SDF delta (adds material)
-            VoxelMod::new(-self.footprint.height_delta, self.strength)
-        } else {
-            // Lowering terrain: positive SDF delta (removes material)
-            VoxelMod::new(-self.footprint.height_delta, self.strength)
-        };
+        // Negate height_delta for SDF: positive height → negative SDF (adds material),
+        // negative height → positive SDF (removes material)
+        let modification = VoxelMod::new(-self.footprint.height_delta, self.strength);
 
         let base_y = self.footprint.base_y;
         let height_delta = self.footprint.height_delta;
