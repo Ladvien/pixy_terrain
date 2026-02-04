@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::brush::{Brush, BrushAction, BrushMode, BrushPhase, BrushShape, FlattenDirection};
+use crate::brush::{
+    Brush, BrushAction, BrushFootprint, BrushMode, BrushPhase, BrushShape, FlattenDirection,
+};
 use crate::brush_preview::BrushPreview;
 use crate::chunk::{ChunkCoord, MeshResult};
 use crate::chunk_manager::ChunkManager;
@@ -16,6 +18,7 @@ use crate::mesh_postprocess::{CombinedMesh, MeshPostProcessor};
 use crate::mesh_worker::MeshWorkerPool;
 use crate::noise_field::NoiseField;
 use crate::terrain_modifications::ModificationLayer;
+use crate::terrain_stability::{self, GravityResult};
 use crate::texture_layer::TextureLayer;
 use crate::undo::UndoHistory;
 type VariantArray = Array<Variant>;
@@ -190,6 +193,11 @@ pub struct PixyTerrain {
     #[init(val = 0)]
     brush_flatten_direction: i32,
 
+    /// Enable gravity: unsupported floating terrain drops after brush commits
+    #[export]
+    #[init(val = false)]
+    enable_gravity: bool,
+
     /// Minimum radius for curvature preview mesh (prevents tiny previews on small brushes)
     #[export]
     #[init(val = 3.0)]
@@ -351,6 +359,14 @@ pub struct PixyTerrain {
     /// Undo/redo history for modification layer snapshots
     #[init(val = None)]
     undo_history: Option<UndoHistory>,
+
+    /// Receiver for background gravity computation results
+    #[init(val = None)]
+    gravity_result_rx: Option<crossbeam::channel::Receiver<GravityResult>>,
+
+    /// Whether a gravity computation is currently pending on a background thread
+    #[init(val = false)]
+    gravity_pending: bool,
 }
 
 #[godot_api]
@@ -631,6 +647,9 @@ impl PixyTerrain {
     }
 
     fn update_terrain(&mut self) {
+        // Poll for background gravity results (non-blocking)
+        self.poll_gravity_result();
+
         let camera_pos = self.get_camera_position();
 
         if let Some(ref pool) = self.worker_pool {
@@ -926,12 +945,16 @@ impl PixyTerrain {
         }
         self.brush_preview = None;
 
-        // 6. Clear undo history
+        // 6. Cancel pending gravity computation
+        self.gravity_result_rx = None;
+        self.gravity_pending = false;
+
+        // 7. Clear undo history
         if let Some(ref mut history) = self.undo_history {
             history.clear();
         }
 
-        // 7. Drop systems
+        // 8. Drop systems
         self.worker_pool = None;
         self.chunk_manager = None;
         self.noise_field = None;
@@ -1195,10 +1218,8 @@ impl PixyTerrain {
                 2 => FlattenDirection::Down,
                 _ => FlattenDirection::Both,
             });
-            let total_cells_x =
-                (self.map_width_x.max(1) * self.chunk_subdivisions.max(1)) as i32;
-            let total_cells_z =
-                (self.map_width_z.max(1) * self.chunk_subdivisions.max(1)) as i32;
+            let total_cells_x = (self.map_width_x.max(1) * self.chunk_subdivisions.max(1)) as i32;
+            let total_cells_z = (self.map_width_z.max(1) * self.chunk_subdivisions.max(1)) as i32;
             brush.set_terrain_bounds(total_cells_x, total_cells_z);
 
             brush.begin_stroke(world_pos.x, world_pos.y, world_pos.z);
@@ -1385,11 +1406,7 @@ impl PixyTerrain {
                     .undo_history
                     .as_ref()
                     .map_or((0, 0), |h| (h.undo_count(), h.redo_count()));
-                godot_print!(
-                    "PixyTerrain: Undo ({}+{} steps remaining)",
-                    undo_n,
-                    redo_n
-                );
+                godot_print!("PixyTerrain: Undo ({}+{} steps remaining)", undo_n, redo_n);
             }
             true
         } else {
@@ -1419,11 +1436,7 @@ impl PixyTerrain {
                     .undo_history
                     .as_ref()
                     .map_or((0, 0), |h| (h.undo_count(), h.redo_count()));
-                godot_print!(
-                    "PixyTerrain: Redo ({}+{} steps remaining)",
-                    undo_n,
-                    redo_n
-                );
+                godot_print!("PixyTerrain: Redo ({}+{} steps remaining)", undo_n, redo_n);
             }
             true
         } else {
@@ -1597,7 +1610,9 @@ impl PixyTerrain {
     /// Commit geometry modification from brush to modification layer
     fn commit_geometry_modification(&mut self) {
         let Some(ref brush) = self.brush else { return };
-        let Some(ref noise) = self.noise_field else { return };
+        let Some(ref noise) = self.noise_field else {
+            return;
+        };
         let Some(ref mod_layer) = self.modification_layer else {
             return;
         };
@@ -1607,16 +1622,21 @@ impl PixyTerrain {
             history.push(Arc::clone(mod_layer));
         }
 
+        // Clone footprint before mutable borrows
+        let footprint = brush.footprint.clone();
+
         // Clone for writing; read from the original to get correct current SDF
         let existing = mod_layer.as_ref();
         let mut new_mod_layer = existing.clone();
         let affected_chunks = brush.apply_geometry(noise, existing, &mut new_mod_layer);
 
-        // Store the updated layer
+        // Store the updated layer and mark chunks dirty immediately
+        let mod_layer_for_gravity = new_mod_layer.clone();
         self.modification_layer = Some(Arc::new(new_mod_layer));
-
-        // Mark affected chunks for regeneration
         self.mark_chunks_for_regeneration(&affected_chunks);
+
+        // Dispatch gravity on a background thread if enabled
+        self.dispatch_gravity_if_enabled(mod_layer_for_gravity, &footprint);
 
         if self.debug_logging {
             godot_print!(
@@ -1677,13 +1697,18 @@ impl PixyTerrain {
             history.push(Arc::clone(mod_layer));
         }
 
+        let footprint = brush.footprint.clone();
+
         // Clone for writing; read from the original to get correct current SDF
         let existing = mod_layer.as_ref();
         let mut new_mod_layer = existing.clone();
         let affected_chunks = brush.apply_flatten(noise, existing, &mut new_mod_layer);
 
+        let mod_layer_for_gravity = new_mod_layer.clone();
         self.modification_layer = Some(Arc::new(new_mod_layer));
         self.mark_chunks_for_regeneration(&affected_chunks);
+
+        self.dispatch_gravity_if_enabled(mod_layer_for_gravity, &footprint);
 
         if self.debug_logging {
             godot_print!(
@@ -1711,13 +1736,18 @@ impl PixyTerrain {
             history.push(Arc::clone(mod_layer));
         }
 
+        let footprint = brush.footprint.clone();
+
         // Clone for writing; read from the original to get correct current SDF
         let existing = mod_layer.as_ref();
         let mut new_mod_layer = existing.clone();
         let affected_chunks = brush.apply_plateau(noise, existing, &mut new_mod_layer);
 
+        let mod_layer_for_gravity = new_mod_layer.clone();
         self.modification_layer = Some(Arc::new(new_mod_layer));
         self.mark_chunks_for_regeneration(&affected_chunks);
+
+        self.dispatch_gravity_if_enabled(mod_layer_for_gravity, &footprint);
 
         if self.debug_logging {
             godot_print!(
@@ -1745,13 +1775,18 @@ impl PixyTerrain {
             history.push(Arc::clone(mod_layer));
         }
 
+        let footprint = brush.footprint.clone();
+
         // Clone for writing; read from the original to get correct current SDF
         let existing = mod_layer.as_ref();
         let mut new_mod_layer = existing.clone();
         let affected_chunks = brush.apply_smooth(noise, existing, &mut new_mod_layer);
 
+        let mod_layer_for_gravity = new_mod_layer.clone();
         self.modification_layer = Some(Arc::new(new_mod_layer));
         self.mark_chunks_for_regeneration(&affected_chunks);
+
+        self.dispatch_gravity_if_enabled(mod_layer_for_gravity, &footprint);
 
         if self.debug_logging {
             godot_print!(
@@ -1946,6 +1981,99 @@ impl PixyTerrain {
         }
         if let Some(ref mut node) = self.preview_height_plane {
             node.set_visible(false);
+        }
+    }
+
+    /// Dispatch gravity computation on a background thread if gravity is enabled.
+    ///
+    /// Cancels any previously pending gravity computation (the new brush commit
+    /// supersedes it since it has a newer modification layer).
+    fn dispatch_gravity_if_enabled(
+        &mut self,
+        mod_layer: ModificationLayer,
+        footprint: &BrushFootprint,
+    ) {
+        if !self.enable_gravity {
+            return;
+        }
+
+        let Some(ref noise_arc) = self.noise_field else {
+            return;
+        };
+
+        // Cancel any pending gravity by dropping the old receiver
+        self.gravity_result_rx = None;
+        self.gravity_pending = false;
+
+        let noise = Arc::clone(noise_arc);
+        let footprint = footprint.clone();
+        let voxel_size = self.voxel_size;
+        let box_bounds = noise.get_box_bounds();
+        let total_cells_x = (self.map_width_x.max(1) * self.chunk_subdivisions.max(1)) as i32;
+        let total_cells_z = (self.map_width_z.max(1) * self.chunk_subdivisions.max(1)) as i32;
+
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        self.gravity_result_rx = Some(rx);
+        self.gravity_pending = true;
+
+        std::thread::spawn(move || {
+            let result = terrain_stability::compute_gravity(
+                &noise,
+                mod_layer,
+                &footprint,
+                voxel_size,
+                box_bounds,
+                total_cells_x,
+                total_cells_z,
+            );
+            // If the receiver has been dropped (new brush commit), this send
+            // silently fails — which is the desired behavior.
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Poll for completed background gravity results (non-blocking).
+    ///
+    /// Called at the beginning of each frame in `update_terrain()`.
+    fn poll_gravity_result(&mut self) {
+        if !self.gravity_pending {
+            return;
+        }
+
+        let result = if let Some(ref rx) = self.gravity_result_rx {
+            match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(crossbeam::channel::TryRecvError::Empty) => None,
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    // Thread finished but channel was disconnected (shouldn't happen)
+                    self.gravity_pending = false;
+                    self.gravity_result_rx = None;
+                    None
+                }
+            }
+        } else {
+            self.gravity_pending = false;
+            None
+        };
+
+        if let Some(gravity_result) = result {
+            self.gravity_pending = false;
+            self.gravity_result_rx = None;
+
+            if gravity_result.components_dropped > 0 {
+                // Swap in the gravity-updated modification layer
+                self.modification_layer = Some(Arc::new(gravity_result.new_mod_layer));
+                self.mark_chunks_for_regeneration(&gravity_result.affected_chunks);
+
+                if self.debug_logging {
+                    godot_print!(
+                        "PixyTerrain: Gravity dropped {} of {} floating components, {} chunks affected",
+                        gravity_result.components_dropped,
+                        gravity_result.components_found,
+                        gravity_result.affected_chunks.len()
+                    );
+                }
+            }
         }
     }
 }
