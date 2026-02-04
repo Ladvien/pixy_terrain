@@ -4,58 +4,35 @@
 //! allowing brush-based terrain sculpting without regenerating the entire terrain.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 use crate::chunk::ChunkCoord;
 
 /// A single voxel modification.
 /// Stored sparsely - only modified voxels are tracked.
+///
+/// Uses absolute SDF mode: `desired_sdf` is the target SDF value at this voxel,
+/// and `blend` controls how much the final SDF uses this desired value vs the
+/// base noise. Combined as: `noise * (1 - blend) + desired_sdf * blend`.
 #[derive(Clone, Copy, Debug)]
 pub struct VoxelMod {
-    /// SDF delta: negative = add material (raise terrain), positive = remove material (lower terrain)
-    pub sdf_delta: f32,
-    /// Blend factor: 0.0 = ignore modification, 1.0 = fully apply
+    /// The target SDF value at this voxel (absolute, not a delta)
+    pub desired_sdf: f32,
+    /// Blend factor: 0.0 = use noise only, 1.0 = fully use desired_sdf
     pub blend: f32,
 }
 
 impl Default for VoxelMod {
     fn default() -> Self {
         Self {
-            sdf_delta: 0.0,
-            blend: 1.0,
+            desired_sdf: 0.0,
+            blend: 0.0,
         }
     }
 }
 
 impl VoxelMod {
-    pub fn new(sdf_delta: f32, blend: f32) -> Self {
-        Self { sdf_delta, blend }
-    }
-
-    /// Create a modification to raise terrain (add material)
-    pub fn raise(amount: f32) -> Self {
-        Self {
-            sdf_delta: -amount,
-            blend: 1.0,
-        }
-    }
-
-    /// Create a modification to lower terrain (remove material)
-    pub fn lower(amount: f32) -> Self {
-        Self {
-            sdf_delta: amount,
-            blend: 1.0,
-        }
-    }
-
-    /// Apply this modification to an existing SDF value
-    #[inline]
-    pub fn apply(&self, base_sdf: f32) -> f32 {
-        if self.blend <= 0.0 {
-            return base_sdf;
-        }
-        // Blend the modification with the base SDF
-        base_sdf + self.sdf_delta * self.blend
+    pub fn new(desired_sdf: f32, blend: f32) -> Self {
+        Self { desired_sdf, blend }
     }
 }
 
@@ -99,15 +76,6 @@ impl ChunkMods {
         self.mods.len()
     }
 
-    /// Clear all modifications in this chunk
-    pub fn clear(&mut self) {
-        self.mods.clear();
-    }
-
-    /// Iterate over all modifications
-    pub fn iter(&self) -> impl Iterator<Item = (&u32, &VoxelMod)> {
-        self.mods.iter()
-    }
 }
 
 /// Layer of terrain modifications spanning all chunks.
@@ -160,29 +128,6 @@ impl ModificationLayer {
         lx + ly * self.resolution + lz * self.resolution * self.resolution
     }
 
-    /// Convert local cell index to local 3D coordinates
-    pub fn local_index_to_local_pos(&self, index: u32) -> (u32, u32, u32) {
-        let z = index / (self.resolution * self.resolution);
-        let remainder = index % (self.resolution * self.resolution);
-        let y = remainder / self.resolution;
-        let x = remainder % self.resolution;
-        (x, y, z)
-    }
-
-    /// Convert local cell position and chunk to world position (cell center)
-    pub fn local_to_world(
-        &self,
-        chunk: ChunkCoord,
-        local_x: u32,
-        local_y: u32,
-        local_z: u32,
-    ) -> (f32, f32, f32) {
-        let world_x = chunk.x as f32 * self.chunk_size + (local_x as f32 + 0.5) * self.voxel_size;
-        let world_y = chunk.y as f32 * self.chunk_size + (local_y as f32 + 0.5) * self.voxel_size;
-        let world_z = chunk.z as f32 * self.chunk_size + (local_z as f32 + 0.5) * self.voxel_size;
-        (world_x, world_y, world_z)
-    }
-
     /// Set a modification at a world position
     pub fn set_at_world(&mut self, x: f32, y: f32, z: f32, modification: VoxelMod) {
         let chunk = self.world_to_chunk(x, y, z);
@@ -221,24 +166,9 @@ impl ModificationLayer {
         }
     }
 
-    /// Get modifications for a specific chunk
-    pub fn get_chunk_mods(&self, coord: &ChunkCoord) -> Option<&ChunkMods> {
-        self.chunks.get(coord)
-    }
-
-    /// Check if a chunk has any modifications
-    pub fn chunk_has_mods(&self, coord: &ChunkCoord) -> bool {
-        self.chunks.get(coord).map_or(false, |m| !m.is_empty())
-    }
-
     /// Get all chunks that have modifications
     pub fn modified_chunks(&self) -> impl Iterator<Item = &ChunkCoord> {
         self.chunks.keys()
-    }
-
-    /// Clear all modifications
-    pub fn clear(&mut self) {
-        self.chunks.clear();
     }
 
     /// Get total number of modifications across all chunks
@@ -246,9 +176,12 @@ impl ModificationLayer {
         self.chunks.values().map(|c| c.len()).sum()
     }
 
-    /// Sample the modification delta at a world position using trilinear interpolation
-    /// Returns the SDF delta to add to the base noise value
-    pub fn sample(&self, x: f32, y: f32, z: f32) -> f32 {
+    /// Sample the modification layer at a world position using trilinear interpolation.
+    /// Returns `(desired_total, blend_total)` for absolute SDF blending:
+    ///   `combined_sdf = noise * (1 - blend_total) + desired_total`
+    ///
+    /// Corners without modifications contribute (0, 0) — i.e. "use noise".
+    pub fn sample_absolute(&self, x: f32, y: f32, z: f32) -> (f32, f32) {
         // Find the voxel cell that contains this point
         let vx = (x / self.voxel_size).floor();
         let vy = (y / self.voxel_size).floor();
@@ -260,7 +193,8 @@ impl ModificationLayer {
         let fz = z / self.voxel_size - vz;
 
         // Sample 8 corners for trilinear interpolation
-        let mut total = 0.0f32;
+        let mut desired_total = 0.0f32;
+        let mut blend_total = 0.0f32;
 
         for dz in 0..2 {
             for dy in 0..2 {
@@ -280,21 +214,14 @@ impl ModificationLayer {
                         let weight_z = if dz == 0 { 1.0 - fz } else { fz };
                         let weight = weight_x * weight_y * weight_z;
 
-                        total += modification.sdf_delta * modification.blend * weight;
+                        desired_total += modification.desired_sdf * modification.blend * weight;
+                        blend_total += modification.blend * weight;
                     }
                 }
             }
         }
 
-        total
-    }
-
-    pub fn resolution(&self) -> u32 {
-        self.resolution
-    }
-
-    pub fn voxel_size(&self) -> f32 {
-        self.voxel_size
+        (desired_total, blend_total)
     }
 
     pub fn chunk_size(&self) -> f32 {
@@ -302,43 +229,19 @@ impl ModificationLayer {
     }
 }
 
-/// Thread-safe shared modification layer for parallel mesh generation
-pub type SharedModificationLayer = Arc<RwLock<ModificationLayer>>;
-
-/// Create a new shared modification layer
-pub fn new_shared_modification_layer(resolution: u32, voxel_size: f32) -> SharedModificationLayer {
-    Arc::new(RwLock::new(ModificationLayer::new(resolution, voxel_size)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_voxel_mod_apply() {
-        let base_sdf = 5.0;
+    fn test_voxel_mod_new() {
+        let m = VoxelMod::new(3.0, 0.5);
+        assert_eq!(m.desired_sdf, 3.0);
+        assert_eq!(m.blend, 0.5);
 
-        // Raising terrain (negative delta)
-        let raise_mod = VoxelMod::raise(3.0);
-        assert_eq!(raise_mod.apply(base_sdf), 2.0); // 5.0 + (-3.0) = 2.0
-
-        // Lowering terrain (positive delta)
-        let lower_mod = VoxelMod::lower(2.0);
-        assert_eq!(lower_mod.apply(base_sdf), 7.0); // 5.0 + 2.0 = 7.0
-
-        // Partial blend
-        let partial_mod = VoxelMod {
-            sdf_delta: -10.0,
-            blend: 0.5,
-        };
-        assert_eq!(partial_mod.apply(base_sdf), 0.0); // 5.0 + (-10.0 * 0.5) = 0.0
-
-        // Zero blend (no effect)
-        let no_effect = VoxelMod {
-            sdf_delta: -10.0,
-            blend: 0.0,
-        };
-        assert_eq!(no_effect.apply(base_sdf), 5.0);
+        let d = VoxelMod::default();
+        assert_eq!(d.desired_sdf, 0.0);
+        assert_eq!(d.blend, 0.0);
     }
 
     #[test]
@@ -347,12 +250,13 @@ mod tests {
 
         assert!(chunk_mods.is_empty());
 
-        chunk_mods.set(42, VoxelMod::raise(1.0));
+        chunk_mods.set(42, VoxelMod::new(-1.0, 1.0));
         assert!(!chunk_mods.is_empty());
         assert_eq!(chunk_mods.len(), 1);
 
         let m = chunk_mods.get(42).unwrap();
-        assert_eq!(m.sdf_delta, -1.0);
+        assert_eq!(m.desired_sdf, -1.0);
+        assert_eq!(m.blend, 1.0);
 
         chunk_mods.remove(42);
         assert!(chunk_mods.is_empty());
@@ -375,47 +279,64 @@ mod tests {
     fn test_modification_layer_set_get() {
         let mut layer = ModificationLayer::new(32, 1.0);
 
-        layer.set_at_world(16.0, 8.0, 24.0, VoxelMod::raise(5.0));
+        layer.set_at_world(16.0, 8.0, 24.0, VoxelMod::new(-5.0, 1.0));
 
         let modification = layer.get_at_world(16.0, 8.0, 24.0).unwrap();
-        assert_eq!(modification.sdf_delta, -5.0);
+        assert_eq!(modification.desired_sdf, -5.0);
+        assert_eq!(modification.blend, 1.0);
 
         layer.remove_at_world(16.0, 8.0, 24.0);
         assert!(layer.get_at_world(16.0, 8.0, 24.0).is_none());
     }
 
     #[test]
-    fn test_modification_layer_sample() {
+    fn test_modification_layer_sample_absolute() {
         let mut layer = ModificationLayer::new(32, 1.0);
 
-        // Set a modification
-        layer.set_at_world(10.0, 10.0, 10.0, VoxelMod::raise(4.0));
+        // Set a modification with desired_sdf = -4.0, blend = 1.0
+        layer.set_at_world(10.0, 10.0, 10.0, VoxelMod::new(-4.0, 1.0));
 
-        // Sample at the exact position should return the modification
-        let sample = layer.sample(10.5, 10.5, 10.5);
+        // Sample near the modification (offset by 0.5 into the cell)
+        let (desired, blend) = layer.sample_absolute(10.5, 10.5, 10.5);
+        // Only one corner has the modification, weight = 0.5^3 = 0.125
+        assert!(blend > 0.0, "Should have non-zero blend near modification");
         assert!(
-            sample < 0.0,
-            "Should have negative delta for raised terrain"
+            desired < 0.0,
+            "Should have negative desired_sdf for this modification"
         );
 
-        // Sample far away should return 0
-        let far_sample = layer.sample(100.0, 100.0, 100.0);
-        assert_eq!(far_sample, 0.0);
+        // Sample far away should return (0, 0)
+        let (far_desired, far_blend) = layer.sample_absolute(100.0, 100.0, 100.0);
+        assert_eq!(far_desired, 0.0);
+        assert_eq!(far_blend, 0.0);
     }
 
     #[test]
-    fn test_shared_modification_layer() {
-        let shared = new_shared_modification_layer(32, 1.0);
+    fn test_sample_absolute_full_blend_at_grid_point() {
+        let mut layer = ModificationLayer::new(32, 1.0);
 
-        {
-            let mut layer = shared.write().unwrap();
-            layer.set_at_world(5.0, 5.0, 5.0, VoxelMod::raise(2.0));
+        // Set all 8 corners of a cell to the same desired_sdf with blend=1.0
+        let desired = -3.0;
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    layer.set_at_world(
+                        10.0 + dx as f32,
+                        10.0 + dy as f32,
+                        10.0 + dz as f32,
+                        VoxelMod::new(desired, 1.0),
+                    );
+                }
+            }
         }
 
-        {
-            let layer = shared.read().unwrap();
-            let modification = layer.get_at_world(5.0, 5.0, 5.0).unwrap();
-            assert_eq!(modification.sdf_delta, -2.0);
-        }
+        // Sample at the center of the cell — all 8 corners contribute
+        let (d, b) = layer.sample_absolute(10.5, 10.5, 10.5);
+        assert!((b - 1.0).abs() < 0.001, "Blend should be ~1.0, got {b}");
+        assert!(
+            (d - desired).abs() < 0.001,
+            "Desired should be ~{desired}, got {d}"
+        );
     }
+
 }

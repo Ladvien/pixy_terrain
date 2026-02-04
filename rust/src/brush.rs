@@ -11,6 +11,33 @@ use crate::noise_field::NoiseField;
 use crate::terrain_modifications::{ModificationLayer, VoxelMod};
 use crate::texture_layer::{TextureLayer, TextureWeights};
 
+/// Minimum height delta to trigger geometry application.
+const MIN_HEIGHT_DELTA: f32 = 0.001;
+/// Minimum blend threshold for SDF compositing.
+const MIN_BLEND_THRESHOLD: f32 = 0.0001;
+/// Epsilon for detecting SDF/blend value changes.
+const CHANGE_EPSILON: f32 = 0.0001;
+/// Number of voxels of Y-axis padding when computing scan ranges.
+const Y_PADDING_VOXELS: f32 = 4.0;
+/// Threshold for degenerate (zero-length) path segments.
+const DEGENERATE_SEGMENT_THRESHOLD: f32 = 1e-12;
+/// Minimum total path length for stroke falloff computation.
+const MIN_PATH_LENGTH: f32 = 1e-6;
+/// Curvature sensitivity scaling factor.
+const CURVATURE_SENSITIVITY_FACTOR: f32 = 0.5;
+/// Minimum step size for plateau quantization.
+const MIN_STEP_SIZE: f32 = 0.1;
+/// Number of bisection iterations for surface Y detection.
+const SURFACE_BISECTION_ITERATIONS: u32 = 8;
+/// Number of face-adjacent neighbors for Laplacian smoothing.
+const FACE_NEIGHBOR_COUNT: f32 = 6.0;
+/// Default brush size (radius).
+const DEFAULT_BRUSH_SIZE: f32 = 5.0;
+/// Default height sensitivity (world units per pixel).
+const DEFAULT_HEIGHT_SENSITIVITY: f32 = 0.1;
+/// Default step size for plateau mode.
+const DEFAULT_STEP_SIZE: f32 = 4.0;
+
 /// Brush operating mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BrushMode {
@@ -25,6 +52,8 @@ pub enum BrushMode {
     Plateau,
     /// Smooth mode: Laplacian smoothing on the SDF field
     Smooth,
+    /// Slope mode: create sloped paths/ramps between start and end heights
+    Slope,
 }
 
 /// Direction constraint for flatten/plateau operations
@@ -125,19 +154,9 @@ impl BrushFootprint {
         self.cells.insert(cell);
     }
 
-    /// Check if the footprint contains a cell
-    pub fn contains(&self, cell: &CellXZ) -> bool {
-        self.cells.contains(cell)
-    }
-
     /// Get all cells in the footprint
     pub fn iter(&self) -> impl Iterator<Item = &CellXZ> {
         self.cells.iter()
-    }
-
-    /// Get the number of cells in the footprint
-    pub fn len(&self) -> usize {
-        self.cells.len()
     }
 
     /// Check if the footprint is empty
@@ -154,19 +173,6 @@ impl BrushFootprint {
         self.max_z = i32::MIN;
         self.base_y = 0.0;
         self.height_delta = 0.0;
-    }
-
-    /// Compute the XZ centroid of the footprint in world coordinates
-    pub fn compute_centroid(&self, voxel_size: f32) -> (f32, f32) {
-        if self.cells.is_empty() {
-            return (0.0, 0.0);
-        }
-        let (sum_x, sum_z) = self.cells.iter().fold((0.0f64, 0.0f64), |(sx, sz), cell| {
-            let (wx, _, wz) = cell.to_world(0.0, voxel_size);
-            (sx + wx as f64, sz + wz as f64)
-        });
-        let n = self.cells.len() as f64;
-        ((sum_x / n) as f32, (sum_z / n) as f32)
     }
 
     /// Get affected chunk coordinates
@@ -266,6 +272,8 @@ pub struct Brush {
     pub max_cell_z: i32,
     /// World-space XZ centers of each brush stamp (polyline for stroke path)
     pub stroke_centers: Vec<(f32, f32)>,
+    /// End height for slope mode (updated during drag)
+    pub slope_end_y: f32,
 }
 
 impl Default for Brush {
@@ -273,15 +281,15 @@ impl Default for Brush {
         Self {
             mode: BrushMode::Elevation,
             shape: BrushShape::Round,
-            size: 5.0,
+            size: DEFAULT_BRUSH_SIZE,
             strength: 1.0,
             phase: BrushPhase::Idle,
             footprint: BrushFootprint::new(),
             selected_texture: 0,
             height_adjust_start_y: 0.0,
-            height_sensitivity: 0.1,
+            height_sensitivity: DEFAULT_HEIGHT_SENSITIVITY,
             voxel_size: 1.0,
-            step_size: 4.0,
+            step_size: DEFAULT_STEP_SIZE,
             feather: 0.0,
             flatten_direction: FlattenDirection::Both,
             curvature: 0.0,
@@ -289,6 +297,7 @@ impl Default for Brush {
             max_cell_x: i32::MAX,
             max_cell_z: i32::MAX,
             stroke_centers: Vec::new(),
+            slope_end_y: 0.0,
         }
     }
 }
@@ -317,8 +326,11 @@ impl Brush {
                 self.phase = BrushPhase::PaintingArea;
                 self.add_cells_at(world_x, world_z);
             }
-            BrushMode::Texture | BrushMode::Flatten | BrushMode::Plateau | BrushMode::Smooth => {
+            BrushMode::Texture | BrushMode::Flatten | BrushMode::Plateau | BrushMode::Smooth | BrushMode::Slope => {
                 self.phase = BrushPhase::Painting;
+                if self.mode == BrushMode::Slope {
+                    self.slope_end_y = world_y;
+                }
                 self.add_cells_at(world_x, world_z);
             }
         }
@@ -329,6 +341,9 @@ impl Brush {
         match self.phase {
             BrushPhase::PaintingArea | BrushPhase::Painting => {
                 self.add_cells_at(world_x, world_z);
+                if self.mode == BrushMode::Slope {
+                    self.slope_end_y = world_y;
+                }
             }
             BrushPhase::AdjustingHeight => {
                 // Height is adjusted based on mouse Y movement
@@ -371,6 +386,7 @@ impl Brush {
                     BrushMode::Flatten => BrushAction::CommitFlatten,
                     BrushMode::Plateau => BrushAction::CommitPlateau,
                     BrushMode::Smooth => BrushAction::CommitSmooth,
+                    BrushMode::Slope => BrushAction::CommitSlope,
                     _ => BrushAction::CommitTexture,
                 }
             }
@@ -399,7 +415,7 @@ impl Brush {
         if self.phase == BrushPhase::AdjustingCurvature {
             let delta_pixels = screen_y - self.curvature_adjust_start_y;
             // Down = positive curvature (dome), up = negative (bowl)
-            self.curvature = (delta_pixels * self.height_sensitivity * 0.5).clamp(-1.0, 1.0);
+            self.curvature = (delta_pixels * self.height_sensitivity * CURVATURE_SENSITIVITY_FACTOR).clamp(-1.0, 1.0);
         }
     }
 
@@ -432,11 +448,7 @@ impl Brush {
                         if dist_x * dist_x + dist_z * dist_z <= radius_sq {
                             let cx = center_cell_x + dx;
                             let cz = center_cell_z + dz;
-                            if cx < 0
-                                || cx >= self.max_cell_x
-                                || cz < 0
-                                || cz >= self.max_cell_z
-                            {
+                            if cx < 0 || cx >= self.max_cell_x || cz < 0 || cz >= self.max_cell_z {
                                 continue;
                             }
                             self.footprint.add_cell(CellXZ::new(cx, cz));
@@ -461,7 +473,7 @@ impl Brush {
         existing_mods: &ModificationLayer,
         new_mods: &mut ModificationLayer,
     ) -> Vec<ChunkCoord> {
-        if self.footprint.is_empty() || self.footprint.height_delta.abs() < 0.001 {
+        if self.footprint.is_empty() || self.footprint.height_delta.abs() < MIN_HEIGHT_DELTA {
             return Vec::new();
         }
 
@@ -476,7 +488,7 @@ impl Brush {
         let terrain_trough = floor_y + height_offset - noise.get_amplitude();
         let target_max = base_y + height_delta.max(0.0);
         let target_min = base_y + height_delta.min(0.0);
-        let padding = 4.0 * self.voxel_size;
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
         let (y_min, y_max) = Self::clamp_y_range(
             (terrain_trough.min(target_min) - padding).floor(),
             (terrain_peak.max(target_max) + padding).ceil(),
@@ -507,9 +519,8 @@ impl Brush {
             };
 
             let raised_y = base_y + height_delta * curvature_factor;
-            let original_surface_y = Self::find_surface_y(
-                noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size,
-            );
+            let original_surface_y =
+                Self::find_surface_y(noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size);
             let target_y = original_surface_y + (raised_y - original_surface_y) * falloff;
 
             let mut y = y_min;
@@ -525,16 +536,15 @@ impl Brush {
                     };
 
                 // Alpha-composite: layer new brush on top of existing
-                let combined_blend =
-                    1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
+                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
 
-                if combined_blend > 0.0001 {
+                if combined_blend > MIN_BLEND_THRESHOLD {
                     let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
                         + desired_sdf * new_blend)
                         / combined_blend;
 
-                    let changed = (combined_desired - existing_desired).abs() > 0.0001
-                        || (combined_blend - existing_blend).abs() > 0.0001;
+                    let changed = (combined_desired - existing_desired).abs() > CHANGE_EPSILON
+                        || (combined_blend - existing_blend).abs() > CHANGE_EPSILON;
                     if changed {
                         new_mods.set_at_world(
                             grid_x,
@@ -614,7 +624,7 @@ impl Brush {
 
     /// Set step size for plateau mode
     pub fn set_step_size(&mut self, step_size: f32) {
-        self.step_size = step_size.max(0.1);
+        self.step_size = step_size.max(MIN_STEP_SIZE);
     }
 
     /// Set feather amount (0.0 = hard edge, 1.0 = full falloff)
@@ -641,23 +651,12 @@ impl Brush {
         t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
     }
 
-    /// Compute feather falloff at a world XZ position relative to centroid.
-    /// Returns 1.0 at center, falling to (1 - feather) at the brush edge.
-    pub fn compute_falloff(&self, wx: f32, wz: f32, center_x: f32, center_z: f32) -> f32 {
-        if self.feather <= 0.0 {
-            return 1.0;
-        }
-        let dist = ((wx - center_x).powi(2) + (wz - center_z).powi(2)).sqrt();
-        let ratio = (dist / self.size).clamp(0.0, 1.0);
-        1.0 - self.feather * Self::smootherstep(ratio)
-    }
-
     /// Squared distance from point (px, pz) to line segment (ax, az)–(bx, bz).
     fn point_to_segment_dist_sq(px: f32, pz: f32, ax: f32, az: f32, bx: f32, bz: f32) -> f32 {
         let dx = bx - ax;
         let dz = bz - az;
         let len_sq = dx * dx + dz * dz;
-        if len_sq < 1e-12 {
+        if len_sq < DEGENERATE_SEGMENT_THRESHOLD {
             // Degenerate segment (a == b): point distance
             return (px - ax).powi(2) + (pz - az).powi(2);
         }
@@ -741,7 +740,7 @@ impl Brush {
         let height_offset = noise.get_height_offset();
         let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
         let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = 4.0 * self.voxel_size;
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
         let (y_min, y_max) = Self::clamp_y_range(
             (terrain_trough.min(base_y) - padding).floor(),
             (terrain_peak.max(base_y) + padding).ceil(),
@@ -753,9 +752,8 @@ impl Brush {
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
             let falloff = self.compute_stroke_falloff(wx, wz);
-            let original_surface_y = Self::find_surface_y(
-                noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size,
-            );
+            let original_surface_y =
+                Self::find_surface_y(noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size);
             let target_y = original_surface_y + (base_y - original_surface_y) * falloff;
 
             let mut y = y_min;
@@ -766,21 +764,19 @@ impl Brush {
                 let noise_val = noise.sample(wx, y, wz);
 
                 // Read existing modification state
-                let (existing_desired, existing_blend) =
-                    match existing_mods.get_at_world(wx, y, wz) {
-                        Some(m) => (m.desired_sdf, m.blend),
-                        None => (noise_val, 0.0),
-                    };
+                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
+                {
+                    Some(m) => (m.desired_sdf, m.blend),
+                    None => (noise_val, 0.0),
+                };
 
                 // Alpha-composite
-                let combined_blend =
-                    1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
+                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
 
-                if combined_blend > 0.0001 {
-                    let combined_desired =
-                        (existing_desired * existing_blend * (1.0 - new_blend)
-                            + desired_sdf * new_blend)
-                            / combined_blend;
+                if combined_blend > MIN_BLEND_THRESHOLD {
+                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
+                        + desired_sdf * new_blend)
+                        / combined_blend;
 
                     // Direction filter: compare effective SDF values
                     let current_sdf =
@@ -809,8 +805,8 @@ impl Brush {
                         }
                     };
 
-                    let changed = (final_desired - existing_desired).abs() > 0.0001
-                        || (final_blend - existing_blend).abs() > 0.0001;
+                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
+                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
                     if changed {
                         new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
                     }
@@ -847,7 +843,7 @@ impl Brush {
         let height_offset = noise.get_height_offset();
         let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
         let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = 4.0 * self.voxel_size;
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
         let (y_min, y_max) = Self::clamp_y_range(
             (terrain_trough.min(base_y) - padding).floor(),
             (terrain_peak.max(base_y) + padding).ceil(),
@@ -876,21 +872,19 @@ impl Brush {
                 let noise_val = noise.sample(wx, y, wz);
 
                 // Read existing modification state
-                let (existing_desired, existing_blend) =
-                    match existing_mods.get_at_world(wx, y, wz) {
-                        Some(m) => (m.desired_sdf, m.blend),
-                        None => (noise_val, 0.0),
-                    };
+                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
+                {
+                    Some(m) => (m.desired_sdf, m.blend),
+                    None => (noise_val, 0.0),
+                };
 
                 // Alpha-composite
-                let combined_blend =
-                    1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
+                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
 
-                if combined_blend > 0.0001 {
-                    let combined_desired =
-                        (existing_desired * existing_blend * (1.0 - new_blend)
-                            + desired_sdf * new_blend)
-                            / combined_blend;
+                if combined_blend > MIN_BLEND_THRESHOLD {
+                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
+                        + desired_sdf * new_blend)
+                        / combined_blend;
 
                     // Direction filter: compare effective SDF values
                     let current_sdf =
@@ -917,8 +911,8 @@ impl Brush {
                         }
                     };
 
-                    let changed = (final_desired - existing_desired).abs() > 0.0001
-                        || (final_blend - existing_blend).abs() > 0.0001;
+                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
+                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
                     if changed {
                         new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
                     }
@@ -955,7 +949,7 @@ impl Brush {
         let height_offset = noise.get_height_offset();
         let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
         let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = 4.0 * self.voxel_size;
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
         let (y_min, y_max) = Self::clamp_y_range(
             (terrain_trough.min(base_y) - padding).floor(),
             (terrain_peak.max(base_y) + padding).ceil(),
@@ -966,7 +960,7 @@ impl Brush {
         }
         let core_min = base_y - self.voxel_size;
         let core_max = base_y + self.voxel_size;
-        let y_padding = 4.0 * self.voxel_size;
+        let y_padding = Y_PADDING_VOXELS * self.voxel_size;
 
         let vs = self.voxel_size;
 
@@ -986,7 +980,7 @@ impl Brush {
                 let n_zp = noise.sample_with_mods(wx, y, wz + vs, existing_mods);
                 let n_zn = noise.sample_with_mods(wx, y, wz - vs, existing_mods);
 
-                let neighbor_avg = (n_xp + n_xn + n_yp + n_yn + n_zp + n_zn) / 6.0;
+                let neighbor_avg = (n_xp + n_xn + n_yp + n_yn + n_zp + n_zn) / FACE_NEIGHBOR_COUNT;
                 let laplacian = neighbor_avg - current_sdf;
 
                 let y_falloff = self.compute_y_falloff(y, core_min, core_max, y_padding);
@@ -996,21 +990,223 @@ impl Brush {
                 let smoothed_sdf = current_sdf + laplacian * smooth_amount;
 
                 // Read existing modification state
-                let (existing_desired, existing_blend) =
-                    match existing_mods.get_at_world(wx, y, wz) {
-                        Some(m) => (m.desired_sdf, m.blend),
-                        None => (noise.sample(wx, y, wz), 0.0),
-                    };
+                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
+                {
+                    Some(m) => (m.desired_sdf, m.blend),
+                    None => (noise.sample(wx, y, wz), 0.0),
+                };
 
                 // For smooth, the result IS the desired value — store with blend=1.0
                 // because we've already computed the final combined SDF we want.
-                let changed = (smoothed_sdf - existing_desired).abs() > 0.0001
-                    || (1.0 - existing_blend).abs() > 0.0001;
-                if changed && smooth_amount > 0.0001 {
+                let changed = (smoothed_sdf - existing_desired).abs() > CHANGE_EPSILON
+                    || (1.0 - existing_blend).abs() > CHANGE_EPSILON;
+                if changed && smooth_amount > MIN_BLEND_THRESHOLD {
                     new_mods.set_at_world(wx, y, wz, VoxelMod::new(smoothed_sdf, 1.0));
                 }
 
                 y += vs;
+            }
+        }
+
+        self.footprint.affected_chunks_for_y_range(
+            new_mods.chunk_size(),
+            self.voxel_size,
+            y_min,
+            y_max,
+        )
+    }
+
+    /// Compute cumulative arc lengths along stroke_centers polyline.
+    /// Returns vec where [i] = cumulative length up to center i. [0] = 0.0.
+    fn compute_cumulative_lengths(&self) -> Vec<f32> {
+        let centers = &self.stroke_centers;
+        let mut lengths = Vec::with_capacity(centers.len());
+        if centers.is_empty() {
+            return lengths;
+        }
+        lengths.push(0.0);
+        for i in 1..centers.len() {
+            let (ax, az) = centers[i - 1];
+            let (bx, bz) = centers[i];
+            let seg_len = ((bx - ax).powi(2) + (bz - az).powi(2)).sqrt();
+            lengths.push(lengths[i - 1] + seg_len);
+        }
+        lengths
+    }
+
+    /// Project a world XZ point onto the stroke polyline and return
+    /// normalized arc-length parameter t in [0, 1].
+    /// Returns 0.5 if the polyline has zero length.
+    fn project_onto_path(&self, px: f32, pz: f32, cumulative_lengths: &[f32]) -> f32 {
+        let centers = &self.stroke_centers;
+        if centers.len() <= 1 || cumulative_lengths.is_empty() {
+            return 0.5;
+        }
+        let total_length = *cumulative_lengths.last().unwrap();
+        if total_length < MIN_PATH_LENGTH {
+            return 0.5;
+        }
+
+        let mut best_dist_sq = f32::MAX;
+        let mut best_arc_length = 0.0f32;
+
+        for i in 0..centers.len() - 1 {
+            let (ax, az) = centers[i];
+            let (bx, bz) = centers[i + 1];
+            let dx = bx - ax;
+            let dz = bz - az;
+            let seg_len_sq = dx * dx + dz * dz;
+
+            let t_seg = if seg_len_sq < DEGENERATE_SEGMENT_THRESHOLD {
+                0.0
+            } else {
+                (((px - ax) * dx + (pz - az) * dz) / seg_len_sq).clamp(0.0, 1.0)
+            };
+
+            let proj_x = ax + t_seg * dx;
+            let proj_z = az + t_seg * dz;
+            let dist_sq = (px - proj_x).powi(2) + (pz - proj_z).powi(2);
+
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                let seg_length = cumulative_lengths[i + 1] - cumulative_lengths[i];
+                best_arc_length = cumulative_lengths[i] + t_seg * seg_length;
+            }
+        }
+
+        (best_arc_length / total_length).clamp(0.0, 1.0)
+    }
+
+    /// Apply slope modification: create a sloped path from base_y to slope_end_y.
+    ///
+    /// Each cell's target height is interpolated based on its projection onto the
+    /// stroke path polyline. Uses the same direction filtering as flatten.
+    pub fn apply_slope(
+        &self,
+        noise: &NoiseField,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) -> Vec<ChunkCoord> {
+        if self.footprint.is_empty() {
+            return Vec::new();
+        }
+
+        let floor_y = noise.get_floor_y();
+        let height_offset = noise.get_height_offset();
+        let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
+        let terrain_trough = floor_y + height_offset - noise.get_amplitude();
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
+
+        // Compute search range from terrain bounds for surface lookups
+        let (search_y_min, search_y_max) = Self::clamp_y_range(
+            (terrain_trough - padding).floor(),
+            (terrain_peak + padding).ceil(),
+            noise,
+        );
+
+        // Get actual surface heights at start and end of stroke via SDF lookup
+        let (begin_x, begin_z) = self.stroke_centers.first().copied().unwrap_or((0.0, 0.0));
+        let (end_x, end_z) = self
+            .stroke_centers
+            .last()
+            .copied()
+            .unwrap_or((begin_x, begin_z));
+        let base_y = Self::find_surface_y(
+            noise,
+            existing_mods,
+            begin_x,
+            begin_z,
+            search_y_min,
+            search_y_max,
+            self.voxel_size,
+        );
+        let end_y = Self::find_surface_y(
+            noise,
+            existing_mods,
+            end_x,
+            end_z,
+            search_y_min,
+            search_y_max,
+            self.voxel_size,
+        );
+
+        let y_lo = base_y.min(end_y);
+        let y_hi = base_y.max(end_y);
+        let (y_min, y_max) = Self::clamp_y_range(
+            (terrain_trough.min(y_lo) - padding).floor(),
+            (terrain_peak.max(y_hi) + padding).ceil(),
+            noise,
+        );
+        if y_min >= y_max {
+            return Vec::new();
+        }
+
+        let cumulative_lengths = self.compute_cumulative_lengths();
+
+        for cell in self.footprint.iter() {
+            let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
+            let falloff = self.compute_stroke_falloff(wx, wz);
+            let t = self.project_onto_path(wx, wz, &cumulative_lengths);
+            let slope_target_y = base_y + (end_y - base_y) * t;
+
+            let original_surface_y =
+                Self::find_surface_y(noise, existing_mods, wx, wz, y_min, y_max, self.voxel_size);
+            let target_y = original_surface_y + (slope_target_y - original_surface_y) * falloff;
+
+            let mut y = y_min;
+            while y <= y_max {
+                let desired_sdf = y - target_y;
+                let new_blend = self.strength;
+
+                let noise_val = noise.sample(wx, y, wz);
+
+                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
+                {
+                    Some(m) => (m.desired_sdf, m.blend),
+                    None => (noise_val, 0.0),
+                };
+
+                // Alpha-composite
+                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
+
+                if combined_blend > MIN_BLEND_THRESHOLD {
+                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
+                        + desired_sdf * new_blend)
+                        / combined_blend;
+
+                    // Direction filter: compare effective SDF values
+                    let current_sdf =
+                        noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
+                    let new_sdf =
+                        noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
+                    let sdf_change = new_sdf - current_sdf;
+
+                    let (final_desired, final_blend) = match self.flatten_direction {
+                        FlattenDirection::Both => (combined_desired, combined_blend),
+                        FlattenDirection::Up => {
+                            if sdf_change > 0.0 {
+                                (combined_desired, combined_blend)
+                            } else {
+                                (existing_desired, existing_blend)
+                            }
+                        }
+                        FlattenDirection::Down => {
+                            if sdf_change < 0.0 {
+                                (combined_desired, combined_blend)
+                            } else {
+                                (existing_desired, existing_blend)
+                            }
+                        }
+                    };
+
+                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
+                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
+                    if changed {
+                        new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
+                    }
+                }
+
+                y += self.voxel_size;
             }
         }
 
@@ -1055,7 +1251,7 @@ impl Brush {
                 // Found a crossing between y and y+voxel_size. Bisect for precision.
                 let mut lo = y;
                 let mut hi = y + voxel_size;
-                for _ in 0..8 {
+                for _ in 0..SURFACE_BISECTION_ITERATIONS {
                     let mid = (lo + hi) * 0.5;
                     let mid_sdf = noise.sample_with_mods(wx, mid, wz, mods);
                     if mid_sdf < 0.0 {
@@ -1094,6 +1290,8 @@ pub enum BrushAction {
     CommitSmooth,
     /// Begin curvature adjustment phase (geometry mode)
     BeginCurvatureAdjust,
+    /// Commit slope modification
+    CommitSlope,
 }
 
 #[cfg(test)]
@@ -1184,12 +1382,12 @@ mod tests {
         brush.begin_stroke(0.0, 0.0, 0.0);
 
         // Round brush should have fewer cells than square of same size
-        let round_count = brush.footprint.len();
+        let round_count = brush.footprint.cells.len();
 
         brush.cancel();
         brush.set_shape(BrushShape::Square);
         brush.begin_stroke(0.0, 0.0, 0.0);
-        let square_count = brush.footprint.len();
+        let square_count = brush.footprint.cells.len();
 
         assert!(round_count <= square_count);
     }
@@ -1277,25 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn test_feather_zero_is_hard_edge() {
-        let mut brush = Brush::new(1.0);
-        brush.set_feather(0.0);
-        // All cells should get falloff = 1.0 regardless of distance
-        assert!((brush.compute_falloff(5.0, 0.0, 0.0, 0.0) - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_feather_full_falloff() {
-        let mut brush = Brush::new(1.0);
-        brush.size = 10.0;
-        brush.set_feather(1.0);
-        // Center = full strength
-        assert!((brush.compute_falloff(0.0, 0.0, 0.0, 0.0) - 1.0).abs() < 0.001);
-        // Edge = zero strength
-        assert!(brush.compute_falloff(10.0, 0.0, 0.0, 0.0) < 0.01);
-    }
-
-    #[test]
     fn test_feather_clamped() {
         let mut brush = Brush::new(1.0);
         brush.set_feather(-0.5);
@@ -1375,13 +1554,12 @@ mod tests {
 
         // Create a flat noise field (amplitude=2 but we use a known seed)
         let noise = NoiseField::new(
-            42,    // seed
-            1,     // octaves
-            0.01,  // frequency (low = nearly flat)
-            amplitude,
-            0.0,   // height_offset
-            0.0,   // floor_y
-            None,  // no box bounds
+            42,   // seed
+            1,    // octaves
+            0.01, // frequency (low = nearly flat)
+            amplitude, 0.0,  // height_offset
+            0.0,  // floor_y
+            None, // no box bounds
         );
 
         let existing_mods = ModificationLayer::new(32, voxel_size);
@@ -1469,9 +1647,7 @@ mod tests {
         let base_y: f32 = 10.0;
 
         // Default terrain noise settings (no box bounds to avoid CSG effects).
-        let noise = NoiseField::new(
-            42, 4, 0.02, amplitude, 0.0, floor_y, None,
-        );
+        let noise = NoiseField::new(42, 4, 0.02, amplitude, 0.0, floor_y, None);
 
         let y_range = amplitude + height_delta.abs() + 4.0 * voxel_size;
         let brush_y_max = (base_y + y_range).ceil();
@@ -1701,7 +1877,7 @@ mod tests {
         assert!(
             brush.footprint.is_empty(),
             "Footprint should be empty when painting outside bounds, got {} cells",
-            brush.footprint.len()
+            brush.footprint.cells.len()
         );
     }
 
@@ -1775,7 +1951,10 @@ mod tests {
 
         let dist = brush.min_distance_to_stroke(13.0, 24.0);
         let expected = ((3.0f32).powi(2) + (4.0f32).powi(2)).sqrt(); // 5.0
-        assert!((dist - expected).abs() < 0.001, "dist={dist}, expected={expected}");
+        assert!(
+            (dist - expected).abs() < 0.001,
+            "dist={dist}, expected={expected}"
+        );
     }
 
     #[test]
@@ -1841,10 +2020,17 @@ mod tests {
 
         // Cancel and begin new stroke — centers should be cleared
         brush.cancel();
-        assert!(brush.stroke_centers.is_empty(), "cancel should clear stroke_centers");
+        assert!(
+            brush.stroke_centers.is_empty(),
+            "cancel should clear stroke_centers"
+        );
 
         brush.begin_stroke(30.0, 5.0, 30.0);
-        assert_eq!(brush.stroke_centers.len(), 1, "begin_stroke should start fresh");
+        assert_eq!(
+            brush.stroke_centers.len(),
+            1,
+            "begin_stroke should start fresh"
+        );
     }
 
     #[test]
@@ -1898,15 +2084,27 @@ mod tests {
             let gx = x as f32 * voxel_size;
             let gz = z as f32 * voxel_size;
             let sy = Brush::find_surface_y(
-                &noise, &new_mods, gx, gz, y_search_min, y_search_max, voxel_size,
+                &noise,
+                &new_mods,
+                gx,
+                gz,
+                y_search_min,
+                y_search_max,
+                voxel_size,
             );
             surface_heights.push((x, sy));
         }
 
         // All points along the center of the path should have similar heights.
         // With centroid-based falloff, end points would be much lower than the center.
-        let min_h = surface_heights.iter().map(|(_, h)| *h).fold(f32::MAX, f32::min);
-        let max_h = surface_heights.iter().map(|(_, h)| *h).fold(f32::MIN, f32::max);
+        let min_h = surface_heights
+            .iter()
+            .map(|(_, h)| *h)
+            .fold(f32::MAX, f32::min);
+        let max_h = surface_heights
+            .iter()
+            .map(|(_, h)| *h)
+            .fold(f32::MIN, f32::max);
         let range = max_h - min_h;
         assert!(
             range < 2.0 * voxel_size,

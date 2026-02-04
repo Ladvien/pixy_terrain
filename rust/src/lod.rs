@@ -24,8 +24,4 @@ impl LODConfig {
     pub fn max_view_distance(&self) -> f32 {
         self.base_distance * (1 << self.max_lod) as f32
     }
-
-    pub fn voxel_size_at_lod(&self, base_voxel_size: f32, lod: u8) -> f32 {
-        base_voxel_size * (1 << lod) as f32
-    }
 }

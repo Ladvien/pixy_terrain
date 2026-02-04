@@ -1,12 +1,10 @@
 //! Parallel mesh generation using bevy_tasks.
 //!
 //! Worker threads perform pure Rust computation.
-//! Results are sent via crossbean channels to the main thread.
+//! Results are sent via crossbeam channels to the main thread.
 
 use bevy_tasks::{TaskPool, TaskPoolBuilder};
-use crossbeam::channel::{bounded, Receiver, Sender, TrySelectError};
-use godot::prelude::godot_print;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::Arc;
 
 use crate::chunk::{ChunkCoord, MeshResult};
@@ -15,14 +13,16 @@ use crate::noise_field::NoiseField;
 use crate::terrain_modifications::ModificationLayer;
 use crate::texture_layer::TextureLayer;
 
-// Debug counters
-static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
-static TASKS_COMPLETED: AtomicU64 = AtomicU64::new(0);
-
-// Track unique thread IDs used
-use std::collections::HashSet;
-use std::sync::Mutex;
-static THREADS_USED: Mutex<Option<HashSet<std::thread::ThreadId>>> = Mutex::new(None);
+/// Fraction of detected CPUs to use for mesh worker threads (numerator).
+const THREAD_CPU_NUMERATOR: usize = 3;
+/// Fraction of detected CPUs to use for mesh worker threads (denominator).
+const THREAD_CPU_DENOMINATOR: usize = 4;
+/// Minimum number of mesh worker threads.
+const MIN_WORKER_THREADS: usize = 2;
+/// Minimum batch size for processing mesh requests.
+const MIN_BATCH_SIZE: usize = 16;
+/// Default channel capacity for mesh request/result channels.
+const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
 /// Request sent from main thread to workers
 pub struct MeshRequest {
@@ -40,7 +40,7 @@ pub struct MeshRequest {
 
 /// Worker pool for parallel mesh generation
 pub struct MeshWorkerPool {
-    pool: TaskPool,
+    thread_count: usize,
     request_tx: Sender<MeshRequest>,
     request_rx: Receiver<MeshRequest>,
     result_tx: Sender<MeshResult>,
@@ -51,21 +51,16 @@ impl MeshWorkerPool {
     pub fn new(num_threads: usize, channel_capacity: usize) -> Self {
         let detected_cpus = num_cpus::get();
         let threads = if num_threads == 0 {
-            ((detected_cpus * 3) / 4).max(2)
+            ((detected_cpus * THREAD_CPU_NUMERATOR) / THREAD_CPU_DENOMINATOR).max(MIN_WORKER_THREADS)
         } else {
             num_threads
         };
-
-        let pool = TaskPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(String::from("MeshWorker"))
-            .build();
 
         let (request_tx, request_rx) = bounded(channel_capacity);
         let (result_tx, result_rx) = bounded(channel_capacity);
 
         Self {
-            pool,
+            thread_count: threads,
             request_tx,
             request_rx,
             result_tx,
@@ -82,8 +77,7 @@ impl MeshWorkerPool {
     }
 
     pub fn process_requests(&self) {
-        // Process batch_size requests at a time - use rayon's thread count
-        let batch_size = rayon::current_num_threads().max(16);
+        let batch_size = rayon::current_num_threads().max(MIN_BATCH_SIZE);
         let mut batch = Vec::with_capacity(batch_size);
 
         while batch.len() < batch_size {
@@ -97,33 +91,13 @@ impl MeshWorkerPool {
             return;
         }
 
-        let count = batch.len();
-        TASKS_SPAWNED.fetch_add(count as u64, Ordering::Relaxed);
-
         let result_tx = self.result_tx.clone();
 
-        // Reset thread tracking for this batch
-        {
-            let mut guard = THREADS_USED.lock().unwrap();
-            *guard = Some(HashSet::new());
-        }
-
-        // Use rayon for true parallel processing
         rayon::scope(|scope| {
             for request in batch {
                 let tx = result_tx.clone();
                 scope.spawn(move |_| {
-                    // Track which thread we're on
-                    let thread_id = std::thread::current().id();
-                    {
-                        let mut guard = THREADS_USED.lock().unwrap();
-                        if let Some(ref mut set) = *guard {
-                            set.insert(thread_id);
-                        }
-                    }
-
                     let mesh = generate_mesh_for_request(&request);
-                    TASKS_COMPLETED.fetch_add(1, Ordering::Relaxed);
                     let _ = tx.try_send(mesh);
                 });
             }
@@ -131,7 +105,7 @@ impl MeshWorkerPool {
     }
 
     pub fn thread_count(&self) -> usize {
-        self.pool.thread_num()
+        self.thread_count
     }
 
     pub fn shutdown(&mut self) {
@@ -142,7 +116,7 @@ impl MeshWorkerPool {
 
 impl Default for MeshWorkerPool {
     fn default() -> Self {
-        Self::new(0, 256)
+        Self::new(0, DEFAULT_CHANNEL_CAPACITY)
     }
 }
 
@@ -184,28 +158,9 @@ mod tests {
 
     #[test]
     fn test_thread_count_matches_requested() {
-        use bevy_tasks::TaskPoolBuilder;
-
-        // Test bevy_tasks directly first
-        let direct_pool = TaskPoolBuilder::new()
-            .num_threads(4)
-            .thread_name(String::from("DirectTest"))
-            .build();
-        println!(
-            "Direct TaskPool: requested 4 threads, got {} threads",
-            direct_pool.thread_num()
-        );
-
-        // Now test through our wrapper
         let requested = 4;
         let pool = MeshWorkerPool::new(requested, 64);
-        println!(
-            "MeshWorkerPool: requested {} threads, got {} threads",
-            requested,
-            pool.thread_count()
-        );
 
-        // This assertion may fail - that's what we're investigating
         assert_eq!(
             pool.thread_count(),
             requested,

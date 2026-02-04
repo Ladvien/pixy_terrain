@@ -98,7 +98,6 @@ pub fn extract_chunk_mesh(
         vertices,
         normals,
         indices,
-        transition_sides,
         colors,
     }
 }

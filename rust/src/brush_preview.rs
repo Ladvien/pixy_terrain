@@ -10,6 +10,15 @@ use godot::prelude::*;
 
 use crate::brush::{Brush, BrushMode, BrushPhase, BrushShape};
 
+/// Scale factor for preview quad half-size relative to voxel size.
+const PREVIEW_QUAD_SCALE: f32 = 0.45;
+/// Number of subdivisions for curved height plane mesh.
+const CURVED_PLANE_SUBDIVISIONS: usize = 16;
+/// Alpha for height plane indicator.
+const HEIGHT_PLANE_ALPHA: f32 = 0.25;
+/// Epsilon for normal vector length validation.
+const NORMAL_EPSILON: f32 = 0.0001;
+
 /// Shader source for brush preview visualization
 const BRUSH_PREVIEW_SHADER: &str = r#"
 shader_type spatial;
@@ -70,6 +79,8 @@ pub struct BrushColors {
     pub plateau_color: [f32; 4],
     /// Color for smooth mode brush
     pub smooth_color: [f32; 4],
+    /// Color for slope mode brush
+    pub slope_color: [f32; 4],
     /// Color for positive height delta (raising terrain)
     pub height_positive: [f32; 4],
     /// Color for negative height delta (lowering terrain)
@@ -84,6 +95,7 @@ impl Default for BrushColors {
             flatten_color: [0.8, 0.8, 0.0, 0.3],   // Yellow
             plateau_color: [0.8, 0.0, 0.8, 0.3],   // Purple
             smooth_color: [0.0, 0.8, 0.4, 0.3],    // Green-teal
+            slope_color: [1.0, 0.4, 0.7, 0.3],     // Pink
             height_positive: [0.0, 1.0, 0.0, 0.3], // Green
             height_negative: [1.0, 0.0, 0.0, 0.3], // Red
         }
@@ -174,6 +186,7 @@ impl BrushPreview {
             BrushMode::Flatten => self.colors.flatten_color,
             BrushMode::Plateau => self.colors.plateau_color,
             BrushMode::Smooth => self.colors.smooth_color,
+            BrushMode::Slope => self.colors.slope_color,
         };
         material.set_shader_parameter(
             "brush_color",
@@ -202,7 +215,7 @@ impl BrushPreview {
 
         // Generate a quad for each cell
         let voxel_size = brush.voxel_size;
-        let half_size = voxel_size * 0.45; // Slightly smaller than full cell
+        let half_size = voxel_size * PREVIEW_QUAD_SCALE; // Slightly smaller than full cell
 
         let mut vertices: Vec<Vector3> = Vec::new();
         let mut normals: Vec<Vector3> = Vec::new();
@@ -264,13 +277,6 @@ impl BrushPreview {
         self.material.clone()
     }
 
-    /// Set custom colors
-    pub fn set_colors(&mut self, colors: BrushColors) {
-        self.colors = colors;
-        // Clear material to force recreation with new colors
-        self.material = None;
-    }
-
     /// Create a shader material for the height plane indicator.
     /// Green when raising terrain, red when lowering.
     pub fn create_height_plane_material(raising: bool) -> Gd<ShaderMaterial> {
@@ -281,9 +287,9 @@ impl BrushPreview {
         material.set_shader(&shader);
 
         let color = if raising {
-            Color::from_rgba(0.0, 1.0, 0.0, 0.25) // Green
+            Color::from_rgba(0.0, 1.0, 0.0, HEIGHT_PLANE_ALPHA) // Green
         } else {
-            Color::from_rgba(1.0, 0.0, 0.0, 0.25) // Red
+            Color::from_rgba(1.0, 0.0, 0.0, HEIGHT_PLANE_ALPHA) // Red
         };
         material.set_shader_parameter("plane_color", &color.to_variant());
 
@@ -353,7 +359,7 @@ impl BrushPreview {
         brush_size: f32,
         brush_shape: BrushShape,
     ) -> Gd<ArrayMesh> {
-        let subdivisions: usize = 16;
+        let subdivisions: usize = CURVED_PLANE_SUBDIVISIONS;
         let cx = (min_x + max_x) * 0.5;
         let cz = (min_z + max_z) * 0.5;
         let radius = brush_size;
@@ -428,7 +434,7 @@ impl BrushPreview {
         }
         for (i, n) in normal_accum.iter().enumerate() {
             let len = n.length();
-            normals[i] = if len > 0.0001 { *n / len } else { Vector3::UP };
+            normals[i] = if len > NORMAL_EPSILON { *n / len } else { Vector3::UP };
         }
 
         // Build mesh

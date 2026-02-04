@@ -1,7 +1,9 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
-use std::sync::Arc;
 
 use crate::terrain_modifications::ModificationLayer;
+
+const FBM_PERSISTENCE: f32 = 0.5;
+const FBM_LACUNARITY: f64 = 2.0;
 
 /// Noise-based sign distance field for terrain generation
 /// Negative = inside terrain (solid)
@@ -10,6 +12,7 @@ use crate::terrain_modifications::ModificationLayer;
 pub struct NoiseField {
     fbm: Fbm<Perlin>,
     amplitude: f32,
+    octaves: usize,
     height_offset: f32,
     floor_y: f32,
     box_min: Option<[f32; 3]>,
@@ -54,8 +57,8 @@ impl NoiseField {
         let fbm = Fbm::<Perlin>::new(seed)
             .set_octaves(octaves)
             .set_frequency(frequency as f64)
-            .set_lacunarity(2.0)
-            .set_persistence(0.5);
+            .set_lacunarity(FBM_LACUNARITY)
+            .set_persistence(FBM_PERSISTENCE as f64);
 
         let (box_min, box_max) = match box_bounds {
             Some((min, max)) => (Some(min), Some(max)),
@@ -65,6 +68,7 @@ impl NoiseField {
         Self {
             fbm,
             amplitude,
+            octaves,
             height_offset,
             floor_y,
             box_min,
@@ -80,11 +84,6 @@ impl NoiseField {
         }
     }
 
-    /// Set box bounds for SDFK clipping (walls via SDF)
-    pub fn set_box_bounds(&mut self, min: [f32; 3], max: [f32; 3]) {
-        self.box_min = Some(min);
-        self.box_max = Some(max);
-    }
     /// 2D noise for heightmap terrain (no Y dependency in noise)
     pub fn sample_terrain_only(&self, x: f32, y: f32, z: f32) -> f32 {
         // 2D noise: only x and z, not y
@@ -129,27 +128,37 @@ impl NoiseField {
         self.amplitude
     }
 
+    /// Effective amplitude accounting for multi-octave FBM summation.
+    /// With persistence=0.5, the FBM output range is `[-scale, scale]` where
+    /// `scale = (1 - persistence^octaves) / (1 - persistence)`.
+    /// For 1 octave: scale=1.0, for 4 octaves: scale=1.875.
+    pub fn get_effective_amplitude(&self) -> f32 {
+        let persistence: f32 = FBM_PERSISTENCE;
+        let scale = (1.0 - persistence.powi(self.octaves as i32)) / (1.0 - persistence);
+        self.amplitude * scale
+    }
+
     pub fn get_floor_y(&self) -> f32 {
         self.floor_y
     }
 
-    pub fn get_csg_blend_width(&self) -> f32 {
-        self.csg_blend_width
-    }
-
-    pub fn set_csg_blend_width(&mut self, width: f32) {
-        self.csg_blend_width = width;
+    pub fn get_height_offset(&self) -> f32 {
+        self.height_offset
     }
 
     /// Sample the SDF with terrain modifications applied.
     /// This is used during mesh generation to incorporate brush edits.
     ///
-    /// The modification layer is sampled using trilinear interpolation and
-    /// the result is added to the base SDF value.
+    /// Uses absolute blending: `noise * (1 - blend) + desired * blend`.
+    /// When blend_total is 0 (no modifications nearby), returns pure noise.
+    /// When blend_total is 1, returns the desired SDF (e.g. a flat plane).
     pub fn sample_with_mods(&self, x: f32, y: f32, z: f32, mods: &ModificationLayer) -> f32 {
-        let base_sdf = self.sample(x, y, z);
-        let mod_delta = mods.sample(x, y, z);
-        base_sdf + mod_delta
+        let (desired_total, blend_total) = mods.sample_absolute(x, y, z);
+        if blend_total < 0.001 {
+            return self.sample(x, y, z);
+        }
+        let noise = self.sample(x, y, z);
+        noise * (1.0 - blend_total) + desired_total
     }
 
     /// Signed distance function for an axis-aligned box
@@ -182,9 +191,6 @@ impl NoiseField {
         outside + inside
     }
 }
-
-/// Thread-safe shared noise field for parallel mesh generation
-pub type SharedNoiseField = Arc<NoiseField>;
 
 #[cfg(test)]
 mod tests {
@@ -585,6 +591,35 @@ mod tests {
         assert!(
             !floor_chunk.vertices.is_empty(),
             "Y=-1 guard chunk should generate floor geometry"
+        );
+    }
+
+    #[test]
+    fn test_effective_amplitude() {
+        // 1 octave: effective = amplitude * 1.0
+        let noise_1oct = NoiseField::new(42, 1, 0.02, 32.0, 0.0, 32.0, None);
+        let eff_1 = noise_1oct.get_effective_amplitude();
+        assert!(
+            (eff_1 - 32.0).abs() < 0.001,
+            "1 octave: effective should equal amplitude, got {eff_1}"
+        );
+
+        // 4 octaves, persistence=0.5: scale = 1 + 0.5 + 0.25 + 0.125 = 1.875
+        let noise_4oct = NoiseField::new(42, 4, 0.02, 32.0, 0.0, 32.0, None);
+        let eff_4 = noise_4oct.get_effective_amplitude();
+        let expected_4 = 32.0 * 1.875;
+        assert!(
+            (eff_4 - expected_4).abs() < 0.001,
+            "4 octaves: effective should be {expected_4}, got {eff_4}"
+        );
+
+        // 2 octaves: scale = 1 + 0.5 = 1.5
+        let noise_2oct = NoiseField::new(42, 2, 0.02, 10.0, 0.0, 0.0, None);
+        let eff_2 = noise_2oct.get_effective_amplitude();
+        let expected_2 = 10.0 * 1.5;
+        assert!(
+            (eff_2 - expected_2).abs() < 0.001,
+            "2 octaves: effective should be {expected_2}, got {eff_2}"
         );
     }
 

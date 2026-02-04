@@ -12,6 +12,7 @@ mod mesh_worker;
 mod noise_field;
 mod terrain;
 mod terrain_modifications;
+mod terrain_stability;
 mod texture_layer;
 mod undo;
 

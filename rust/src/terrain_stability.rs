@@ -11,6 +11,19 @@ use crate::chunk::ChunkCoord;
 use crate::noise_field::NoiseField;
 use crate::terrain_modifications::{ModificationLayer, VoxelMod};
 
+/// Extra Y range padding for fallback scan bounds.
+const FALLBACK_Y_RANGE_PADDING: i32 = 64;
+/// Multiplier for computing scan margin from footprint extent.
+const SCAN_MARGIN_MULTIPLIER: i32 = 2;
+/// Minimum scan margin in cells.
+const MIN_SCAN_MARGIN: i32 = 8;
+/// Maximum scan margin in cells.
+const MAX_SCAN_MARGIN: i32 = 32;
+/// Number of floor seed rows for flood-fill grounding.
+const FLOOR_SEED_ROWS: usize = 4;
+/// Minimum blend value for gravity drop calculations.
+const MIN_DROP_BLEND: f32 = 0.01;
+
 /// Axis-aligned bounding box for the scan region (in voxel-grid integer coords).
 #[derive(Clone, Debug)]
 pub struct ScanRegion {
@@ -243,7 +256,7 @@ fn build_scan_region(
         // Fallback: use a reasonable Y range around the footprint
         let base_cell = (footprint.base_y / voxel_size).floor() as i32;
         let delta_cells = (footprint.height_delta.abs() / voxel_size).ceil() as i32;
-        (0, base_cell + delta_cells + 64)
+        (0, base_cell + delta_cells + FALLBACK_Y_RANGE_PADDING)
     };
 
     // XZ margin proportional to brush footprint size. Cap to a reasonable
@@ -251,7 +264,7 @@ fn build_scan_region(
     let footprint_extent = (footprint.max_x - footprint.min_x)
         .max(footprint.max_z - footprint.min_z)
         .max(1);
-    let margin = (footprint_extent * 2).max(8).min(32);
+    let margin = (footprint_extent * SCAN_MARGIN_MULTIPLIER).max(MIN_SCAN_MARGIN).min(MAX_SCAN_MARGIN);
 
     let min_x = (footprint.min_x - margin).max(0);
     let max_x = (footprint.max_x + margin).min(terrain_cells_x - 1);
@@ -315,7 +328,7 @@ fn flood_fill_grounded(solid: &SolidGrid, region: &ScanRegion) -> SolidGrid {
     // Seed from floor voxels only (bottom few rows).
     // At the very bottom (y=0 in world coords), the box SDF is ~0 so voxels
     // may not register as solid. A few rows up they are definitely solid.
-    let floor_seed_rows = 4.min(sy);
+    let floor_seed_rows = FLOOR_SEED_ROWS.min(sy);
 
     for gz in 0..sz {
         for gx in 0..sx {
@@ -551,7 +564,7 @@ fn drop_component(
         //   visual_sdf = noise_dest * (1 - blend) + desired_dest * blend
         //   desired_dest = (visual_sdf - noise_dest * (1 - blend)) / blend
         let noise_dest = noise.sample(world_x, dest_world_y, world_z);
-        let blend = src.src_blend.max(0.01); // Avoid division by zero
+        let blend = src.src_blend.max(MIN_DROP_BLEND); // Avoid division by zero
         let desired_dest = (src.visual_sdf - noise_dest * (1.0 - blend)) / blend;
 
         mod_layer.set_at_world(

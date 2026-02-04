@@ -8,6 +8,37 @@ use godot::classes::{
 use godot::global::MouseButton;
 use godot::prelude::*;
 
+/// Minimum width of the toolbar panel.
+const TOOLBAR_MIN_WIDTH: f32 = 140.0;
+/// Padding around toolbar content.
+const TOOLBAR_MARGIN: i32 = 8;
+/// Vertical separation between toolbar items.
+const TOOLBAR_SEPARATION: i32 = 4;
+/// Minimum button size for toolbar buttons.
+const BUTTON_MIN_WIDTH: f32 = 100.0;
+/// Minimum button height for toolbar buttons.
+const BUTTON_MIN_HEIGHT: f32 = 28.0;
+/// Height of separator elements.
+const SEPARATOR_HEIGHT: f32 = 8.0;
+/// Step value for strength/feather sliders.
+const SLIDER_FINE_STEP: f64 = 0.05;
+/// Maximum brush size.
+const BRUSH_SIZE_MAX: f64 = 50.0;
+/// Minimum step size for plateau slider.
+const STEP_SIZE_SLIDER_MIN: f64 = 0.5;
+/// Maximum step size for plateau slider.
+const STEP_SIZE_SLIDER_MAX: f64 = 32.0;
+/// Step increment for step size slider.
+const STEP_SIZE_SLIDER_STEP: f64 = 0.5;
+/// Separation between texture buttons.
+const TEXTURE_BUTTON_SEPARATION: i32 = 2;
+/// Size of texture selection buttons.
+const TEXTURE_BUTTON_SIZE: f32 = 28.0;
+/// Maximum distance for editor raycasting.
+const RAYCAST_MAX_DISTANCE: f32 = 10000.0;
+/// Epsilon for detecting near-horizontal rays.
+const RAY_HORIZONTAL_EPSILON: f32 = 0.0001;
+
 #[derive(GodotClass)]
 #[class(tool, init, base=EditorPlugin)]
 pub struct PixyTerrainPlugin {
@@ -49,6 +80,8 @@ pub struct PixyTerrainPlugin {
     #[init(val = None)]
     smooth_mode_button: Option<Gd<Button>>,
     #[init(val = None)]
+    slope_mode_button: Option<Gd<Button>>,
+    #[init(val = None)]
     strength_slider: Option<Gd<HSlider>>,
     #[init(val = None)]
     brush_size_slider: Option<Gd<HSlider>>,
@@ -78,16 +111,16 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut margin_container = MarginContainer::new_alloc();
         margin_container.set_name("PixyTerrainMargin");
         margin_container.set_visible(false);
-        margin_container.set_custom_minimum_size(Vector2::new(140.0, 0.0));
-        margin_container.add_theme_constant_override("margin_top", 8);
-        margin_container.add_theme_constant_override("margin_left", 8);
-        margin_container.add_theme_constant_override("margin_right", 8);
-        margin_container.add_theme_constant_override("margin_bottom", 8);
+        margin_container.set_custom_minimum_size(Vector2::new(TOOLBAR_MIN_WIDTH, 0.0));
+        margin_container.add_theme_constant_override("margin_top", TOOLBAR_MARGIN);
+        margin_container.add_theme_constant_override("margin_left", TOOLBAR_MARGIN);
+        margin_container.add_theme_constant_override("margin_right", TOOLBAR_MARGIN);
+        margin_container.add_theme_constant_override("margin_bottom", TOOLBAR_MARGIN);
 
         // Create VBoxContainer for vertical button layout
         let mut toolbar = VBoxContainer::new_alloc();
         toolbar.set_name("PixyTerrainToolbar");
-        toolbar.add_theme_constant_override("separation", 4);
+        toolbar.add_theme_constant_override("separation", TOOLBAR_SEPARATION);
 
         // ═══════════════════════════════════════════════════════════════════
         // Generation Section
@@ -98,11 +131,11 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         let mut generate_button = Button::new_alloc();
         generate_button.set_text("Generate (G)");
-        generate_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        generate_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         let mut clear_button = Button::new_alloc();
         clear_button.set_text("Clear (C)");
-        clear_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        clear_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         toolbar.add_child(&generate_button);
         toolbar.add_child(&clear_button);
@@ -111,7 +144,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // Brush Section
         // ═══════════════════════════════════════════════════════════════════
         let mut sep1 = VSeparator::new_alloc();
-        sep1.set_custom_minimum_size(Vector2::new(0.0, 8.0));
+        sep1.set_custom_minimum_size(Vector2::new(0.0, SEPARATOR_HEIGHT));
         toolbar.add_child(&sep1);
 
         let mut brush_label = Label::new_alloc();
@@ -122,7 +155,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut brush_toggle_button = Button::new_alloc();
         brush_toggle_button.set_text("Enable Brush (B)");
         brush_toggle_button.set_toggle_mode(true);
-        brush_toggle_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        brush_toggle_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         toolbar.add_child(&brush_toggle_button);
 
         // Mode buttons — stacked vertically
@@ -130,38 +163,45 @@ impl IEditorPlugin for PixyTerrainPlugin {
         elevation_mode_button.set_text("Elevation (E)");
         elevation_mode_button.set_toggle_mode(true);
         elevation_mode_button.set_pressed(true);
-        elevation_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        elevation_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         elevation_mode_button.set_tooltip_text("Elevation Mode - Sculpt terrain height");
 
         let mut texture_mode_button = Button::new_alloc();
         texture_mode_button.set_text("Texture");
         texture_mode_button.set_toggle_mode(true);
-        texture_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        texture_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         texture_mode_button.set_tooltip_text("Texture Mode - Paint terrain textures");
 
         let mut flatten_mode_button = Button::new_alloc();
         flatten_mode_button.set_text("Flatten (F)");
         flatten_mode_button.set_toggle_mode(true);
-        flatten_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        flatten_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         flatten_mode_button.set_tooltip_text("Flatten Mode - Level terrain to click height");
 
         let mut plateau_mode_button = Button::new_alloc();
         plateau_mode_button.set_text("Plateau (P)");
         plateau_mode_button.set_toggle_mode(true);
-        plateau_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        plateau_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         plateau_mode_button.set_tooltip_text("Plateau Mode - Snap terrain to step heights");
 
         let mut smooth_mode_button = Button::new_alloc();
         smooth_mode_button.set_text("Smooth (S)");
         smooth_mode_button.set_toggle_mode(true);
-        smooth_mode_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        smooth_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         smooth_mode_button.set_tooltip_text("Smooth Mode - Laplacian smoothing on terrain");
+
+        let mut slope_mode_button = Button::new_alloc();
+        slope_mode_button.set_text("Slope (R)");
+        slope_mode_button.set_toggle_mode(true);
+        slope_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        slope_mode_button.set_tooltip_text("Slope Mode - Create sloped ramps/paths");
 
         toolbar.add_child(&elevation_mode_button);
         toolbar.add_child(&texture_mode_button);
         toolbar.add_child(&flatten_mode_button);
         toolbar.add_child(&plateau_mode_button);
         toolbar.add_child(&smooth_mode_button);
+        toolbar.add_child(&slope_mode_button);
 
         // Strength slider
         let mut strength_label = Label::new_alloc();
@@ -171,7 +211,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut strength_slider = HSlider::new_alloc();
         strength_slider.set_min(0.0);
         strength_slider.set_max(1.0);
-        strength_slider.set_step(0.05);
+        strength_slider.set_step(SLIDER_FINE_STEP);
         strength_slider.set_value(1.0);
         strength_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
         strength_slider.set_tooltip_text("Brush strength (0.0 - 1.0)");
@@ -184,7 +224,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         let mut brush_size_slider = HSlider::new_alloc();
         brush_size_slider.set_min(1.0);
-        brush_size_slider.set_max(50.0);
+        brush_size_slider.set_max(BRUSH_SIZE_MAX);
         brush_size_slider.set_step(1.0);
         brush_size_slider.set_value(5.0);
         brush_size_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
@@ -197,9 +237,9 @@ impl IEditorPlugin for PixyTerrainPlugin {
         toolbar.add_child(&step_size_label);
 
         let mut step_size_slider = HSlider::new_alloc();
-        step_size_slider.set_min(0.5);
-        step_size_slider.set_max(32.0);
-        step_size_slider.set_step(0.5);
+        step_size_slider.set_min(STEP_SIZE_SLIDER_MIN);
+        step_size_slider.set_max(STEP_SIZE_SLIDER_MAX);
+        step_size_slider.set_step(STEP_SIZE_SLIDER_STEP);
         step_size_slider.set_value(4.0);
         step_size_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
         step_size_slider.set_tooltip_text("Step size for plateau mode (world units per level)");
@@ -213,7 +253,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut feather_slider = HSlider::new_alloc();
         feather_slider.set_min(0.0);
         feather_slider.set_max(1.0);
-        feather_slider.set_step(0.05);
+        feather_slider.set_step(SLIDER_FINE_STEP);
         feather_slider.set_value(0.0);
         feather_slider.set_custom_minimum_size(Vector2::new(100.0, 0.0));
         feather_slider.set_tooltip_text("Brush feather (0.0 = hard edge, 1.0 = full falloff)");
@@ -225,7 +265,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         toolbar.add_child(&tex_label);
 
         let mut tex_container = HBoxContainer::new_alloc();
-        tex_container.add_theme_constant_override("separation", 2);
+        tex_container.add_theme_constant_override("separation", TEXTURE_BUTTON_SEPARATION);
 
         let mut texture_buttons: [Option<Gd<Button>>; 4] = [None, None, None, None];
         for i in 0..4 {
@@ -235,7 +275,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
             if i == 0 {
                 tex_button.set_pressed(true);
             }
-            tex_button.set_custom_minimum_size(Vector2::new(28.0, 28.0));
+            tex_button.set_custom_minimum_size(Vector2::new(TEXTURE_BUTTON_SIZE, TEXTURE_BUTTON_SIZE));
             tex_button.set_tooltip_text(&format!("Select texture {} ({})", i + 1, i + 1));
             tex_container.add_child(&tex_button);
             texture_buttons[i] = Some(tex_button);
@@ -246,7 +286,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // Post-Processing Section
         // ═══════════════════════════════════════════════════════════════════
         let mut sep2 = VSeparator::new_alloc();
-        sep2.set_custom_minimum_size(Vector2::new(0.0, 8.0));
+        sep2.set_custom_minimum_size(Vector2::new(0.0, SEPARATOR_HEIGHT));
         toolbar.add_child(&sep2);
 
         let mut post_label = Label::new_alloc();
@@ -255,19 +295,19 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         let mut merge_button = Button::new_alloc();
         merge_button.set_text("Merge & Export");
-        merge_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        merge_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         let mut weld_button = Button::new_alloc();
         weld_button.set_text("Weld Seams");
-        weld_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        weld_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         let mut decimate_button = Button::new_alloc();
         decimate_button.set_text("Decimate");
-        decimate_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        decimate_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         let mut normals_button = Button::new_alloc();
         normals_button.set_text("Recompute Normals");
-        normals_button.set_custom_minimum_size(Vector2::new(100.0, 28.0));
+        normals_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
 
         toolbar.add_child(&merge_button);
         toolbar.add_child(&weld_button);
@@ -320,6 +360,10 @@ impl IEditorPlugin for PixyTerrainPlugin {
         smooth_mode_button.connect(
             "pressed",
             &Callable::from_object_method(&plugin_ref, "on_smooth_mode_pressed"),
+        );
+        slope_mode_button.connect(
+            "pressed",
+            &Callable::from_object_method(&plugin_ref, "on_slope_mode_pressed"),
         );
         strength_slider.connect(
             "value_changed",
@@ -384,6 +428,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.flatten_mode_button = Some(flatten_mode_button);
         self.plateau_mode_button = Some(plateau_mode_button);
         self.smooth_mode_button = Some(smooth_mode_button);
+        self.slope_mode_button = Some(slope_mode_button);
         self.strength_slider = Some(strength_slider);
         self.brush_size_slider = Some(brush_size_slider);
         self.step_size_slider = Some(step_size_slider);
@@ -407,6 +452,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.flatten_mode_button = None;
         self.plateau_mode_button = None;
         self.smooth_mode_button = None;
+        self.slope_mode_button = None;
         self.strength_slider = None;
         self.brush_size_slider = None;
         self.step_size_slider = None;
@@ -508,6 +554,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
                         self.update_mode_buttons(4);
                         return AfterGuiInput::STOP.ord();
                     }
+                    godot::global::Key::R => {
+                        self.ensure_brush_enabled();
+                        self.set_brush_mode(5);
+                        self.update_mode_buttons(5);
+                        return AfterGuiInput::STOP.ord();
+                    }
                     godot::global::Key::BRACKETLEFT => {
                         self.adjust_brush_size(-1.0);
                         return AfterGuiInput::STOP.ord();
@@ -533,8 +585,8 @@ impl IEditorPlugin for PixyTerrainPlugin {
                         return AfterGuiInput::STOP.ord();
                     }
                     godot::global::Key::Z => {
-                        let ctrl_or_cmd = key_event.is_ctrl_pressed()
-                            || key_event.is_meta_pressed();
+                        let ctrl_or_cmd =
+                            key_event.is_ctrl_pressed() || key_event.is_meta_pressed();
                         if ctrl_or_cmd && key_event.is_shift_pressed() {
                             // Ctrl+Shift+Z / Cmd+Shift+Z = Redo
                             self.call_terrain_method("redo");
@@ -579,7 +631,13 @@ impl IEditorPlugin for PixyTerrainPlugin {
                     if phase == 2 || phase == 4 {
                         return AfterGuiInput::STOP.ord();
                     }
-                    if let Some(hit_pos) = self.raycast_terrain(&camera, screen_pos) {
+                    let is_slope = self.get_brush_mode() == 5;
+                    let hit_pos = if is_slope {
+                        self.raycast_terrain_vertical(&camera, screen_pos)
+                    } else {
+                        self.raycast_terrain(&camera, screen_pos)
+                    };
+                    if let Some(hit_pos) = hit_pos {
                         self.brush_begin(hit_pos);
                         self.brush_dragging = true;
                         return AfterGuiInput::STOP.ord();
@@ -615,7 +673,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
                 self.brush_adjust_curvature(screen_pos.y);
                 return AfterGuiInput::STOP.ord();
             } else if self.brush_dragging && (brush_phase == 1 || brush_phase == 3) {
-                if let Some(hit_pos) = self.raycast_terrain(&camera, screen_pos) {
+                let hit_pos = if self.get_brush_mode() == 5 {
+                    self.raycast_terrain_vertical(&camera, screen_pos)
+                } else {
+                    self.raycast_terrain(&camera, screen_pos)
+                };
+                if let Some(hit_pos) = hit_pos {
                     self.brush_continue(hit_pos);
                     return AfterGuiInput::STOP.ord();
                 }
@@ -691,6 +754,12 @@ impl PixyTerrainPlugin {
     fn on_smooth_mode_pressed(&mut self) {
         self.set_brush_mode(4);
         self.update_mode_buttons(4);
+    }
+
+    #[func]
+    fn on_slope_mode_pressed(&mut self) {
+        self.set_brush_mode(5);
+        self.update_mode_buttons(5);
     }
 
     #[func]
@@ -880,6 +949,9 @@ impl PixyTerrainPlugin {
         if let Some(ref mut btn) = self.smooth_mode_button {
             btn.set_pressed(active_mode == 4);
         }
+        if let Some(ref mut btn) = self.slope_mode_button {
+            btn.set_pressed(active_mode == 5);
+        }
 
         // Reset flatten direction when switching away from flatten
         if active_mode != 2 {
@@ -898,7 +970,7 @@ impl PixyTerrainPlugin {
 
     fn adjust_brush_size(&mut self, delta: f32) {
         let current = self.get_terrain_property("brush_size").to::<f32>();
-        let new_size = (current + delta).max(1.0).min(50.0);
+        let new_size = (current + delta).max(1.0).min(BRUSH_SIZE_MAX as f32);
         self.set_terrain_property("brush_size", new_size.to_variant());
         self.update_size_slider(new_size);
     }
@@ -972,7 +1044,7 @@ impl PixyTerrainPlugin {
             btn.set_pressed(brush_enabled);
         }
 
-        // Sync brush mode (0=Elevation, 1=Texture, 2=Flatten, 3=Plateau, 4=Smooth)
+        // Sync brush mode (0=Elevation, 1=Texture, 2=Flatten, 3=Plateau, 4=Smooth, 5=Slope)
         let brush_mode = self.get_terrain_property("brush_mode").to::<i32>();
         self.update_mode_buttons(brush_mode);
 
@@ -1034,6 +1106,10 @@ impl PixyTerrainPlugin {
         false
     }
 
+    fn get_brush_mode(&self) -> i32 {
+        self.get_terrain_property("brush_mode").to::<i32>()
+    }
+
     fn get_brush_phase(&self) -> i32 {
         if let Some(ref terrain) = self.current_terrain {
             if terrain.is_instance_valid() {
@@ -1083,7 +1159,7 @@ impl PixyTerrainPlugin {
 
         let ray_origin = camera.project_ray_origin(screen_pos);
         let ray_direction = camera.project_ray_normal(screen_pos);
-        let ray_end = ray_origin + ray_direction * 10000.0;
+        let ray_end = ray_origin + ray_direction * RAYCAST_MAX_DISTANCE;
 
         let Some(mut world_3d) = camera.get_world_3d() else {
             return None;
@@ -1121,7 +1197,7 @@ impl PixyTerrainPlugin {
         let ray_origin = camera.project_ray_origin(screen_pos);
         let ray_direction = camera.project_ray_normal(screen_pos);
 
-        if ray_direction.y.abs() < 0.0001 {
+        if ray_direction.y.abs() < RAY_HORIZONTAL_EPSILON {
             return None;
         }
 
@@ -1133,5 +1209,57 @@ impl PixyTerrainPlugin {
 
         let hit_point = ray_origin + ray_direction * t;
         Some(hit_point)
+    }
+
+    /// Vertical raycast: shoot straight down from high Y at the XZ under the cursor.
+    /// Returns the highest terrain surface point at that XZ.
+    /// Used by the Slope brush to get the true surface height rather than the
+    /// camera-angle-dependent intersection point.
+    fn raycast_terrain_vertical(
+        &self,
+        camera: &Gd<Camera3D>,
+        screen_pos: Vector2,
+    ) -> Option<Vector3> {
+        // Step 1: Get XZ from camera ray projected onto horizontal plane
+        let ray_origin = camera.project_ray_origin(screen_pos);
+        let ray_direction = camera.project_ray_normal(screen_pos);
+
+        let floor_y = self.get_terrain_property("terrain_floor_y").to::<f32>();
+        if ray_direction.y.abs() < RAY_HORIZONTAL_EPSILON {
+            return None;
+        }
+        let t = (floor_y - ray_origin.y) / ray_direction.y;
+        if t < 0.0 {
+            return None;
+        }
+        let plane_hit = ray_origin + ray_direction * t;
+        let xz_x = plane_hit.x;
+        let xz_z = plane_hit.z;
+
+        // Step 2: Shoot vertical ray straight down from high Y
+        let high_y = RAYCAST_MAX_DISTANCE;
+        let low_y = -RAYCAST_MAX_DISTANCE;
+        let vertical_origin = Vector3::new(xz_x, high_y, xz_z);
+        let vertical_end = Vector3::new(xz_x, low_y, xz_z);
+
+        let Some(mut world_3d) = camera.get_world_3d() else {
+            return None;
+        };
+        let Some(mut space_state) = world_3d.get_direct_space_state() else {
+            return None;
+        };
+
+        let mut query =
+            PhysicsRayQueryParameters3D::create(vertical_origin, vertical_end).unwrap();
+        query.set_collide_with_areas(false);
+        query.set_collide_with_bodies(true);
+
+        let result = space_state.intersect_ray(&query);
+        if let Some(position) = result.get("position") {
+            return Some(position.to::<Vector3>());
+        }
+
+        // Fallback: return the floor-plane XZ with floor Y
+        Some(Vector3::new(xz_x, floor_y, xz_z))
     }
 }

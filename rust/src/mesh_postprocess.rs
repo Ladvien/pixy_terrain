@@ -1,5 +1,7 @@
 use crate::chunk::MeshResult;
 
+const DECIMATION_TARGET_ERROR: f32 = 1e-2;
+
 /// Combined mesh data from multiple chunks
 pub struct CombinedMesh {
     pub vertices: Vec<[f32; 3]>,
@@ -33,19 +35,16 @@ impl Default for CombinedMesh {
 
 /// Post-processor for mesh optimization and repair
 pub struct MeshPostProcessor {
-    pub weld_epsilon: f32,
     pub normal_angle_threshold: f32,
     pub target_triangle_count: Option<usize>,
 }
 
 impl MeshPostProcessor {
     pub fn new(
-        weld_epsilon: f32,
         normal_angle_threshold: f32,
         target_triangle_count: Option<usize>,
     ) -> Self {
         Self {
-            weld_epsilon,
             normal_angle_threshold,
             target_triangle_count,
         }
@@ -328,7 +327,7 @@ impl MeshPostProcessor {
                 mesh.vertices.len(),
                 std::mem::size_of::<[f32; 3]>(),
                 target_indices,
-                1e-2, // target error
+                DECIMATION_TARGET_ERROR,
                 0,    // options
                 std::ptr::null_mut(),
             )

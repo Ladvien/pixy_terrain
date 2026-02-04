@@ -4,7 +4,6 @@
 //! via vertex colors for blending multiple terrain textures.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 use crate::chunk::ChunkCoord;
 
@@ -51,46 +50,6 @@ impl TextureWeights {
         Self { weights }
     }
 
-    /// Create custom weights (will be normalized)
-    pub fn custom(weights: [f32; MAX_TEXTURE_LAYERS]) -> Self {
-        let mut result = Self { weights };
-        result.normalize();
-        result
-    }
-
-    /// Normalize weights so they sum to 1.0
-    pub fn normalize(&mut self) {
-        let sum: f32 = self.weights.iter().sum();
-        if sum > 0.0 {
-            for w in &mut self.weights {
-                *w /= sum;
-            }
-        } else {
-            // Fallback to texture 0 if all zeros
-            self.weights[0] = 1.0;
-        }
-    }
-
-    /// Get the dominant texture index (highest weight)
-    pub fn dominant_texture(&self) -> usize {
-        self.weights
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    }
-
-    /// Blend this weight with another using a factor
-    pub fn lerp(&self, other: &TextureWeights, factor: f32) -> TextureWeights {
-        let factor = factor.clamp(0.0, 1.0);
-        let mut result = [0.0; MAX_TEXTURE_LAYERS];
-        for i in 0..MAX_TEXTURE_LAYERS {
-            result[i] = self.weights[i] * (1.0 - factor) + other.weights[i] * factor;
-        }
-        TextureWeights { weights: result }
-    }
-
     /// Convert to vertex color (RGBA)
     pub fn to_color(&self) -> [f32; 4] {
         self.weights
@@ -122,30 +81,11 @@ impl ChunkTextures {
         self.textures.get(&local_index)
     }
 
-    /// Remove texture weights at a local cell index
-    pub fn remove(&mut self, local_index: u32) -> Option<TextureWeights> {
-        self.textures.remove(&local_index)
-    }
-
-    /// Check if this chunk has any texture data
-    pub fn is_empty(&self) -> bool {
-        self.textures.is_empty()
-    }
-
     /// Get the number of texture entries in this chunk
     pub fn len(&self) -> usize {
         self.textures.len()
     }
 
-    /// Clear all texture data in this chunk
-    pub fn clear(&mut self) {
-        self.textures.clear();
-    }
-
-    /// Iterate over all texture entries
-    pub fn iter(&self) -> impl Iterator<Item = (&u32, &TextureWeights)> {
-        self.textures.iter()
-    }
 }
 
 /// Layer of texture weights spanning all chunks.
@@ -209,11 +149,6 @@ impl TextureLayer {
             .set(local_index, weights);
     }
 
-    /// Paint a single texture at a world position
-    pub fn paint_texture(&mut self, x: f32, y: f32, z: f32, texture_index: usize) {
-        self.set_at_world(x, y, z, TextureWeights::single(texture_index));
-    }
-
     /// Get texture weights at a world position
     pub fn get_at_world(&self, x: f32, y: f32, z: f32) -> Option<&TextureWeights> {
         let chunk = self.world_to_chunk(x, y, z);
@@ -222,26 +157,6 @@ impl TextureLayer {
         self.chunks
             .get(&chunk)
             .and_then(|textures| textures.get(local_index))
-    }
-
-    /// Get texture weights for a chunk
-    pub fn get_chunk_textures(&self, coord: &ChunkCoord) -> Option<&ChunkTextures> {
-        self.chunks.get(coord)
-    }
-
-    /// Check if a chunk has any texture data
-    pub fn chunk_has_textures(&self, coord: &ChunkCoord) -> bool {
-        self.chunks.get(coord).map_or(false, |t| !t.is_empty())
-    }
-
-    /// Get all chunks that have texture data
-    pub fn textured_chunks(&self) -> impl Iterator<Item = &ChunkCoord> {
-        self.chunks.keys()
-    }
-
-    /// Clear all texture data
-    pub fn clear(&mut self) {
-        self.chunks.clear();
     }
 
     /// Get total number of textured voxels across all chunks
@@ -307,25 +222,9 @@ impl TextureLayer {
         }
     }
 
-    pub fn resolution(&self) -> u32 {
-        self.resolution
-    }
-
-    pub fn voxel_size(&self) -> f32 {
-        self.voxel_size
-    }
-
     pub fn chunk_size(&self) -> f32 {
         self.chunk_size
     }
-}
-
-/// Thread-safe shared texture layer for parallel mesh generation
-pub type SharedTextureLayer = Arc<RwLock<TextureLayer>>;
-
-/// Create a new shared texture layer
-pub fn new_shared_texture_layer(resolution: u32, voxel_size: f32) -> SharedTextureLayer {
-    Arc::new(RwLock::new(TextureLayer::new(resolution, voxel_size)))
 }
 
 #[cfg(test)]
@@ -336,7 +235,6 @@ mod tests {
     fn test_texture_weights_single() {
         let weights = TextureWeights::single(2);
         assert_eq!(weights.weights, [0.0, 0.0, 1.0, 0.0]);
-        assert_eq!(weights.dominant_texture(), 2);
     }
 
     #[test]
@@ -346,16 +244,6 @@ mod tests {
         assert!((weights.weights[1] - 0.5).abs() < 0.001);
         assert_eq!(weights.weights[2], 0.0);
         assert_eq!(weights.weights[3], 0.0);
-    }
-
-    #[test]
-    fn test_texture_weights_normalize() {
-        let mut weights = TextureWeights {
-            weights: [2.0, 2.0, 0.0, 0.0],
-        };
-        weights.normalize();
-        assert!((weights.weights[0] - 0.5).abs() < 0.001);
-        assert!((weights.weights[1] - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -369,10 +257,11 @@ mod tests {
     fn test_texture_layer_paint() {
         let mut layer = TextureLayer::new(32, 1.0);
 
-        layer.paint_texture(16.0, 8.0, 24.0, 2);
+        layer.set_at_world(16.0, 8.0, 24.0, TextureWeights::single(2));
 
         let weights = layer.get_at_world(16.0, 8.0, 24.0).unwrap();
-        assert_eq!(weights.dominant_texture(), 2);
+        // Texture 2 should have the highest weight
+        assert_eq!(weights.weights[2], 1.0);
     }
 
     #[test]
@@ -381,22 +270,7 @@ mod tests {
 
         // Sample where no texture is painted should return default
         let weights = layer.sample(50.0, 50.0, 50.0);
-        assert_eq!(weights.dominant_texture(), 0);
-    }
-
-    #[test]
-    fn test_shared_texture_layer() {
-        let shared = new_shared_texture_layer(32, 1.0);
-
-        {
-            let mut layer = shared.write().unwrap();
-            layer.paint_texture(5.0, 5.0, 5.0, 3);
-        }
-
-        {
-            let layer = shared.read().unwrap();
-            let weights = layer.get_at_world(5.0, 5.0, 5.0).unwrap();
-            assert_eq!(weights.dominant_texture(), 3);
-        }
+        // Default is texture 0
+        assert_eq!(weights.weights[0], 1.0);
     }
 }

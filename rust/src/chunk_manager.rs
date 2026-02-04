@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossbeam::channel::{Receiver, Sender};
-use godot::prelude::godot_print;
 
 use crate::chunk::{Chunk, ChunkCoord, ChunkState, MeshResult};
 use crate::lod::LODConfig;
@@ -12,6 +11,9 @@ use crate::mesh_worker::MeshRequest;
 use crate::noise_field::NoiseField;
 use crate::terrain_modifications::ModificationLayer;
 use crate::texture_layer::TextureLayer;
+
+/// Maximum number of mesh results to collect per update cycle.
+const DEFAULT_MAX_RESULTS_PER_UPDATE: usize = 64;
 
 pub struct ChunkManager {
     chunks: HashMap<ChunkCoord, Chunk>,
@@ -43,7 +45,7 @@ impl ChunkManager {
             request_tx,
             result_rx,
             current_frame: 0,
-            max_results_per_update: 64,
+            max_results_per_update: DEFAULT_MAX_RESULTS_PER_UPDATE,
             map_width,
             map_height,
             map_depth,
@@ -52,14 +54,6 @@ impl ChunkManager {
 
     fn chunk_size(&self) -> f32 {
         self.base_voxel_size * self.lod_config.chunk_subdivisions as f32
-    }
-
-    pub fn update(
-        &mut self,
-        camera_pos: [f32; 3],
-        noise_field: &Arc<NoiseField>,
-    ) -> Vec<MeshResult> {
-        self.update_with_layers(camera_pos, noise_field, None, None)
     }
 
     /// Update with optional modification and texture layers
@@ -73,18 +67,15 @@ impl ChunkManager {
         self.current_frame += 1;
         let desired = self.compute_desired_chunks(camera_pos);
 
-        let mut requests_sent = 0;
         for (coord, desired_lod) in &desired {
-            if self.ensure_chunk_requested(
+            self.ensure_chunk_requested(
                 *coord,
                 *desired_lod,
                 noise_field,
                 &desired,
                 modifications,
                 textures,
-            ) {
-                requests_sent += 1;
-            }
+            );
         }
 
         self.mark_distant_for_unload(&desired);
@@ -191,7 +182,7 @@ impl ChunkManager {
                         c.last_access_frame = self.current_frame;
                     })
                     .or_insert_with(|| {
-                        let mut chunk = Chunk::new(coord, desired_lod);
+                        let mut chunk = Chunk::new(desired_lod);
                         chunk.state = ChunkState::Pending;
                         chunk.last_access_frame = self.current_frame;
                         chunk
@@ -282,44 +273,6 @@ impl ChunkManager {
         count
     }
 
-    /// Force regeneration of a specific chunk
-    pub fn request_chunk_regeneration(
-        &mut self,
-        coord: ChunkCoord,
-        noise_field: &Arc<NoiseField>,
-        modifications: Option<&Arc<ModificationLayer>>,
-        textures: Option<&Arc<TextureLayer>>,
-    ) -> bool {
-        // Mark as unloaded to force re-request
-        if let Some(chunk) = self.chunks.get_mut(&coord) {
-            chunk.state = ChunkState::Unloaded;
-        }
-
-        // Get desired LOD from current chunk or default to 0
-        let desired_lod = self.chunks.get(&coord).map_or(0, |c| c.lod_level);
-
-        // Create empty desired map for transition calculation (simplified)
-        let desired = HashMap::new();
-        self.ensure_chunk_requested(
-            coord,
-            desired_lod,
-            noise_field,
-            &desired,
-            modifications,
-            textures,
-        )
-    }
-
-    pub fn chunk_count(&self) -> usize {
-        self.chunks.len()
-    }
-
-    pub fn active_chunk_count(&self) -> usize {
-        self.chunks
-            .values()
-            .filter(|c| c.state == ChunkState::Active)
-            .count()
-    }
 }
 
 #[cfg(test)]
@@ -372,7 +325,7 @@ mod tests {
     fn test_transition_sides_computation() {
         let (mut manager, _, _) = test_manager();
 
-        let neighbor = Chunk::new(ChunkCoord::new(-1, 0, 0), 0);
+        let neighbor = Chunk::new(0);
         manager.chunks.insert(ChunkCoord::new(-1, 0, 0), neighbor);
 
         // Create a desired map with LOD levels for testing
@@ -400,7 +353,7 @@ mod tests {
         let (mut manager, req_rx, _) = test_manager();
         let noise = test_noise();
 
-        let _ = manager.update([0.0, 0.0, 0.0], &noise);
+        let _ = manager.update_with_layers([0.0, 0.0, 0.0], &noise, None, None);
 
         let mut request_count = 0;
         while req_rx.try_recv().is_ok() {
@@ -415,7 +368,7 @@ mod tests {
         let (mut manager, _, res_tx) = test_manager();
         let noise = test_noise();
 
-        let _ = manager.update([0.0, 0.0, 0.0], &noise);
+        let _ = manager.update_with_layers([0.0, 0.0, 0.0], &noise, None, None);
 
         let result = MeshResult {
             coord: ChunkCoord::new(0, 0, 0),
@@ -423,12 +376,11 @@ mod tests {
             vertices: vec![[0.0, 0.0, 0.0]],
             normals: vec![[0.0, 1.0, 0.0]],
             indices: vec![0],
-            transition_sides: 0,
             colors: vec![[1.0, 0.0, 0.0, 0.0]],
         };
         res_tx.send(result).unwrap();
 
-        let results = manager.update([0.0, 0.0, 0.0], &noise);
+        let results = manager.update_with_layers([0.0, 0.0, 0.0], &noise, None, None);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].coord, ChunkCoord::new(0, 0, 0));
@@ -444,17 +396,17 @@ mod tests {
         let noise = test_noise();
 
         // Load chunks at origin
-        let _ = manager.update([0.0, 0.0, 0.0], &noise);
+        let _ = manager.update_with_layers([0.0, 0.0, 0.0], &noise, None, None);
 
         // Manually insert and mark origin chunk as active (bypass channel limits)
         manager.chunks.insert(
             ChunkCoord::new(0, 0, 0),
-            Chunk::new(ChunkCoord::new(0, 0, 0), 0),
+            Chunk::new(0),
         );
         manager.mark_chunk_active(&ChunkCoord::new(0, 0, 0), 123);
 
         // Move camera very far away
-        let _ = manager.update([10000.0, 0.0, 0.0], &noise);
+        let _ = manager.update_with_layers([10000.0, 0.0, 0.0], &noise, None, None);
 
         // Original chunk should be marked for unload
         let unload = manager.get_unload_candidates();

@@ -48,7 +48,6 @@ pub struct MeshResult {
     pub vertices: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub indices: Vec<i32>,
-    pub transition_sides: u8,
     /// Vertex colors for texture blending (RGBA = texture weights for 4 textures)
     pub colors: Vec<[f32; 4]>,
 }
@@ -58,13 +57,6 @@ impl MeshResult {
         self.vertices.is_empty()
     }
 
-    pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
-    }
-
-    pub fn vertex_count(&self) -> usize {
-        self.vertices.len()
-    }
 }
 
 /// Lifecycle state of chunk
@@ -79,7 +71,6 @@ pub enum ChunkState {
 
 /// Chunk metadata stored by ChunkManager
 pub struct Chunk {
-    pub coord: ChunkCoord,
     pub state: ChunkState,
     pub lod_level: u8,
     pub mesh_instance_id: Option<i64>,
@@ -87,9 +78,8 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    pub fn new(coord: ChunkCoord, lod_level: u8) -> Self {
+    pub fn new(lod_level: u8) -> Self {
         Self {
-            coord,
             state: ChunkState::Unloaded,
             lod_level,
             mesh_instance_id: None,
