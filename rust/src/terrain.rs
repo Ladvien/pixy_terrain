@@ -11,7 +11,7 @@ use crate::brush::{
     Brush, BrushAction, BrushFootprint, BrushMode, BrushPhase, BrushShape, FlattenDirection,
 };
 use crate::brush_preview::BrushPreview;
-use crate::chunk::{ChunkCoord, MeshResult};
+use crate::chunk::{ChunkCoord, MeshResult, DEFAULT_TEXTURE_COLOR};
 use crate::chunk_manager::ChunkManager;
 use crate::lod::LODConfig;
 use crate::mesh_postprocess::{CombinedMesh, MeshPostProcessor};
@@ -29,8 +29,6 @@ const STENCIL_WRITE_RENDER_PRIORITY: i32 = -1;
 const TERRAIN_RENDER_PRIORITY: i32 = 0;
 /// Render priority for stencil cap pass (flat cap at clip plane).
 const STENCIL_CAP_RENDER_PRIORITY: i32 = 1;
-/// Default vertex color: full weight on texture 0.
-const DEFAULT_TEXTURE_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
 /// Minimum height delta to show height plane preview.
 const MIN_HEIGHT_DELTA_FOR_PREVIEW: f32 = 0.001;
 
@@ -1115,9 +1113,10 @@ impl PixyTerrain {
         }
 
         // Update brush settings from exports
-        if let Some(ref mut brush) = self.brush {
-            self.sync_brush_settings(brush);
+        if let Some(mut brush) = self.brush.take() {
+            self.sync_brush_settings(&mut brush);
             brush.begin_stroke(world_pos.x, world_pos.y, world_pos.z);
+            self.brush = Some(brush);
             true
         } else {
             false

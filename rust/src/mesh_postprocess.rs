@@ -161,17 +161,6 @@ impl MeshPostProcessor {
         mesh.normals = new_normals;
     }
 
-    /// Repair non-manifold edges and vertices
-    /// Currently a placeholder - manifold repair is complex and may need
-    /// additional library support
-    pub fn repair_manifold(&self, _mesh: &mut CombinedMesh) {
-        // TODO: Implement manifold repair
-        // This would involve:
-        // 1. Detecting non-manifold edges (edges shared by more than 2 triangles)
-        // 2. Detecting non-manifold vertices (vertices where triangle fans don't form a disk)
-        // 3. Splitting or removing problematic geometry
-    }
-
     /// Recompute normals based on angle threshold
     /// Vertices with face angles below threshold get smooth normals,
     /// vertices with sharp angles get flat normals
@@ -374,7 +363,6 @@ impl MeshPostProcessor {
         let mut mesh = self.merge_chunks(chunks);
 
         self.weld_vertices(&mut mesh);
-        self.repair_manifold(&mut mesh);
         self.recompute_normals(&mut mesh);
 
         if self.target_triangle_count.is_some() {
@@ -411,5 +399,255 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
         [v[0] / len, v[1] / len, v[2] / len]
     } else {
         [0.0, 1.0, 0.0] // Default up vector for degenerate normals
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::ChunkCoord;
+
+    /// Helper: create a MeshResult with a single triangle (flat quad = 2 triangles).
+    fn make_flat_quad_chunk(coord: ChunkCoord) -> MeshResult {
+        MeshResult {
+            coord,
+            lod_level: 0,
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: vec![
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            colors: vec![[1.0, 0.0, 0.0, 0.0]; 4],
+        }
+    }
+
+    fn make_processor() -> MeshPostProcessor {
+        MeshPostProcessor::new(60.0, None)
+    }
+
+    // --- merge_chunks tests ---
+
+    #[test]
+    fn test_merge_chunks_empty() {
+        let processor = make_processor();
+        let mesh = processor.merge_chunks(&[]);
+        assert_eq!(mesh.vertex_count(), 0);
+        assert_eq!(mesh.triangle_count(), 0);
+    }
+
+    #[test]
+    fn test_merge_chunks_single() {
+        let processor = make_processor();
+        let chunk = make_flat_quad_chunk(ChunkCoord::new(0, 0, 0));
+        let mesh = processor.merge_chunks(&[chunk]);
+        assert_eq!(mesh.vertex_count(), 4);
+        assert_eq!(mesh.triangle_count(), 2);
+    }
+
+    #[test]
+    fn test_merge_chunks_multiple_offsets_indices() {
+        let processor = make_processor();
+        let c0 = make_flat_quad_chunk(ChunkCoord::new(0, 0, 0));
+        let c1 = make_flat_quad_chunk(ChunkCoord::new(1, 0, 0));
+        let mesh = processor.merge_chunks(&[c0, c1]);
+        assert_eq!(mesh.vertex_count(), 8); // 4 + 4
+        assert_eq!(mesh.triangle_count(), 4); // 2 + 2
+        // Second chunk's indices should be offset by 4
+        assert_eq!(mesh.indices[6], 4); // first index of second chunk
+        assert_eq!(mesh.indices[7], 5);
+        assert_eq!(mesh.indices[8], 6);
+    }
+
+    #[test]
+    fn test_merge_chunks_skips_invalid_indices() {
+        let processor = make_processor();
+        let chunk = MeshResult {
+            coord: ChunkCoord::new(0, 0, 0),
+            lod_level: 0,
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2, 0, 1, 99], // second triangle has out-of-range index
+            colors: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+        };
+        let mesh = processor.merge_chunks(&[chunk]);
+        assert_eq!(mesh.triangle_count(), 1); // only valid triangle kept
+    }
+
+    // --- weld_vertices tests ---
+
+    #[test]
+    fn test_weld_vertices_coincident() {
+        let processor = make_processor();
+        // Two triangles sharing an edge with duplicated vertices
+        let mut mesh = CombinedMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.5, 1.0, 0.0],
+                [1.0, 0.0, 0.0], // duplicate of [1]
+                [2.0, 0.0, 0.0],
+                [1.5, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            indices: vec![0, 1, 2, 3, 4, 5],
+        };
+        processor.weld_vertices(&mut mesh);
+        // Should have welded vertex 3 into vertex 1
+        assert!(mesh.vertices.len() <= 5, "Expected welding to reduce vertex count, got {}", mesh.vertices.len());
+    }
+
+    #[test]
+    fn test_weld_vertices_distinct() {
+        let processor = make_processor();
+        let mut mesh = CombinedMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.5, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        let original_count = mesh.vertices.len();
+        processor.weld_vertices(&mut mesh);
+        assert_eq!(mesh.vertices.len(), original_count);
+    }
+
+    #[test]
+    fn test_weld_vertices_empty() {
+        let processor = make_processor();
+        let mut mesh = CombinedMesh::new();
+        processor.weld_vertices(&mut mesh); // should not panic
+        assert_eq!(mesh.vertex_count(), 0);
+    }
+
+    // --- recompute_normals tests ---
+
+    #[test]
+    fn test_recompute_normals_flat_quad() {
+        let processor = make_processor();
+        let mut mesh = CombinedMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 0.0, 0.0]; 4], // zero normals
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        processor.recompute_normals(&mut mesh);
+        // All normals should point up (Y-axis) for a flat XZ quad
+        for n in &mesh.normals {
+            assert!(
+                n[1].abs() > 0.9,
+                "Expected Y-dominant normal, got {:?}",
+                n
+            );
+        }
+    }
+
+    #[test]
+    fn test_recompute_normals_empty() {
+        let processor = make_processor();
+        let mut mesh = CombinedMesh::new();
+        processor.recompute_normals(&mut mesh); // should not panic
+    }
+
+    // --- remove_unused_vertices tests ---
+
+    #[test]
+    fn test_remove_unused_vertices() {
+        let processor = make_processor();
+        let mut mesh = CombinedMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0], // used
+                [99.0, 99.0, 99.0], // orphan
+                [1.0, 0.0, 0.0], // used
+                [0.5, 1.0, 0.0], // used
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            indices: vec![0, 2, 3], // references 0, 2, 3 — vertex 1 is orphaned
+        };
+        processor.remove_unused_vertices(&mut mesh);
+        assert_eq!(mesh.vertices.len(), 3, "Orphan vertex should be removed");
+        assert_eq!(mesh.normals.len(), 3);
+        // Indices should be remapped
+        assert_eq!(mesh.indices.len(), 3);
+        // All indices should be valid
+        for &idx in &mesh.indices {
+            assert!((idx as usize) < mesh.vertices.len());
+        }
+    }
+
+    // --- decimate tests ---
+
+    #[test]
+    fn test_decimate_reduces_triangles() {
+        let processor = MeshPostProcessor::new(60.0, Some(1));
+        // Create a mesh with 4 triangles (enough to decimate)
+        let mut mesh = CombinedMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [2.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 1.0, 0.0]; 6],
+            indices: vec![
+                0, 1, 4,
+                0, 4, 3,
+                1, 2, 5,
+                1, 5, 4,
+            ],
+        };
+        let original_triangles = mesh.triangle_count();
+        processor.decimate(&mut mesh);
+        // Should have reduced (or at least not increased) triangle count
+        assert!(
+            mesh.triangle_count() <= original_triangles,
+            "Expected triangle count to decrease or stay same"
+        );
+    }
+
+    #[test]
+    fn test_decimate_no_target_is_noop() {
+        let processor = MeshPostProcessor::new(60.0, None);
+        let mut mesh = CombinedMesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+        };
+        processor.decimate(&mut mesh);
+        assert_eq!(mesh.triangle_count(), 1);
+    }
+
+    // --- process pipeline test ---
+
+    #[test]
+    fn test_process_pipeline() {
+        let processor = make_processor();
+        let chunks = vec![
+            make_flat_quad_chunk(ChunkCoord::new(0, 0, 0)),
+            make_flat_quad_chunk(ChunkCoord::new(1, 0, 0)),
+        ];
+        let mesh = processor.process(&chunks);
+        assert!(mesh.vertex_count() > 0);
+        assert!(mesh.triangle_count() > 0);
+        // Normals should be valid (non-zero length)
+        for n in &mesh.normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!(len > 0.9, "Normal should be approximately unit length, got {len}");
+        }
     }
 }

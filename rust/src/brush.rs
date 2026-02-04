@@ -735,20 +735,11 @@ impl Brush {
             return Vec::new();
         }
 
+        let (y_min, y_max) = match self.compute_y_scan_range(noise) {
+            Some(range) => range,
+            None => return Vec::new(),
+        };
         let base_y = self.footprint.base_y;
-        let floor_y = noise.get_floor_y();
-        let height_offset = noise.get_height_offset();
-        let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
-        let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = Y_PADDING_VOXELS * self.voxel_size;
-        let (y_min, y_max) = Self::clamp_y_range(
-            (terrain_trough.min(base_y) - padding).floor(),
-            (terrain_peak.max(base_y) + padding).ceil(),
-            noise,
-        );
-        if y_min >= y_max {
-            return Vec::new();
-        }
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
             let falloff = self.compute_stroke_falloff(wx, wz);
@@ -759,59 +750,10 @@ impl Brush {
             let mut y = y_min;
             while y <= y_max {
                 let desired_sdf = y - target_y;
-                let new_blend = self.strength;
-
                 let noise_val = noise.sample(wx, y, wz);
-
-                // Read existing modification state
-                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
-                {
-                    Some(m) => (m.desired_sdf, m.blend),
-                    None => (noise_val, 0.0),
-                };
-
-                // Alpha-composite
-                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
-
-                if combined_blend > MIN_BLEND_THRESHOLD {
-                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
-                        + desired_sdf * new_blend)
-                        / combined_blend;
-
-                    // Direction filter: compare effective SDF values
-                    let current_sdf =
-                        noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
-                    let new_sdf =
-                        noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
-                    let sdf_change = new_sdf - current_sdf;
-
-                    let (final_desired, final_blend) = match self.flatten_direction {
-                        FlattenDirection::Both => (combined_desired, combined_blend),
-                        FlattenDirection::Up => {
-                            // Only remove material (make SDF more positive)
-                            if sdf_change > 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                        FlattenDirection::Down => {
-                            // Only add material (make SDF more negative)
-                            if sdf_change < 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                    };
-
-                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
-                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
-                    if changed {
-                        new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
-                    }
-                }
-
+                self.composite_and_write(
+                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                );
                 y += self.voxel_size;
             }
         }
@@ -838,20 +780,10 @@ impl Brush {
             return Vec::new();
         }
 
-        let base_y = self.footprint.base_y;
-        let floor_y = noise.get_floor_y();
-        let height_offset = noise.get_height_offset();
-        let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
-        let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = Y_PADDING_VOXELS * self.voxel_size;
-        let (y_min, y_max) = Self::clamp_y_range(
-            (terrain_trough.min(base_y) - padding).floor(),
-            (terrain_peak.max(base_y) + padding).ceil(),
-            noise,
-        );
-        if y_min >= y_max {
-            return Vec::new();
-        }
+        let (y_min, y_max) = match self.compute_y_scan_range(noise) {
+            Some(range) => range,
+            None => return Vec::new(),
+        };
         for cell in self.footprint.iter() {
             let (wx, _, wz) = cell.to_world(0.0, self.voxel_size);
             let falloff = self.compute_stroke_falloff(wx, wz);
@@ -867,57 +799,10 @@ impl Brush {
             let mut y = y_min;
             while y <= y_max {
                 let desired_sdf = y - target_y;
-                let new_blend = self.strength;
-
                 let noise_val = noise.sample(wx, y, wz);
-
-                // Read existing modification state
-                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
-                {
-                    Some(m) => (m.desired_sdf, m.blend),
-                    None => (noise_val, 0.0),
-                };
-
-                // Alpha-composite
-                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
-
-                if combined_blend > MIN_BLEND_THRESHOLD {
-                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
-                        + desired_sdf * new_blend)
-                        / combined_blend;
-
-                    // Direction filter: compare effective SDF values
-                    let current_sdf =
-                        noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
-                    let new_sdf =
-                        noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
-                    let sdf_change = new_sdf - current_sdf;
-
-                    let (final_desired, final_blend) = match self.flatten_direction {
-                        FlattenDirection::Both => (combined_desired, combined_blend),
-                        FlattenDirection::Up => {
-                            if sdf_change > 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                        FlattenDirection::Down => {
-                            if sdf_change < 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                    };
-
-                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
-                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
-                    if changed {
-                        new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
-                    }
-                }
-
+                self.composite_and_write(
+                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                );
                 y += self.voxel_size;
             }
         }
@@ -944,20 +829,11 @@ impl Brush {
             return Vec::new();
         }
 
+        let (y_min, y_max) = match self.compute_y_scan_range(noise) {
+            Some(range) => range,
+            None => return Vec::new(),
+        };
         let base_y = self.footprint.base_y;
-        let floor_y = noise.get_floor_y();
-        let height_offset = noise.get_height_offset();
-        let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
-        let terrain_trough = floor_y + height_offset - noise.get_amplitude();
-        let padding = Y_PADDING_VOXELS * self.voxel_size;
-        let (y_min, y_max) = Self::clamp_y_range(
-            (terrain_trough.min(base_y) - padding).floor(),
-            (terrain_peak.max(base_y) + padding).ceil(),
-            noise,
-        );
-        if y_min >= y_max {
-            return Vec::new();
-        }
         let core_min = base_y - self.voxel_size;
         let core_max = base_y + self.voxel_size;
         let y_padding = Y_PADDING_VOXELS * self.voxel_size;
@@ -1156,56 +1032,10 @@ impl Brush {
             let mut y = y_min;
             while y <= y_max {
                 let desired_sdf = y - target_y;
-                let new_blend = self.strength;
-
                 let noise_val = noise.sample(wx, y, wz);
-
-                let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz)
-                {
-                    Some(m) => (m.desired_sdf, m.blend),
-                    None => (noise_val, 0.0),
-                };
-
-                // Alpha-composite
-                let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
-
-                if combined_blend > MIN_BLEND_THRESHOLD {
-                    let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
-                        + desired_sdf * new_blend)
-                        / combined_blend;
-
-                    // Direction filter: compare effective SDF values
-                    let current_sdf =
-                        noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
-                    let new_sdf =
-                        noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
-                    let sdf_change = new_sdf - current_sdf;
-
-                    let (final_desired, final_blend) = match self.flatten_direction {
-                        FlattenDirection::Both => (combined_desired, combined_blend),
-                        FlattenDirection::Up => {
-                            if sdf_change > 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                        FlattenDirection::Down => {
-                            if sdf_change < 0.0 {
-                                (combined_desired, combined_blend)
-                            } else {
-                                (existing_desired, existing_blend)
-                            }
-                        }
-                    };
-
-                    let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
-                        || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
-                    if changed {
-                        new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
-                    }
-                }
-
+                self.composite_and_write(
+                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                );
                 y += self.voxel_size;
             }
         }
@@ -1225,6 +1055,86 @@ impl Brush {
             (y_min.max(box_min[1]), y_max.min(box_max[1]))
         } else {
             (y_min, y_max)
+        }
+    }
+
+    /// Compute Y scan range from terrain noise bounds and brush base_y.
+    /// Returns `None` if the range is empty (y_min >= y_max).
+    fn compute_y_scan_range(&self, noise: &NoiseField) -> Option<(f32, f32)> {
+        let base_y = self.footprint.base_y;
+        let floor_y = noise.get_floor_y();
+        let height_offset = noise.get_height_offset();
+        let terrain_peak = floor_y + height_offset + noise.get_effective_amplitude();
+        let terrain_trough = floor_y + height_offset - noise.get_amplitude();
+        let padding = Y_PADDING_VOXELS * self.voxel_size;
+        let (y_min, y_max) = Self::clamp_y_range(
+            (terrain_trough.min(base_y) - padding).floor(),
+            (terrain_peak.max(base_y) + padding).ceil(),
+            noise,
+        );
+        if y_min >= y_max {
+            None
+        } else {
+            Some((y_min, y_max))
+        }
+    }
+
+    /// Alpha-composite a new SDF modification with existing state, applying direction filtering.
+    /// Reads existing mod at (wx, y, wz), composites with the new desired_sdf/new_blend,
+    /// filters by flatten_direction, and writes the result if changed.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_and_write(
+        &self,
+        wx: f32,
+        y: f32,
+        wz: f32,
+        desired_sdf: f32,
+        new_blend: f32,
+        noise_val: f32,
+        existing_mods: &ModificationLayer,
+        new_mods: &mut ModificationLayer,
+    ) {
+        let (existing_desired, existing_blend) = match existing_mods.get_at_world(wx, y, wz) {
+            Some(m) => (m.desired_sdf, m.blend),
+            None => (noise_val, 0.0),
+        };
+
+        let combined_blend = 1.0 - (1.0 - existing_blend) * (1.0 - new_blend);
+
+        if combined_blend > MIN_BLEND_THRESHOLD {
+            let combined_desired = (existing_desired * existing_blend * (1.0 - new_blend)
+                + desired_sdf * new_blend)
+                / combined_blend;
+
+            let current_sdf =
+                noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
+            let new_sdf =
+                noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
+            let sdf_change = new_sdf - current_sdf;
+
+            let (final_desired, final_blend) = match self.flatten_direction {
+                FlattenDirection::Both => (combined_desired, combined_blend),
+                FlattenDirection::Up => {
+                    if sdf_change > 0.0 {
+                        (combined_desired, combined_blend)
+                    } else {
+                        (existing_desired, existing_blend)
+                    }
+                }
+                FlattenDirection::Down => {
+                    if sdf_change < 0.0 {
+                        (combined_desired, combined_blend)
+                    } else {
+                        (existing_desired, existing_blend)
+                    }
+                }
+            };
+
+            let changed = (final_desired - existing_desired).abs() > CHANGE_EPSILON
+                || (final_blend - existing_blend).abs() > CHANGE_EPSILON;
+            if changed {
+                new_mods.set_at_world(wx, y, wz, VoxelMod::new(final_desired, final_blend));
+            }
         }
     }
 

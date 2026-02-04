@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::chunk::ChunkCoord;
+use crate::voxel_grid::{SparseChunkData, VoxelGridConfig};
 
 /// Maximum number of texture layers supported
 pub const MAX_TEXTURE_LAYERS: usize = 4;
@@ -57,36 +58,7 @@ impl TextureWeights {
 }
 
 /// Sparse storage of texture weights within a single chunk.
-/// Uses local cell index (flattened from 3D grid position) as key.
-#[derive(Clone, Debug, Default)]
-pub struct ChunkTextures {
-    /// Map from local cell index to texture weights
-    pub textures: HashMap<u32, TextureWeights>,
-}
-
-impl ChunkTextures {
-    pub fn new() -> Self {
-        Self {
-            textures: HashMap::new(),
-        }
-    }
-
-    /// Set texture weights at a local cell index
-    pub fn set(&mut self, local_index: u32, weights: TextureWeights) {
-        self.textures.insert(local_index, weights);
-    }
-
-    /// Get texture weights at a local cell index
-    pub fn get(&self, local_index: u32) -> Option<&TextureWeights> {
-        self.textures.get(&local_index)
-    }
-
-    /// Get the number of texture entries in this chunk
-    pub fn len(&self) -> usize {
-        self.textures.len()
-    }
-
-}
+pub type ChunkTextures = SparseChunkData<TextureWeights>;
 
 /// Layer of texture weights spanning all chunks.
 /// Thread-safe for concurrent read access during mesh generation.
@@ -94,65 +66,43 @@ impl ChunkTextures {
 pub struct TextureLayer {
     /// Sparse storage: only chunks with painted textures are stored
     chunks: HashMap<ChunkCoord, ChunkTextures>,
-    /// Resolution of each chunk (voxels per axis)
-    resolution: u32,
-    /// Size of each voxel in world units
-    voxel_size: f32,
-    /// Size of each chunk in world units
-    chunk_size: f32,
+    /// Shared grid configuration
+    grid: VoxelGridConfig,
 }
 
 impl TextureLayer {
     pub fn new(resolution: u32, voxel_size: f32) -> Self {
         Self {
             chunks: HashMap::new(),
-            resolution,
-            voxel_size,
-            chunk_size: resolution as f32 * voxel_size,
+            grid: VoxelGridConfig::new(resolution, voxel_size),
         }
     }
 
     /// Convert world position to chunk coordinate
     pub fn world_to_chunk(&self, x: f32, y: f32, z: f32) -> ChunkCoord {
-        ChunkCoord::new(
-            (x / self.chunk_size).floor() as i32,
-            (y / self.chunk_size).floor() as i32,
-            (z / self.chunk_size).floor() as i32,
-        )
+        self.grid.world_to_chunk(x, y, z)
     }
 
     /// Convert world position to local cell index within a chunk
     pub fn world_to_local_index(&self, x: f32, y: f32, z: f32) -> u32 {
-        let chunk_x = (x / self.chunk_size).floor() * self.chunk_size;
-        let chunk_y = (y / self.chunk_size).floor() * self.chunk_size;
-        let chunk_z = (z / self.chunk_size).floor() * self.chunk_size;
-
-        let local_x = ((x - chunk_x) / self.voxel_size).floor() as u32;
-        let local_y = ((y - chunk_y) / self.voxel_size).floor() as u32;
-        let local_z = ((z - chunk_z) / self.voxel_size).floor() as u32;
-
-        let lx = local_x.min(self.resolution - 1);
-        let ly = local_y.min(self.resolution - 1);
-        let lz = local_z.min(self.resolution - 1);
-
-        lx + ly * self.resolution + lz * self.resolution * self.resolution
+        self.grid.world_to_local_index(x, y, z)
     }
 
     /// Set texture weights at a world position
     pub fn set_at_world(&mut self, x: f32, y: f32, z: f32, weights: TextureWeights) {
-        let chunk = self.world_to_chunk(x, y, z);
-        let local_index = self.world_to_local_index(x, y, z);
+        let chunk = self.grid.world_to_chunk(x, y, z);
+        let local_index = self.grid.world_to_local_index(x, y, z);
 
         self.chunks
             .entry(chunk)
-            .or_insert_with(ChunkTextures::new)
+            .or_default()
             .set(local_index, weights);
     }
 
     /// Get texture weights at a world position
     pub fn get_at_world(&self, x: f32, y: f32, z: f32) -> Option<&TextureWeights> {
-        let chunk = self.world_to_chunk(x, y, z);
-        let local_index = self.world_to_local_index(x, y, z);
+        let chunk = self.grid.world_to_chunk(x, y, z);
+        let local_index = self.grid.world_to_local_index(x, y, z);
 
         self.chunks
             .get(&chunk)
@@ -167,17 +117,15 @@ impl TextureLayer {
     /// Sample texture weights at a world position using trilinear interpolation
     /// Returns interpolated weights or default if no texture data nearby
     pub fn sample(&self, x: f32, y: f32, z: f32) -> TextureWeights {
-        // Find the voxel cell that contains this point
-        let vx = (x / self.voxel_size).floor();
-        let vy = (y / self.voxel_size).floor();
-        let vz = (z / self.voxel_size).floor();
+        let voxel_size = self.grid.voxel_size;
+        let vx = (x / voxel_size).floor();
+        let vy = (y / voxel_size).floor();
+        let vz = (z / voxel_size).floor();
 
-        // Fractional position within the cell (0-1)
-        let fx = x / self.voxel_size - vx;
-        let fy = y / self.voxel_size - vy;
-        let fz = z / self.voxel_size - vz;
+        let fx = x / voxel_size - vx;
+        let fy = y / voxel_size - vy;
+        let fz = z / voxel_size - vz;
 
-        // Sample 8 corners for trilinear interpolation
         let mut total_weights = [0.0f32; MAX_TEXTURE_LAYERS];
         let mut total_influence = 0.0f32;
 
@@ -188,12 +136,11 @@ impl TextureLayer {
                     let wy = vy + dy as f32;
                     let wz = vz + dz as f32;
 
-                    let world_x = wx * self.voxel_size;
-                    let world_y = wy * self.voxel_size;
-                    let world_z = wz * self.voxel_size;
+                    let world_x = wx * voxel_size;
+                    let world_y = wy * voxel_size;
+                    let world_z = wz * voxel_size;
 
                     if let Some(weights) = self.get_at_world(world_x, world_y, world_z) {
-                        // Trilinear weight
                         let weight_x = if dx == 0 { 1.0 - fx } else { fx };
                         let weight_y = if dy == 0 { 1.0 - fy } else { fy };
                         let weight_z = if dz == 0 { 1.0 - fz } else { fz };
@@ -209,7 +156,6 @@ impl TextureLayer {
         }
 
         if total_influence > 0.0 {
-            // Normalize the interpolated weights
             for w in &mut total_weights {
                 *w /= total_influence;
             }
@@ -217,13 +163,12 @@ impl TextureLayer {
                 weights: total_weights,
             }
         } else {
-            // No texture data - return default
             TextureWeights::default()
         }
     }
 
     pub fn chunk_size(&self) -> f32 {
-        self.chunk_size
+        self.grid.chunk_size
     }
 }
 

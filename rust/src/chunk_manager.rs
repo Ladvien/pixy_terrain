@@ -215,8 +215,8 @@ impl ChunkManager {
             (ChunkCoord::new(coord.x, coord.y, coord.z + 1), 0b100000), // HighZ
         ];
 
-        for (neigbor_coord, flag) in neighbors {
-            if let Some(&neighbor_lod) = desired.get(&neigbor_coord) {
+        for (neighbor_coord, flag) in neighbors {
+            if let Some(&neighbor_lod) = desired.get(&neighbor_coord) {
                 if neighbor_lod < lod {
                     sides |= flag;
                 }

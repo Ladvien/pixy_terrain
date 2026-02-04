@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use crate::chunk::ChunkCoord;
+use crate::voxel_grid::{SparseChunkData, VoxelGridConfig};
 
 /// A single voxel modification.
 /// Stored sparsely - only modified voxels are tracked.
@@ -37,46 +38,7 @@ impl VoxelMod {
 }
 
 /// Sparse storage of modifications within a single chunk.
-/// Uses local cell index (flattened from 3D grid position) as key.
-#[derive(Clone, Debug, Default)]
-pub struct ChunkMods {
-    /// Map from local cell index to modification
-    pub mods: HashMap<u32, VoxelMod>,
-}
-
-impl ChunkMods {
-    pub fn new() -> Self {
-        Self {
-            mods: HashMap::new(),
-        }
-    }
-
-    /// Set a modification at a local cell index
-    pub fn set(&mut self, local_index: u32, modification: VoxelMod) {
-        self.mods.insert(local_index, modification);
-    }
-
-    /// Get a modification at a local cell index
-    pub fn get(&self, local_index: u32) -> Option<&VoxelMod> {
-        self.mods.get(&local_index)
-    }
-
-    /// Remove a modification at a local cell index
-    pub fn remove(&mut self, local_index: u32) -> Option<VoxelMod> {
-        self.mods.remove(&local_index)
-    }
-
-    /// Check if this chunk has any modifications
-    pub fn is_empty(&self) -> bool {
-        self.mods.is_empty()
-    }
-
-    /// Get the number of modifications in this chunk
-    pub fn len(&self) -> usize {
-        self.mods.len()
-    }
-
-}
+pub type ChunkMods = SparseChunkData<VoxelMod>;
 
 /// Layer of terrain modifications spanning all chunks.
 /// Thread-safe for concurrent read access during mesh generation.
@@ -84,65 +46,43 @@ impl ChunkMods {
 pub struct ModificationLayer {
     /// Sparse storage: only chunks with modifications are stored
     chunks: HashMap<ChunkCoord, ChunkMods>,
-    /// Resolution of each chunk (voxels per axis)
-    resolution: u32,
-    /// Size of each voxel in world units
-    voxel_size: f32,
-    /// Size of each chunk in world units
-    chunk_size: f32,
+    /// Shared grid configuration
+    grid: VoxelGridConfig,
 }
 
 impl ModificationLayer {
     pub fn new(resolution: u32, voxel_size: f32) -> Self {
         Self {
             chunks: HashMap::new(),
-            resolution,
-            voxel_size,
-            chunk_size: resolution as f32 * voxel_size,
+            grid: VoxelGridConfig::new(resolution, voxel_size),
         }
     }
 
     /// Convert world position to chunk coordinate
     pub fn world_to_chunk(&self, x: f32, y: f32, z: f32) -> ChunkCoord {
-        ChunkCoord::new(
-            (x / self.chunk_size).floor() as i32,
-            (y / self.chunk_size).floor() as i32,
-            (z / self.chunk_size).floor() as i32,
-        )
+        self.grid.world_to_chunk(x, y, z)
     }
 
     /// Convert world position to local cell index within a chunk
     pub fn world_to_local_index(&self, x: f32, y: f32, z: f32) -> u32 {
-        let chunk_x = (x / self.chunk_size).floor() * self.chunk_size;
-        let chunk_y = (y / self.chunk_size).floor() * self.chunk_size;
-        let chunk_z = (z / self.chunk_size).floor() * self.chunk_size;
-
-        let local_x = ((x - chunk_x) / self.voxel_size).floor() as u32;
-        let local_y = ((y - chunk_y) / self.voxel_size).floor() as u32;
-        let local_z = ((z - chunk_z) / self.voxel_size).floor() as u32;
-
-        let lx = local_x.min(self.resolution - 1);
-        let ly = local_y.min(self.resolution - 1);
-        let lz = local_z.min(self.resolution - 1);
-
-        lx + ly * self.resolution + lz * self.resolution * self.resolution
+        self.grid.world_to_local_index(x, y, z)
     }
 
     /// Set a modification at a world position
     pub fn set_at_world(&mut self, x: f32, y: f32, z: f32, modification: VoxelMod) {
-        let chunk = self.world_to_chunk(x, y, z);
-        let local_index = self.world_to_local_index(x, y, z);
+        let chunk = self.grid.world_to_chunk(x, y, z);
+        let local_index = self.grid.world_to_local_index(x, y, z);
 
         self.chunks
             .entry(chunk)
-            .or_insert_with(ChunkMods::new)
+            .or_default()
             .set(local_index, modification);
     }
 
     /// Get modification at a world position
     pub fn get_at_world(&self, x: f32, y: f32, z: f32) -> Option<&VoxelMod> {
-        let chunk = self.world_to_chunk(x, y, z);
-        let local_index = self.world_to_local_index(x, y, z);
+        let chunk = self.grid.world_to_chunk(x, y, z);
+        let local_index = self.grid.world_to_local_index(x, y, z);
 
         self.chunks
             .get(&chunk)
@@ -151,8 +91,8 @@ impl ModificationLayer {
 
     /// Remove modification at a world position
     pub fn remove_at_world(&mut self, x: f32, y: f32, z: f32) -> Option<VoxelMod> {
-        let chunk = self.world_to_chunk(x, y, z);
-        let local_index = self.world_to_local_index(x, y, z);
+        let chunk = self.grid.world_to_chunk(x, y, z);
+        let local_index = self.grid.world_to_local_index(x, y, z);
 
         if let Some(chunk_mods) = self.chunks.get_mut(&chunk) {
             let result = chunk_mods.remove(local_index);
@@ -182,17 +122,15 @@ impl ModificationLayer {
     ///
     /// Corners without modifications contribute (0, 0) — i.e. "use noise".
     pub fn sample_absolute(&self, x: f32, y: f32, z: f32) -> (f32, f32) {
-        // Find the voxel cell that contains this point
-        let vx = (x / self.voxel_size).floor();
-        let vy = (y / self.voxel_size).floor();
-        let vz = (z / self.voxel_size).floor();
+        let voxel_size = self.grid.voxel_size;
+        let vx = (x / voxel_size).floor();
+        let vy = (y / voxel_size).floor();
+        let vz = (z / voxel_size).floor();
 
-        // Fractional position within the cell (0-1)
-        let fx = x / self.voxel_size - vx;
-        let fy = y / self.voxel_size - vy;
-        let fz = z / self.voxel_size - vz;
+        let fx = x / voxel_size - vx;
+        let fy = y / voxel_size - vy;
+        let fz = z / voxel_size - vz;
 
-        // Sample 8 corners for trilinear interpolation
         let mut desired_total = 0.0f32;
         let mut blend_total = 0.0f32;
 
@@ -203,12 +141,11 @@ impl ModificationLayer {
                     let wy = vy + dy as f32;
                     let wz = vz + dz as f32;
 
-                    let world_x = wx * self.voxel_size;
-                    let world_y = wy * self.voxel_size;
-                    let world_z = wz * self.voxel_size;
+                    let world_x = wx * voxel_size;
+                    let world_y = wy * voxel_size;
+                    let world_z = wz * voxel_size;
 
                     if let Some(modification) = self.get_at_world(world_x, world_y, world_z) {
-                        // Trilinear weight
                         let weight_x = if dx == 0 { 1.0 - fx } else { fx };
                         let weight_y = if dy == 0 { 1.0 - fy } else { fy };
                         let weight_z = if dz == 0 { 1.0 - fz } else { fz };
@@ -225,7 +162,7 @@ impl ModificationLayer {
     }
 
     pub fn chunk_size(&self) -> f32 {
-        self.chunk_size
+        self.grid.chunk_size
     }
 }
 
@@ -338,5 +275,4 @@ mod tests {
             "Desired should be ~{desired}, got {d}"
         );
     }
-
 }

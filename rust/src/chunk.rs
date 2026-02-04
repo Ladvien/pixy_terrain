@@ -1,3 +1,6 @@
+/// Default vertex color: full weight on texture 0.
+pub const DEFAULT_TEXTURE_COLOR: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
 /// Integer coordinate identifying a chunk in the world grid
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChunkCoord {

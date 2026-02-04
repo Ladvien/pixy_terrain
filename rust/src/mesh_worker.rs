@@ -1,9 +1,8 @@
-//! Parallel mesh generation using bevy_tasks.
+//! Parallel mesh generation worker pool.
 //!
 //! Worker threads perform pure Rust computation.
 //! Results are sent via crossbeam channels to the main thread.
 
-use bevy_tasks::{TaskPool, TaskPoolBuilder};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use std::sync::Arc;
 

@@ -3,7 +3,7 @@ use transvoxel::generic_mesh::GenericMeshBuilder;
 use transvoxel::transition_sides::{TransitionSide, TransitionSides};
 use transvoxel::voxel_source::{Block, BlockDims};
 
-use crate::chunk::{ChunkCoord, MeshResult};
+use crate::chunk::{ChunkCoord, MeshResult, DEFAULT_TEXTURE_COLOR};
 use crate::noise_field::NoiseField;
 use crate::terrain_modifications::ModificationLayer;
 use crate::texture_layer::TextureLayer;
@@ -87,7 +87,7 @@ pub fn extract_chunk_mesh(
             .collect()
     } else {
         // Default: full weight on texture 0
-        vec![[1.0, 0.0, 0.0, 0.0]; vertices.len()]
+        vec![DEFAULT_TEXTURE_COLOR; vertices.len()]
     };
 
     let indices: Vec<i32> = mesh.triangle_indices.iter().map(|&i| i as i32).collect();
