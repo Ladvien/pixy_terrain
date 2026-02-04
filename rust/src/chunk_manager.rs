@@ -272,7 +272,6 @@ impl ChunkManager {
         }
         count
     }
-
 }
 
 #[cfg(test)]
@@ -399,10 +398,9 @@ mod tests {
         let _ = manager.update_with_layers([0.0, 0.0, 0.0], &noise, None, None);
 
         // Manually insert and mark origin chunk as active (bypass channel limits)
-        manager.chunks.insert(
-            ChunkCoord::new(0, 0, 0),
-            Chunk::new(0),
-        );
+        manager
+            .chunks
+            .insert(ChunkCoord::new(0, 0, 0), Chunk::new(0));
         manager.mark_chunk_active(&ChunkCoord::new(0, 0, 0), 123);
 
         // Move camera very far away

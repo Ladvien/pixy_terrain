@@ -59,7 +59,6 @@ impl MeshResult {
     pub fn is_empty(&self) -> bool {
         self.vertices.is_empty()
     }
-
 }
 
 /// Lifecycle state of chunk

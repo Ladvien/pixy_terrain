@@ -40,10 +40,7 @@ pub struct MeshPostProcessor {
 }
 
 impl MeshPostProcessor {
-    pub fn new(
-        normal_angle_threshold: f32,
-        target_triangle_count: Option<usize>,
-    ) -> Self {
+    pub fn new(normal_angle_threshold: f32, target_triangle_count: Option<usize>) -> Self {
         Self {
             normal_angle_threshold,
             target_triangle_count,
@@ -317,7 +314,7 @@ impl MeshPostProcessor {
                 std::mem::size_of::<[f32; 3]>(),
                 target_indices,
                 DECIMATION_TARGET_ERROR,
-                0,    // options
+                0, // options
                 std::ptr::null_mut(),
             )
         };
@@ -460,7 +457,7 @@ mod tests {
         let mesh = processor.merge_chunks(&[c0, c1]);
         assert_eq!(mesh.vertex_count(), 8); // 4 + 4
         assert_eq!(mesh.triangle_count(), 4); // 2 + 2
-        // Second chunk's indices should be offset by 4
+                                              // Second chunk's indices should be offset by 4
         assert_eq!(mesh.indices[6], 4); // first index of second chunk
         assert_eq!(mesh.indices[7], 5);
         assert_eq!(mesh.indices[8], 6);
@@ -501,18 +498,18 @@ mod tests {
         };
         processor.weld_vertices(&mut mesh);
         // Should have welded vertex 3 into vertex 1
-        assert!(mesh.vertices.len() <= 5, "Expected welding to reduce vertex count, got {}", mesh.vertices.len());
+        assert!(
+            mesh.vertices.len() <= 5,
+            "Expected welding to reduce vertex count, got {}",
+            mesh.vertices.len()
+        );
     }
 
     #[test]
     fn test_weld_vertices_distinct() {
         let processor = make_processor();
         let mut mesh = CombinedMesh {
-            vertices: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.5, 1.0, 0.0],
-            ],
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
         };
@@ -547,11 +544,7 @@ mod tests {
         processor.recompute_normals(&mut mesh);
         // All normals should point up (Y-axis) for a flat XZ quad
         for n in &mesh.normals {
-            assert!(
-                n[1].abs() > 0.9,
-                "Expected Y-dominant normal, got {:?}",
-                n
-            );
+            assert!(n[1].abs() > 0.9, "Expected Y-dominant normal, got {:?}", n);
         }
     }
 
@@ -569,10 +562,10 @@ mod tests {
         let processor = make_processor();
         let mut mesh = CombinedMesh {
             vertices: vec![
-                [0.0, 0.0, 0.0], // used
+                [0.0, 0.0, 0.0],    // used
                 [99.0, 99.0, 99.0], // orphan
-                [1.0, 0.0, 0.0], // used
-                [0.5, 1.0, 0.0], // used
+                [1.0, 0.0, 0.0],    // used
+                [0.5, 1.0, 0.0],    // used
             ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             indices: vec![0, 2, 3], // references 0, 2, 3 — vertex 1 is orphaned
@@ -604,12 +597,7 @@ mod tests {
                 [2.0, 0.0, 1.0],
             ],
             normals: vec![[0.0, 1.0, 0.0]; 6],
-            indices: vec![
-                0, 1, 4,
-                0, 4, 3,
-                1, 2, 5,
-                1, 5, 4,
-            ],
+            indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4],
         };
         let original_triangles = mesh.triangle_count();
         processor.decimate(&mut mesh);
@@ -647,7 +635,10 @@ mod tests {
         // Normals should be valid (non-zero length)
         for n in &mesh.normals {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            assert!(len > 0.9, "Normal should be approximately unit length, got {len}");
+            assert!(
+                len > 0.9,
+                "Normal should be approximately unit length, got {len}"
+            );
         }
     }
 }

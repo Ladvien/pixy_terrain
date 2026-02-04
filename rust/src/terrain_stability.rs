@@ -264,7 +264,9 @@ fn build_scan_region(
     let footprint_extent = (footprint.max_x - footprint.min_x)
         .max(footprint.max_z - footprint.min_z)
         .max(1);
-    let margin = (footprint_extent * SCAN_MARGIN_MULTIPLIER).max(MIN_SCAN_MARGIN).min(MAX_SCAN_MARGIN);
+    let margin = (footprint_extent * SCAN_MARGIN_MULTIPLIER)
+        .max(MIN_SCAN_MARGIN)
+        .min(MAX_SCAN_MARGIN);
 
     let min_x = (footprint.min_x - margin).max(0);
     let max_x = (footprint.max_x + margin).min(terrain_cells_x - 1);

@@ -155,7 +155,8 @@ impl IEditorPlugin for PixyTerrainPlugin {
         let mut brush_toggle_button = Button::new_alloc();
         brush_toggle_button.set_text("Enable Brush (B)");
         brush_toggle_button.set_toggle_mode(true);
-        brush_toggle_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        brush_toggle_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         toolbar.add_child(&brush_toggle_button);
 
         // Mode buttons — stacked vertically
@@ -163,37 +164,43 @@ impl IEditorPlugin for PixyTerrainPlugin {
         elevation_mode_button.set_text("Elevation (E)");
         elevation_mode_button.set_toggle_mode(true);
         elevation_mode_button.set_pressed(true);
-        elevation_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        elevation_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         elevation_mode_button.set_tooltip_text("Elevation Mode - Sculpt terrain height");
 
         let mut texture_mode_button = Button::new_alloc();
         texture_mode_button.set_text("Texture");
         texture_mode_button.set_toggle_mode(true);
-        texture_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        texture_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         texture_mode_button.set_tooltip_text("Texture Mode - Paint terrain textures");
 
         let mut flatten_mode_button = Button::new_alloc();
         flatten_mode_button.set_text("Flatten (F)");
         flatten_mode_button.set_toggle_mode(true);
-        flatten_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        flatten_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         flatten_mode_button.set_tooltip_text("Flatten Mode - Level terrain to click height");
 
         let mut plateau_mode_button = Button::new_alloc();
         plateau_mode_button.set_text("Plateau (P)");
         plateau_mode_button.set_toggle_mode(true);
-        plateau_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        plateau_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         plateau_mode_button.set_tooltip_text("Plateau Mode - Snap terrain to step heights");
 
         let mut smooth_mode_button = Button::new_alloc();
         smooth_mode_button.set_text("Smooth (S)");
         smooth_mode_button.set_toggle_mode(true);
-        smooth_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        smooth_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         smooth_mode_button.set_tooltip_text("Smooth Mode - Laplacian smoothing on terrain");
 
         let mut slope_mode_button = Button::new_alloc();
         slope_mode_button.set_text("Slope (R)");
         slope_mode_button.set_toggle_mode(true);
-        slope_mode_button.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        slope_mode_button
+            .set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
         slope_mode_button.set_tooltip_text("Slope Mode - Create sloped ramps/paths");
 
         toolbar.add_child(&elevation_mode_button);
@@ -275,7 +282,8 @@ impl IEditorPlugin for PixyTerrainPlugin {
             if i == 0 {
                 tex_button.set_pressed(true);
             }
-            tex_button.set_custom_minimum_size(Vector2::new(TEXTURE_BUTTON_SIZE, TEXTURE_BUTTON_SIZE));
+            tex_button
+                .set_custom_minimum_size(Vector2::new(TEXTURE_BUTTON_SIZE, TEXTURE_BUTTON_SIZE));
             tex_button.set_tooltip_text(&format!("Select texture {} ({})", i + 1, i + 1));
             tex_container.add_child(&tex_button);
             texture_buttons[i] = Some(tex_button);
@@ -1249,8 +1257,7 @@ impl PixyTerrainPlugin {
             return None;
         };
 
-        let mut query =
-            PhysicsRayQueryParameters3D::create(vertical_origin, vertical_end).unwrap();
+        let mut query = PhysicsRayQueryParameters3D::create(vertical_origin, vertical_end).unwrap();
         query.set_collide_with_areas(false);
         query.set_collide_with_bodies(true);
 

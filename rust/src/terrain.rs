@@ -896,8 +896,7 @@ impl PixyTerrain {
             None
         };
 
-        let processor =
-            MeshPostProcessor::new(self.normal_angle_threshold, target);
+        let processor = MeshPostProcessor::new(self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -931,8 +930,7 @@ impl PixyTerrain {
             return;
         }
 
-        let processor =
-            MeshPostProcessor::new(self.normal_angle_threshold, None);
+        let processor = MeshPostProcessor::new(self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -974,8 +972,7 @@ impl PixyTerrain {
             None
         };
 
-        let processor =
-            MeshPostProcessor::new(self.normal_angle_threshold, target);
+        let processor = MeshPostProcessor::new(self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
         let mesh = self.combined_mesh_to_godot(&combined);
@@ -1008,8 +1005,7 @@ impl PixyTerrain {
             return;
         }
 
-        let processor =
-            MeshPostProcessor::new(self.normal_angle_threshold, None);
+        let processor = MeshPostProcessor::new(self.normal_angle_threshold, None);
 
         let mut combined = processor.merge_chunks(&chunks);
         godot_print!(
@@ -1058,8 +1054,7 @@ impl PixyTerrain {
             None
         };
 
-        let processor =
-            MeshPostProcessor::new(self.normal_angle_threshold, target);
+        let processor = MeshPostProcessor::new(self.normal_angle_threshold, target);
 
         let combined = processor.process(&chunks);
 

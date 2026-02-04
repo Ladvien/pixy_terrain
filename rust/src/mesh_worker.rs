@@ -50,7 +50,8 @@ impl MeshWorkerPool {
     pub fn new(num_threads: usize, channel_capacity: usize) -> Self {
         let detected_cpus = num_cpus::get();
         let threads = if num_threads == 0 {
-            ((detected_cpus * THREAD_CPU_NUMERATOR) / THREAD_CPU_DENOMINATOR).max(MIN_WORKER_THREADS)
+            ((detected_cpus * THREAD_CPU_NUMERATOR) / THREAD_CPU_DENOMINATOR)
+                .max(MIN_WORKER_THREADS)
         } else {
             num_threads
         };

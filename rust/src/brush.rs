@@ -326,7 +326,11 @@ impl Brush {
                 self.phase = BrushPhase::PaintingArea;
                 self.add_cells_at(world_x, world_z);
             }
-            BrushMode::Texture | BrushMode::Flatten | BrushMode::Plateau | BrushMode::Smooth | BrushMode::Slope => {
+            BrushMode::Texture
+            | BrushMode::Flatten
+            | BrushMode::Plateau
+            | BrushMode::Smooth
+            | BrushMode::Slope => {
                 self.phase = BrushPhase::Painting;
                 if self.mode == BrushMode::Slope {
                     self.slope_end_y = world_y;
@@ -415,7 +419,9 @@ impl Brush {
         if self.phase == BrushPhase::AdjustingCurvature {
             let delta_pixels = screen_y - self.curvature_adjust_start_y;
             // Down = positive curvature (dome), up = negative (bowl)
-            self.curvature = (delta_pixels * self.height_sensitivity * CURVATURE_SENSITIVITY_FACTOR).clamp(-1.0, 1.0);
+            self.curvature =
+                (delta_pixels * self.height_sensitivity * CURVATURE_SENSITIVITY_FACTOR)
+                    .clamp(-1.0, 1.0);
         }
     }
 
@@ -752,7 +758,14 @@ impl Brush {
                 let desired_sdf = y - target_y;
                 let noise_val = noise.sample(wx, y, wz);
                 self.composite_and_write(
-                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                    wx,
+                    y,
+                    wz,
+                    desired_sdf,
+                    self.strength,
+                    noise_val,
+                    existing_mods,
+                    new_mods,
                 );
                 y += self.voxel_size;
             }
@@ -801,7 +814,14 @@ impl Brush {
                 let desired_sdf = y - target_y;
                 let noise_val = noise.sample(wx, y, wz);
                 self.composite_and_write(
-                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                    wx,
+                    y,
+                    wz,
+                    desired_sdf,
+                    self.strength,
+                    noise_val,
+                    existing_mods,
+                    new_mods,
                 );
                 y += self.voxel_size;
             }
@@ -1034,7 +1054,14 @@ impl Brush {
                 let desired_sdf = y - target_y;
                 let noise_val = noise.sample(wx, y, wz);
                 self.composite_and_write(
-                    wx, y, wz, desired_sdf, self.strength, noise_val, existing_mods, new_mods,
+                    wx,
+                    y,
+                    wz,
+                    desired_sdf,
+                    self.strength,
+                    noise_val,
+                    existing_mods,
+                    new_mods,
                 );
                 y += self.voxel_size;
             }
@@ -1108,8 +1135,7 @@ impl Brush {
 
             let current_sdf =
                 noise_val * (1.0 - existing_blend) + existing_desired * existing_blend;
-            let new_sdf =
-                noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
+            let new_sdf = noise_val * (1.0 - combined_blend) + combined_desired * combined_blend;
             let sdf_change = new_sdf - current_sdf;
 
             let (final_desired, final_blend) = match self.flatten_direction {

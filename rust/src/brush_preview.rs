@@ -434,7 +434,11 @@ impl BrushPreview {
         }
         for (i, n) in normal_accum.iter().enumerate() {
             let len = n.length();
-            normals[i] = if len > NORMAL_EPSILON { *n / len } else { Vector3::UP };
+            normals[i] = if len > NORMAL_EPSILON {
+                *n / len
+            } else {
+                Vector3::UP
+            };
         }
 
         // Build mesh
