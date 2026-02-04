@@ -3,9 +3,11 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Critical Info
+- This project is [Yugen's Terrain Toolkit](https://github.com/ToumaKamijou/Yugens-Terrain-Authoring-Toolkit) rewritten in Rust and GDExt
 - Use Godot 4.6
 - Always consult documentation, download it if needed
 - Prefer Godot `export` variables over magic numbers or constants
+- Prefer object-oriented patterns and DRY code
 
 ## Docs
 - Godot Rust Book - https://godot-rust.github.io/book/
@@ -18,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Pixy Terrain is a Godot 4 terrain editor tool written in Rust using GDExtension (godot-rust/gdext). It creates terrain for 3D pixel art games using solid geometry and transvoxel algorithms.
+Pixy Terrain is a Godot 4 terrain editor tool written in Rust using GDExtension (godot-rust/gdext). It creates terrain for 3D pixel art games by replicating Yugen's Terrain Toolkit.
 
 ## Build Commands
 
@@ -43,6 +45,8 @@ cd rust && cargo clippy
 ```
 
 ## Project Structure
+
+Ensure code is organized in submodules to keep it DRY and tidy.
 
 ```
 pixy_terrain/
@@ -77,9 +81,8 @@ pixy_terrain/
 4. Godot 4.2+ supports hot reloading - changes rebuild without restarting Godot
 
 ## Key Dependencies
-
 - `godot` crate from godot-rust/gdext (master branch) - Rust bindings for Godot 4
-- Transvoxel algorithm will be used for mesh generation from voxel data
+
 
 ## GDExtension Notes
 

@@ -36,12 +36,6 @@ fov = 60.0
 script = ExtResource("1_orbit")
 
 [node name="PixyTerrain" type="PixyTerrain" parent="." unique_id=1116637688]
-noise_amplitude = 2.0
-brush_enabled = true
-brush_mode = 4
-brush_size = 25.0
-brush_step_size = 6.0
-brush_feather = 1.0
 terrain_albedo = ExtResource("2_qjeyg")
 terrain_normal = ExtResource("3_3qnke")
 terrain_roughness = ExtResource("4_wtsjf")

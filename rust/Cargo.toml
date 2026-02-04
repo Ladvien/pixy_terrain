@@ -10,13 +10,6 @@ crate-type = ["cdylib"]
 [dependencies]
 godot = { git = "https://github.com/godot-rust/gdext", branch = "master" }
 
-transvoxel = "1.1.0"
-noise = "0.9"
-rayon = "1.10"
-crossbeam = "0.8"
-num_cpus = "1.17"
-meshopt = "0.3"
-
 [profile.dev]
 opt-level = 1
 
