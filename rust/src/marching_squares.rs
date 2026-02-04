@@ -10,6 +10,7 @@ pub enum MergeMode {
     Spherical,
 }
 
+#[allow(dead_code)]
 impl MergeMode {
     pub fn threshold(self) -> f32 {
         match self {
@@ -124,6 +125,9 @@ pub struct CellContext {
     // Blend thresholds
     pub lower_thresh: f32,
     pub upper_thresh: f32,
+
+    // Chunk world position for wall UV2 offset
+    pub chunk_position: Vector3,
 }
 
 impl CellContext {
@@ -235,15 +239,25 @@ pub fn add_point(
         use_wall_colors
     };
 
+    let cc = ctx.cell_coords;
+    let dim_x = ctx.dimensions.x;
+    let blend_zone = ctx.upper_thresh - ctx.lower_thresh;
+
+    // For new chunks, write back default color to source maps before creating references
+    if ctx.is_new_chunk {
+        let idx = (cc.y * dim_x + cc.x) as usize;
+        let new_color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+        ctx.color_map_0[idx] = new_color;
+        ctx.color_map_1[idx] = new_color;
+        ctx.wall_color_map_0[idx] = new_color;
+        ctx.wall_color_map_1[idx] = new_color;
+    }
+
     let (source_map_0, source_map_1) = if use_wall_colors {
         (&ctx.wall_color_map_0, &ctx.wall_color_map_1)
     } else {
         (&ctx.color_map_0, &ctx.color_map_1)
     };
-
-    let cc = ctx.cell_coords;
-    let dim_x = ctx.dimensions.x;
-    let blend_zone = ctx.upper_thresh - ctx.lower_thresh;
 
     // Compute color_0
     let color_0 = if ctx.is_new_chunk {
@@ -315,6 +329,7 @@ pub fn add_point(
 
     // Compute color_1
     let color_1 = if ctx.is_new_chunk {
+        // Source maps already updated in color_0 block above
         Color::from_rgba(1.0, 0.0, 0.0, 0.0)
     } else if diag_midpoint {
         if ctx.blend_mode == 1 {
@@ -405,12 +420,12 @@ pub fn add_point(
         (cc.y as f32 + z) * ctx.cell_size.y,
     );
 
-    // UV2: floor uses world XZ / cell_size, walls use world XY+ZY
+    // UV2: floor uses world XZ / cell_size, walls use global XY+ZY with chunk offset
     let uv2 = if ctx.floor_mode {
         Vector2::new(vert.x, vert.z) / ctx.cell_size
     } else {
-        // For walls, we skip the global_position offset for now (chunk position added at commit time)
-        Vector2::new(vert.x, vert.y) + Vector2::new(vert.z, vert.y)
+        let global_pos = vert + ctx.chunk_position;
+        Vector2::new(global_pos.x, global_pos.y) + Vector2::new(global_pos.z, global_pos.y)
     };
 
     // Store in geometry cache
@@ -777,9 +792,12 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             && ctx.is_higher(by, cy)
         {
             add_inner_corner(ctx, geo, true, false, true, false, false);
-            add_diagonal_floor(ctx, geo, by, cy, true, true);
+            add_diagonal_floor(ctx, geo, cy, cy, true, true);
             ctx.rotate_cell(2);
             add_inner_corner(ctx, geo, true, false, true, false, false);
+            // Higher corner B
+            ctx.rotate_cell(-1);
+            add_outer_corner(ctx, geo, false, true, false, -1.0);
             case_found = true;
         }
         // Case 6: A is the lowest corner
@@ -787,28 +805,108 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_inner_corner(ctx, geo, true, true, false, false, false);
             case_found = true;
         }
-        // Case 7: A lowest, BD connected, CD not
+        // Case 7: A lowest, BD connected, C higher than D
+        // (GDScript Case 8: inner corner + custom floor/wall/upper corner)
         else if ctx.is_lower(ay, by)
             && ctx.is_lower(ay, cy)
             && ctx.bd()
             && !ctx.cd()
             && ctx.is_higher(cy, dy)
         {
-            add_inner_corner(ctx, geo, true, false, false, false, true);
-            ctx.rotate_cell(-1);
-            add_edge(ctx, geo, true, false, 0.0, 1.0);
+            add_inner_corner(ctx, geo, true, false, true, false, false);
+            let by = ctx.by();
+            let dy = ctx.dy();
+            let cy = ctx.cy();
+            let edge_mid = (by + dy) / 2.0;
+
+            // D corner floor
+            ctx.start_floor();
+            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, dy, 1.0, 1.0, 0.0, false);
+            add_point(ctx, geo, 1.0, edge_mid, 0.5, 0.0, 0.0, false);
+
+            // B corner floor
+            add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, edge_mid, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, by, 0.0, 0.0, 1.0, false);
+
+            // Center floors
+            add_point(ctx, geo, 0.5, by, 0.0, 0.0, 1.0, false);
+            add_point(ctx, geo, 1.0, edge_mid, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, by, 0.5, 1.0, 1.0, false);
+
+            add_point(ctx, geo, 0.5, dy, 1.0, 1.0, 0.0, false);
+            add_point(ctx, geo, 0.0, by, 0.5, 1.0, 1.0, false);
+            add_point(ctx, geo, 1.0, edge_mid, 0.5, 0.0, 0.0, false);
+
+            // Walls to upper corner
+            ctx.start_wall();
+            add_point(ctx, geo, 0.0, by, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, dy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 0.5, cy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, dy, 1.0, 0.0, 0.0, false);
+
+            // C upper floor
+            ctx.start_floor();
+            add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 0.5, cy, 1.0, 0.0, 1.0, false);
+
             case_found = true;
         }
-        // Case 8: A lowest, CD connected, BD not
+        // Case 8: A lowest, CD connected, B higher than D
+        // (GDScript Case 9: inner corner + custom floor/wall/upper corner)
         else if ctx.is_lower(ay, by)
             && ctx.is_lower(ay, cy)
             && !ctx.bd()
             && ctx.cd()
             && ctx.is_higher(by, dy)
         {
-            add_inner_corner(ctx, geo, true, false, false, true, false);
-            ctx.rotate_cell(1);
-            add_edge(ctx, geo, true, false, 0.0, 1.0);
+            add_inner_corner(ctx, geo, true, false, true, false, false);
+            let by = ctx.by();
+            let dy = ctx.dy();
+            let cy = ctx.cy();
+            let edge_mid = (dy + cy) / 2.0;
+
+            // D corner floor
+            ctx.start_floor();
+            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, edge_mid, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
+
+            // C corner floor
+            add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, edge_mid, 1.0, 0.0, 0.0, false);
+
+            // Center floors
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, edge_mid, 1.0, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, edge_mid, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
+
+            // Walls to upper corner
+            ctx.start_wall();
+            add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 1.0, by, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
+
+            // B upper floor
+            ctx.start_floor();
+            add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, by, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
+
             case_found = true;
         }
         // Case 9: A lowest, neither BD nor CD connected, B higher
@@ -848,7 +946,52 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_edge(ctx, geo, true, true, 0.0, 1.0);
             case_found = true;
         }
-        // Case 12: A only higher than C
+        // Case 12 (GDScript): Clockwise upwards spiral A<B<D<C
+        // A is lowest, then B, then D, C is highest
+        else if ctx.is_lower(ay, by)
+            && ctx.is_lower(by, dy)
+            && ctx.is_lower(dy, cy)
+            && ctx.is_higher(cy, ay)
+        {
+            add_inner_corner(ctx, geo, true, false, true, false, true);
+            ctx.rotate_cell(2);
+            add_edge(ctx, geo, false, true, 0.0, 0.5);
+            ctx.rotate_cell(1);
+            add_outer_corner(ctx, geo, false, true, true, cy);
+            case_found = true;
+        }
+        // Case 13 (GDScript): Clockwise upwards spiral A<C<D<B
+        // A is lowest, then C, then D, B is highest
+        else if ctx.is_lower(ay, cy)
+            && ctx.is_lower(cy, dy)
+            && ctx.is_lower(dy, by)
+            && ctx.is_higher(by, ay)
+        {
+            add_inner_corner(ctx, geo, true, false, true, true, false);
+            ctx.rotate_cell(1);
+            add_edge(ctx, geo, false, true, 0.5, 1.0);
+            add_outer_corner(ctx, geo, false, true, true, by);
+            case_found = true;
+        }
+        // Case 14 (GDScript): A<B<C<D staircase pattern
+        // Outer corner atop edge atop inner corner
+        else if ctx.is_lower(ay, by) && ctx.is_lower(by, cy) && ctx.is_lower(cy, dy) {
+            add_inner_corner(ctx, geo, true, false, true, false, true);
+            ctx.rotate_cell(2);
+            add_edge(ctx, geo, false, true, 0.5, 1.0);
+            add_outer_corner(ctx, geo, false, true, true, by);
+            case_found = true;
+        }
+        // Case 15 (GDScript): A<C<B<D staircase variant
+        else if ctx.is_lower(ay, cy) && ctx.is_lower(cy, by) && ctx.is_lower(by, dy) {
+            add_inner_corner(ctx, geo, true, false, true, true, false);
+            ctx.rotate_cell(1);
+            add_edge(ctx, geo, false, true, 0.0, 0.5);
+            ctx.rotate_cell(1);
+            add_outer_corner(ctx, geo, false, true, true, cy);
+            case_found = true;
+        }
+        // Case 12 (original): A only higher than C
         else if ctx.is_higher(ay, cy)
             && ctx.is_merged(ay, by)
             && ctx.is_merged(cy, dy)
@@ -916,6 +1059,82 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             ctx.rotate_cell(1);
             add_edge(ctx, geo, true, false, 0.0, 1.0);
             add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+            case_found = true;
+        }
+        // Case 18: All edges connected except AC, A higher than C
+        // Merged-edge case with averaged BD edge height
+        else if ctx.ab() && ctx.bd() && ctx.cd() && !ctx.ac() && ctx.is_higher(ay, cy) {
+            let ay = ctx.ay();
+            let by = ctx.by();
+            let cy = ctx.cy();
+            let dy = ctx.dy();
+            let edge_by = (by + dy) / 2.0;
+            let edge_dy = (by + dy) / 2.0;
+
+            // Upper floor
+            ctx.start_floor();
+            add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, edge_by, 0.5, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 1.0, edge_by, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
+
+            // Wall
+            ctx.start_wall();
+            add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 1.0, edge_dy, 0.5, 1.0, 0.0, false);
+
+            // Lower floor
+            ctx.start_floor();
+            add_point(ctx, geo, 0.0, cy, 0.5, 1.0, 0.0, false);
+            add_point(ctx, geo, 1.0, edge_dy, 0.5, 1.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, edge_dy, 0.5, 0.0, 0.0, false);
+
+            case_found = true;
+        }
+        // Case 19: All edges connected except BD, B higher than D
+        // Merged-edge case with averaged AC edge height
+        else if ctx.ab() && ctx.ac() && ctx.cd() && !ctx.bd() && ctx.is_higher(by, dy) {
+            let ay = ctx.ay();
+            let by = ctx.by();
+            let cy = ctx.cy();
+            let dy = ctx.dy();
+            let edge_ay = (ay + cy) / 2.0;
+            let edge_cy = (ay + cy) / 2.0;
+
+            // Upper floor
+            ctx.start_floor();
+            add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, edge_ay, 0.5, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 1.0, by, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 0.0, edge_ay, 0.5, 0.0, 1.0, false);
+            add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+
+            // Wall
+            ctx.start_wall();
+            add_point(ctx, geo, 1.0, by, 0.5, 1.0, 1.0, false);
+            add_point(ctx, geo, 1.0, dy, 0.5, 1.0, 0.0, false);
+            add_point(ctx, geo, 0.0, edge_ay, 0.5, 0.0, 0.0, false);
+
+            // Lower floor
+            ctx.start_floor();
+            add_point(ctx, geo, 0.0, edge_cy, 0.5, 1.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 0.5, 1.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+
+            add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+            add_point(ctx, geo, 0.0, edge_cy, 0.5, 0.0, 0.0, false);
+            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+
             case_found = true;
         } else {
             continue;
@@ -1226,6 +1445,7 @@ mod tests {
             floor_mode: true,
             lower_thresh: 0.3,
             upper_thresh: 0.7,
+            chunk_position: Vector3::ZERO,
         }
     }
 

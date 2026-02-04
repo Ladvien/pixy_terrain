@@ -2,9 +2,12 @@ use std::collections::HashMap;
 
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::surface_tool::CustomFormat;
-use godot::classes::{ArrayMesh, Engine, IMeshInstance3D, MeshInstance3D, Noise, SurfaceTool};
+use godot::classes::{
+    ArrayMesh, Engine, IMeshInstance3D, MeshInstance3D, Noise, StaticBody3D, SurfaceTool,
+};
 use godot::prelude::*;
 
+use crate::grass_planter::PixyGrassPlanter;
 use crate::marching_squares::{self, CellContext, CellGeometry, MergeMode};
 use crate::terrain::PixyTerrain;
 
@@ -15,7 +18,7 @@ use crate::terrain::PixyTerrain;
 pub struct PixyTerrainChunk {
     base: Base<MeshInstance3D>,
 
-    /// Reference to the parent terrain system.
+    /// Chunk coordinates in the terrain grid.
     #[export]
     pub chunk_coords: Vector2i,
 
@@ -25,7 +28,40 @@ pub struct PixyTerrainChunk {
     pub merge_mode: i32,
 
     // ═══════════════════════════════════════════
-    // Terrain Data Maps
+    // Persisted Terrain Data (Godot PackedArrays for scene serialization)
+    // ═══════════════════════════════════════════
+    /// Flat height data for serialization: row-major, dim_z rows of dim_x values.
+    #[export]
+    #[init(val = PackedFloat32Array::new())]
+    pub saved_height_map: PackedFloat32Array,
+
+    /// Persisted ground color channel 0.
+    #[export]
+    #[init(val = PackedColorArray::new())]
+    pub saved_color_map_0: PackedColorArray,
+
+    /// Persisted ground color channel 1.
+    #[export]
+    #[init(val = PackedColorArray::new())]
+    pub saved_color_map_1: PackedColorArray,
+
+    /// Persisted wall color channel 0.
+    #[export]
+    #[init(val = PackedColorArray::new())]
+    pub saved_wall_color_map_0: PackedColorArray,
+
+    /// Persisted wall color channel 1.
+    #[export]
+    #[init(val = PackedColorArray::new())]
+    pub saved_wall_color_map_1: PackedColorArray,
+
+    /// Persisted grass mask map.
+    #[export]
+    #[init(val = PackedColorArray::new())]
+    pub saved_grass_mask_map: PackedColorArray,
+
+    // ═══════════════════════════════════════════
+    // Runtime Terrain Data Maps (working copies)
     // ═══════════════════════════════════════════
     /// 2D height array: height_map[z][x] = f32
     pub height_map: Vec<Vec<f32>>,
@@ -58,8 +94,16 @@ pub struct PixyTerrainChunk {
     /// Whether this chunk was just created (affects initial color assignment).
     pub is_new_chunk: bool,
 
+    /// Skip saving data to packed arrays on exit_tree (e.g., during undo operations).
+    #[export]
+    #[init(val = false)]
+    pub skip_save_on_exit: bool,
+
     /// Reference to parent terrain (set by terrain when adding chunk).
     terrain_ref: Option<Gd<PixyTerrain>>,
+
+    /// Grass planter child node.
+    grass_planter: Option<Gd<PixyGrassPlanter>>,
 }
 
 impl PixyTerrainChunk {
@@ -68,6 +112,12 @@ impl PixyTerrainChunk {
             base,
             chunk_coords: Vector2i::ZERO,
             merge_mode: 1,
+            saved_height_map: PackedFloat32Array::new(),
+            saved_color_map_0: PackedColorArray::new(),
+            saved_color_map_1: PackedColorArray::new(),
+            saved_wall_color_map_0: PackedColorArray::new(),
+            saved_wall_color_map_1: PackedColorArray::new(),
+            saved_grass_mask_map: PackedColorArray::new(),
             height_map: Vec::new(),
             color_map_0: Vec::new(),
             color_map_1: Vec::new(),
@@ -78,7 +128,9 @@ impl PixyTerrainChunk {
             cell_geometry: HashMap::new(),
             higher_poly_floors: true,
             is_new_chunk: false,
+            skip_save_on_exit: false,
             terrain_ref: None,
+            grass_planter: None,
         }
     }
 }
@@ -86,12 +138,9 @@ impl PixyTerrainChunk {
 #[godot_api]
 impl IMeshInstance3D for PixyTerrainChunk {
     fn exit_tree(&mut self) {
-        // In Yugen, this saves the mesh and cleans up the chunk from the terrain's map.
-        // For now, just clean up the terrain reference.
-        if let Some(terrain) = self.terrain_ref.as_ref() {
-            if terrain.is_instance_valid() {
-                // The terrain's remove_chunk handles map cleanup
-            }
+        // Sync runtime data to packed arrays before leaving tree (scene save)
+        if !self.skip_save_on_exit {
+            self.sync_to_packed();
         }
     }
 }
@@ -180,12 +229,52 @@ impl PixyTerrainChunk {
         self.notify_needs_update(z - 1, x);
         self.notify_needs_update(z - 1, x - 1);
     }
+
+    /// Get ground color channel 0 at a grid point.
+    #[func]
+    pub fn get_color_0(&self, x: i32, z: i32) -> Color {
+        let dim_x = self.get_dimensions_xz().0;
+        self.color_map_0[(z * dim_x + x) as usize]
+    }
+
+    /// Get ground color channel 1 at a grid point.
+    #[func]
+    pub fn get_color_1(&self, x: i32, z: i32) -> Color {
+        let dim_x = self.get_dimensions_xz().0;
+        self.color_map_1[(z * dim_x + x) as usize]
+    }
+
+    /// Get wall color channel 0 at a grid point.
+    #[func]
+    pub fn get_wall_color_0(&self, x: i32, z: i32) -> Color {
+        let dim_x = self.get_dimensions_xz().0;
+        self.wall_color_map_0[(z * dim_x + x) as usize]
+    }
+
+    /// Get wall color channel 1 at a grid point.
+    #[func]
+    pub fn get_wall_color_1(&self, x: i32, z: i32) -> Color {
+        let dim_x = self.get_dimensions_xz().0;
+        self.wall_color_map_1[(z * dim_x + x) as usize]
+    }
+
+    /// Get grass mask at a grid point.
+    #[func]
+    pub fn get_grass_mask_at(&self, x: i32, z: i32) -> Color {
+        let dim_x = self.get_dimensions_xz().0;
+        self.grass_mask_map[(z * dim_x + x) as usize]
+    }
 }
 
 impl PixyTerrainChunk {
     /// Set the reference to the parent terrain node.
     pub fn set_terrain_ref(&mut self, terrain: Gd<PixyTerrain>) {
         self.terrain_ref = Some(terrain);
+    }
+
+    /// Get the reference to the parent terrain node.
+    pub fn get_terrain_ref(&self) -> Option<&Gd<PixyTerrain>> {
+        self.terrain_ref.as_ref()
     }
 
     /// Get dimensions from the terrain parent.
@@ -265,6 +354,99 @@ impl PixyTerrainChunk {
         }
     }
 
+    // ═══════════════════════════════════════════
+    // Data Persistence: Packed Array Conversion
+    // ═══════════════════════════════════════════
+
+    /// Sync runtime data to packed arrays for scene serialization.
+    pub fn sync_to_packed(&mut self) {
+        let dim = self.get_terrain_dimensions();
+        let dim_x = dim.x as usize;
+        let dim_z = dim.z as usize;
+
+        // Height map: flatten 2D → 1D (row-major: z * dim_x + x)
+        if !self.height_map.is_empty() {
+            let mut packed = PackedFloat32Array::new();
+            packed.resize(dim_x * dim_z);
+            for z in 0..dim_z {
+                for x in 0..dim_x {
+                    packed[z * dim_x + x] = self.height_map[z][x];
+                }
+            }
+            self.saved_height_map = packed;
+        }
+
+        // Color maps
+        self.saved_color_map_0 = Self::vec_color_to_packed(&self.color_map_0);
+        self.saved_color_map_1 = Self::vec_color_to_packed(&self.color_map_1);
+        self.saved_wall_color_map_0 = Self::vec_color_to_packed(&self.wall_color_map_0);
+        self.saved_wall_color_map_1 = Self::vec_color_to_packed(&self.wall_color_map_1);
+        self.saved_grass_mask_map = Self::vec_color_to_packed(&self.grass_mask_map);
+    }
+
+    /// Restore runtime data from packed arrays (after scene load).
+    /// Returns true if data was restored, false if packed arrays were empty.
+    fn restore_from_packed(&mut self) -> bool {
+        let dim = self.get_terrain_dimensions();
+        let dim_x = dim.x as usize;
+        let dim_z = dim.z as usize;
+        let expected_total = dim_x * dim_z;
+
+        // Check if height data was saved
+        if self.saved_height_map.len() != expected_total {
+            return false;
+        }
+
+        // Restore height map from flat packed array → 2D Vec
+        self.height_map = Vec::with_capacity(dim_z);
+        for z in 0..dim_z {
+            let mut row = Vec::with_capacity(dim_x);
+            for x in 0..dim_x {
+                row.push(self.saved_height_map[z * dim_x + x]);
+            }
+            self.height_map.push(row);
+        }
+
+        // Restore color maps
+        self.color_map_0 = Self::packed_to_vec_color(&self.saved_color_map_0, expected_total);
+        self.color_map_1 = Self::packed_to_vec_color(&self.saved_color_map_1, expected_total);
+        self.wall_color_map_0 =
+            Self::packed_to_vec_color(&self.saved_wall_color_map_0, expected_total);
+        self.wall_color_map_1 =
+            Self::packed_to_vec_color(&self.saved_wall_color_map_1, expected_total);
+        self.grass_mask_map = Self::packed_to_vec_color(&self.saved_grass_mask_map, expected_total);
+
+        godot_print!(
+            "PixyTerrainChunk: Restored data from saved arrays for chunk ({}, {})",
+            self.chunk_coords.x,
+            self.chunk_coords.y
+        );
+        true
+    }
+
+    /// Convert Vec<Color> to PackedColorArray.
+    fn vec_color_to_packed(colors: &[Color]) -> PackedColorArray {
+        let mut packed = PackedColorArray::new();
+        packed.resize(colors.len());
+        for (i, color) in colors.iter().enumerate() {
+            packed[i] = *color;
+        }
+        packed
+    }
+
+    /// Convert PackedColorArray to Vec<Color>, with fallback if wrong size.
+    fn packed_to_vec_color(packed: &PackedColorArray, expected: usize) -> Vec<Color> {
+        if packed.len() == expected {
+            (0..expected).map(|i| packed[i]).collect()
+        } else {
+            vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); expected]
+        }
+    }
+
+    // ═══════════════════════════════════════════
+    // Initialization
+    // ═══════════════════════════════════════════
+
     /// Initialize terrain data (called by terrain parent after adding chunk to tree).
     pub fn initialize_terrain(&mut self, should_regenerate_mesh: bool) {
         if !Engine::singleton().is_editor_hint() {
@@ -282,18 +464,41 @@ impl PixyTerrainChunk {
             self.needs_update.push(vec![true; (dim.x - 1) as usize]);
         }
 
-        // Generate data maps if they don't exist yet
-        if self.height_map.is_empty() {
-            self.generate_height_map();
+        // Try to restore from saved packed arrays first (scene reload)
+        let restored = self.restore_from_packed();
+
+        if !restored {
+            // Generate fresh data maps
+            if self.height_map.is_empty() {
+                self.generate_height_map();
+            }
+            if self.color_map_0.is_empty() || self.color_map_1.is_empty() {
+                self.generate_color_maps();
+            }
+            if self.wall_color_map_0.is_empty() || self.wall_color_map_1.is_empty() {
+                self.generate_wall_color_maps();
+            }
+            if self.grass_mask_map.is_empty() {
+                self.generate_grass_mask_map();
+            }
         }
-        if self.color_map_0.is_empty() || self.color_map_1.is_empty() {
-            self.generate_color_maps();
-        }
-        if self.wall_color_map_0.is_empty() || self.wall_color_map_1.is_empty() {
-            self.generate_wall_color_maps();
-        }
-        if self.grass_mask_map.is_empty() {
-            self.generate_grass_mask_map();
+
+        // Create grass planter child if it doesn't exist
+        if self.grass_planter.is_none() {
+            let mut planter = PixyGrassPlanter::new_alloc();
+            planter.set_name("GrassPlanter");
+
+            let chunk_gd = self.to_gd();
+            planter.bind_mut().setup(chunk_gd, true);
+
+            self.base_mut().add_child(&planter);
+
+            // Set owner for editor persistence
+            if let Some(owner) = self.base().get_owner() {
+                planter.set_owner(&owner);
+            }
+
+            self.grass_planter = Some(planter);
         }
 
         if should_regenerate_mesh && self.base().get_mesh().is_none() {
@@ -321,13 +526,10 @@ impl PixyTerrainChunk {
         }
     }
 
-    /// Generate default ground color maps (all zeros → texture slot 0).
+    /// Generate default ground color maps (texture slot 0).
     pub fn generate_color_maps(&mut self) {
         let dim = self.get_terrain_dimensions();
         let total = (dim.x * dim.z) as usize;
-        // Default to texture slot 0: Color(1,0,0,0) for both channels
-        // Actually Yugen initializes to Color(0,0,0,0) which also maps to slot 0
-        // since get_dominant_color treats 0,0,0,0 as R channel (index 0).
         self.color_map_0 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
         self.color_map_1 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
     }
@@ -377,6 +579,17 @@ impl PixyTerrainChunk {
         // Create trimesh collision
         self.base_mut().create_trimesh_collision();
 
+        // Configure collision layer on the generated StaticBody3D
+        self.configure_collision_layer();
+
+        // Sync data to packed arrays for persistence
+        self.sync_to_packed();
+
+        // Regenerate grass on top of the new mesh
+        if let Some(ref mut planter) = self.grass_planter {
+            planter.bind_mut().regenerate_all_cells();
+        }
+
         godot_print!(
             "PixyTerrainChunk: Mesh regenerated for chunk ({}, {})",
             self.chunk_coords.x,
@@ -393,9 +606,56 @@ impl PixyTerrainChunk {
         let use_ridge_texture = self.get_use_ridge_texture();
         let ridge_threshold = self.get_ridge_threshold();
 
+        // Get chunk position once for wall UV2 offset
+        let chunk_position = if self.base().is_inside_tree() {
+            self.base().get_global_position()
+        } else {
+            self.base().get_position()
+        };
+
+        // Create CellContext once, moving color maps in (avoids cloning per cell).
+        // Maps are moved back after the loop.
+        let default_color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+        let mut ctx = CellContext {
+            heights: [0.0; 4],
+            edges: [true; 4],
+            rotation: 0,
+            cell_coords: Vector2i::ZERO,
+            dimensions: dim,
+            cell_size,
+            merge_threshold,
+            higher_poly_floors: self.higher_poly_floors,
+            color_map_0: std::mem::take(&mut self.color_map_0),
+            color_map_1: std::mem::take(&mut self.color_map_1),
+            wall_color_map_0: std::mem::take(&mut self.wall_color_map_0),
+            wall_color_map_1: std::mem::take(&mut self.wall_color_map_1),
+            grass_mask_map: std::mem::take(&mut self.grass_mask_map),
+            cell_min_height: 0.0,
+            cell_max_height: 0.0,
+            cell_is_boundary: false,
+            cell_floor_lower_color_0: default_color,
+            cell_floor_upper_color_0: default_color,
+            cell_floor_lower_color_1: default_color,
+            cell_floor_upper_color_1: default_color,
+            cell_wall_lower_color_0: default_color,
+            cell_wall_upper_color_0: default_color,
+            cell_wall_lower_color_1: default_color,
+            cell_wall_upper_color_1: default_color,
+            cell_mat_a: 0,
+            cell_mat_b: 0,
+            cell_mat_c: 0,
+            blend_mode,
+            use_ridge_texture,
+            ridge_threshold,
+            is_new_chunk: self.is_new_chunk,
+            floor_mode: true,
+            lower_thresh: 0.3,
+            upper_thresh: 0.7,
+            chunk_position,
+        };
+
         for z in 0..(dim.z - 1) {
             for x in 0..(dim.x - 1) {
-                let cell_coords = Vector2i::new(x, z);
                 let key = [x, z];
 
                 // If geometry didn't change, replay cached geometry
@@ -410,50 +670,20 @@ impl PixyTerrainChunk {
                 self.needs_update[z as usize][x as usize] = false;
 
                 // Get corner heights: A(top-left), B(top-right), C(bottom-left), D(bottom-right)
-                // Note: Yugen uses heights[A,B,D,C] in its rotation array
                 let ay = self.height_map[z as usize][x as usize];
                 let by = self.height_map[z as usize][(x + 1) as usize];
                 let cy = self.height_map[(z + 1) as usize][x as usize];
                 let dy = self.height_map[(z + 1) as usize][(x + 1) as usize];
 
-                // Build context for this cell
-                let mut ctx = CellContext {
-                    // Heights in rotation order: [A, B, D, C]
-                    heights: [ay, by, dy, cy],
-                    edges: [true; 4], // Will be computed in generate_cell
-                    rotation: 0,
-                    cell_coords,
-                    dimensions: dim,
-                    cell_size,
-                    merge_threshold,
-                    higher_poly_floors: self.higher_poly_floors,
-                    color_map_0: self.color_map_0.clone(),
-                    color_map_1: self.color_map_1.clone(),
-                    wall_color_map_0: self.wall_color_map_0.clone(),
-                    wall_color_map_1: self.wall_color_map_1.clone(),
-                    grass_mask_map: self.grass_mask_map.clone(),
-                    cell_min_height: 0.0,
-                    cell_max_height: 0.0,
-                    cell_is_boundary: false,
-                    cell_floor_lower_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_floor_upper_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_floor_lower_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_floor_upper_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_wall_lower_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_wall_upper_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_wall_lower_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_wall_upper_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                    cell_mat_a: 0,
-                    cell_mat_b: 0,
-                    cell_mat_c: 0,
-                    blend_mode,
-                    use_ridge_texture,
-                    ridge_threshold,
-                    is_new_chunk: self.is_new_chunk,
-                    floor_mode: true,
-                    lower_thresh: 0.3,
-                    upper_thresh: 0.7,
-                };
+                // Update per-cell context fields (reuse shared ctx)
+                ctx.heights = [ay, by, dy, cy];
+                ctx.edges = [true; 4];
+                ctx.rotation = 0;
+                ctx.cell_coords = Vector2i::new(x, z);
+                ctx.cell_min_height = 0.0;
+                ctx.cell_max_height = 0.0;
+                ctx.cell_is_boundary = false;
+                ctx.floor_mode = true;
 
                 let mut geo = CellGeometry::default();
 
@@ -468,6 +698,13 @@ impl PixyTerrainChunk {
             }
         }
 
+        // Move color maps back (may have been mutated by new_chunk source map writes)
+        self.color_map_0 = ctx.color_map_0;
+        self.color_map_1 = ctx.color_map_1;
+        self.wall_color_map_0 = ctx.wall_color_map_0;
+        self.wall_color_map_1 = ctx.wall_color_map_1;
+        self.grass_mask_map = ctx.grass_mask_map;
+
         if self.is_new_chunk {
             self.is_new_chunk = false;
         }
@@ -480,6 +717,33 @@ impl PixyTerrainChunk {
             return;
         }
         self.needs_update[z as usize][x as usize] = true;
+    }
+
+    /// Configure collision layer on the StaticBody3D created by create_trimesh_collision().
+    /// Sets layer 17 (bit 16) as the base terrain collision layer, plus any extra layer
+    /// specified by the terrain's extra_collision_layer setting.
+    fn configure_collision_layer(&mut self) {
+        // Look for the collision body child created by create_trimesh_collision()
+        // It will be named something like "ChunkName_col"
+        let children = self.base().get_children();
+        for i in 0..children.len() {
+            let Some(child) = children.get(i) else {
+                continue;
+            };
+            if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
+                // Set layer 17 (bit 16) as base terrain layer
+                body.set_collision_layer(1 << 16);
+
+                // Add extra collision layer from terrain settings if available
+                if let Some(ref terrain) = self.terrain_ref {
+                    let extra = terrain.bind().extra_collision_layer;
+                    if (1..=32).contains(&extra) {
+                        body.set_collision_layer_value(extra, true);
+                    }
+                }
+                return;
+            }
+        }
     }
 }
 
