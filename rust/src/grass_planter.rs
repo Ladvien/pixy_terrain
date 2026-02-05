@@ -1,15 +1,65 @@
+use std::collections::HashMap;
+
 use godot::classes::{
-    IMultiMeshInstance3D, MultiMesh, MultiMeshInstance3D, QuadMesh, ResourceLoader, Shader,
-    ShaderMaterial,
+    IMultiMeshInstance3D, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ResourceLoader, Shader,
+    ShaderMaterial, Texture2D,
 };
+use godot::obj::InstanceId;
 use godot::prelude::*;
 
 use crate::chunk::PixyTerrainChunk;
 use crate::marching_squares::{get_dominant_color, CellGeometry, MergeMode};
-use crate::terrain::PixyTerrain;
+
+/// Cached grass configuration (avoids needing to bind terrain during grass operations).
+/// Passed from terrain to chunk to grass planter at initialization time.
+#[derive(Clone)]
+pub struct GrassConfig {
+    pub dimensions: Vector3i,
+    pub subdivisions: i32,
+    pub grass_size: Vector2,
+    pub cell_size: Vector2,
+    pub wall_threshold: f32,
+    pub merge_mode: i32,
+    pub animation_fps: i32,
+    pub ledge_threshold: f32,
+    pub ridge_threshold: f32,
+    pub grass_sprites: [Option<Gd<Texture2D>>; 6],
+    pub ground_colors: [Color; 6],
+    pub tex_has_grass: [bool; 5],
+    pub grass_mesh: Option<Gd<Mesh>>,
+}
+
+impl Default for GrassConfig {
+    fn default() -> Self {
+        Self {
+            dimensions: Vector3i::new(33, 32, 33),
+            subdivisions: 3,
+            grass_size: Vector2::new(1.0, 1.0),
+            cell_size: Vector2::new(2.0, 2.0),
+            wall_threshold: 0.0,
+            merge_mode: 1,
+            animation_fps: 0,
+            ledge_threshold: 0.25,
+            ridge_threshold: 1.0,
+            grass_sprites: [None, None, None, None, None, None],
+            ground_colors: [
+                Color::from_rgba(0.3922, 0.4706, 0.3176, 1.0),
+                Color::from_rgba(0.3216, 0.4824, 0.3843, 1.0),
+                Color::from_rgba(0.3725, 0.4235, 0.2941, 1.0),
+                Color::from_rgba(0.3922, 0.4745, 0.2549, 1.0),
+                Color::from_rgba(0.2902, 0.4941, 0.3647, 1.0),
+                Color::from_rgba(0.4431, 0.4471, 0.3647, 1.0),
+            ],
+            tex_has_grass: [true, true, true, true, true],
+            grass_mesh: None,
+        }
+    }
+}
 
 /// Path to the grass shader file.
 const GRASS_SHADER_PATH: &str = "res://resources/shaders/mst_grass.gdshader";
+/// Path to the wind noise texture.
+const WIND_NOISE_TEXTURE_PATH: &str = "res://resources/textures/wind_noise_texture.tres";
 
 /// MultiMeshInstance3D grass placement system.
 /// Port of Yugen's MarchingSquaresGrassPlanter.
@@ -18,10 +68,11 @@ const GRASS_SHADER_PATH: &str = "res://resources/shaders/mst_grass.gdshader";
 pub struct PixyGrassPlanter {
     base: Base<MultiMeshInstance3D>,
 
-    /// Reference to the parent chunk.
-    chunk_ref: Option<Gd<PixyTerrainChunk>>,
-    /// Reference to the terrain for settings access.
-    terrain_ref: Option<Gd<PixyTerrain>>,
+    /// Instance ID of the parent chunk (avoids borrow issues with Gd storage).
+    chunk_instance_id: Option<InstanceId>,
+
+    /// Cached grass configuration (avoids needing to bind terrain).
+    grass_config: Option<GrassConfig>,
 }
 
 #[godot_api]
@@ -29,56 +80,19 @@ impl IMultiMeshInstance3D for PixyGrassPlanter {}
 
 #[godot_api]
 impl PixyGrassPlanter {
-    /// Initialize the MultiMesh with proper instance count and mesh.
-    #[func]
-    pub fn setup(&mut self, chunk: Gd<PixyTerrainChunk>, regenerate: bool) {
-        self.chunk_ref = Some(chunk.clone());
+    /// Initialize the MultiMesh using cached config (avoids borrow issues).
+    pub fn setup_with_config(
+        &mut self,
+        chunk_id: InstanceId,
+        config: GrassConfig,
+        regenerate: bool,
+    ) {
+        self.chunk_instance_id = Some(chunk_id);
+        self.grass_config = Some(config.clone());
 
-        let chunk_bind = chunk.bind();
-        self.terrain_ref = chunk_bind.get_terrain_ref().cloned();
-        drop(chunk_bind);
-
-        let Some(ref terrain) = self.terrain_ref else {
-            godot_error!("PixyGrassPlanter: setup failed — no terrain reference");
-            return;
-        };
-
-        let t = terrain.bind();
-        let dim = t.dimensions;
-        let subdivisions = t.grass_subdivisions.max(1);
-        let grass_size = t.grass_size;
-        let wall_threshold = t.wall_threshold;
-        let merge_mode = t.merge_mode;
-        let animation_fps = t.animation_fps;
-        // Collect grass sprites
-        let grass_sprites = [
-            t.grass_sprite.clone(),
-            t.grass_sprite_tex_2.clone(),
-            t.grass_sprite_tex_3.clone(),
-            t.grass_sprite_tex_4.clone(),
-            t.grass_sprite_tex_5.clone(),
-            t.grass_sprite_tex_6.clone(),
-        ];
-        // Collect ground colors for grass tinting
-        let ground_colors = [
-            t.ground_color,
-            t.ground_color_2,
-            t.ground_color_3,
-            t.ground_color_4,
-            t.ground_color_5,
-            t.ground_color_6,
-        ];
-        // Collect has_grass toggles for textures 2-6
-        let tex_has_grass = [
-            t.tex2_has_grass,
-            t.tex3_has_grass,
-            t.tex4_has_grass,
-            t.tex5_has_grass,
-            t.tex6_has_grass,
-        ];
-        // Get optional grass mesh
-        let grass_mesh = t.grass_mesh.clone();
-        drop(t);
+        let dim = config.dimensions;
+        let subdivisions = config.subdivisions.max(1);
+        let grass_size = config.grass_size;
 
         let instance_count = (dim.x - 1) * (dim.z - 1) * subdivisions * subdivisions;
 
@@ -91,7 +105,7 @@ impl PixyGrassPlanter {
             mm.set_instance_count(instance_count);
 
             // Use custom grass mesh if provided, otherwise default to QuadMesh
-            if let Some(ref mesh) = grass_mesh {
+            if let Some(ref mesh) = config.grass_mesh {
                 mm.set_mesh(mesh);
             } else {
                 let mut quad = QuadMesh::new_gd();
@@ -108,78 +122,91 @@ impl PixyGrassPlanter {
             godot::classes::geometry_instance_3d::ShadowCastingSetting::OFF,
         );
 
-        // Set up grass material
+        // Set up grass material using cached config
         self.setup_grass_material(
-            wall_threshold,
-            merge_mode,
-            animation_fps,
-            &grass_sprites,
-            &ground_colors,
-            &tex_has_grass,
+            config.wall_threshold,
+            config.merge_mode,
+            config.animation_fps,
+            &config.grass_sprites,
+            &config.ground_colors,
+            &config.tex_has_grass,
         );
     }
 
-    /// Regenerate grass for all cells in the chunk.
+    /// Initialize the MultiMesh with proper instance count and mesh (legacy method).
+    /// Note: This requires the chunk to have a terrain_config set.
     #[func]
-    pub fn regenerate_all_cells(&mut self) {
-        if self.chunk_ref.is_none() {
-            godot_error!("PixyGrassPlanter: regenerate_all_cells — no chunk reference");
+    pub fn setup(&mut self, chunk: Gd<PixyTerrainChunk>, regenerate: bool) {
+        let chunk_id = chunk.instance_id();
+        // Use default grass config since we can't get terrain config from chunk in legacy path
+        let config = GrassConfig::default();
+        self.setup_with_config(chunk_id, config, regenerate);
+    }
+
+    /// Regenerate grass for all cells in the chunk.
+    /// Takes cell_geometry as parameter to avoid needing to bind the chunk.
+    pub fn regenerate_all_cells_with_geometry(
+        &mut self,
+        cell_geometry: &HashMap<[i32; 2], CellGeometry>,
+    ) {
+        let Some(config) = self.grass_config.as_ref() else {
+            godot_error!("PixyGrassPlanter: regenerate_all_cells — no grass config");
             return;
-        }
-        if self.terrain_ref.is_none() {
-            godot_error!("PixyGrassPlanter: regenerate_all_cells — no terrain reference");
-            return;
-        }
+        };
+
+        let dim = config.dimensions;
 
         if self.base().get_multimesh().is_none() {
-            let chunk = self.chunk_ref.as_ref().unwrap().clone();
-            self.setup(chunk, true);
+            // Re-setup with current config
+            if let (Some(c_id), Some(cfg)) = (self.chunk_instance_id, self.grass_config.clone()) {
+                self.setup_with_config(c_id, cfg, true);
+            }
         }
-
-        let dim = self.terrain_ref.as_ref().unwrap().bind().dimensions;
 
         for z in 0..(dim.z - 1) {
             for x in 0..(dim.x - 1) {
-                self.generate_grass_on_cell(Vector2i::new(x, z));
+                self.generate_grass_on_cell_with_geometry(Vector2i::new(x, z), cell_geometry);
             }
         }
     }
 
-    /// Generate grass instances for a single cell.
+    /// Legacy method for backward compatibility - warns and does nothing.
     #[func]
-    pub fn generate_grass_on_cell(&mut self, cell_coords: Vector2i) {
-        let Some(ref chunk) = self.chunk_ref else {
-            return;
-        };
-        let Some(ref terrain) = self.terrain_ref else {
+    pub fn regenerate_all_cells(&mut self) {
+        godot_warn!("PixyGrassPlanter: regenerate_all_cells() called without geometry - skipping");
+    }
+
+    /// Generate grass instances for a single cell using provided geometry.
+    fn generate_grass_on_cell_with_geometry(
+        &mut self,
+        cell_coords: Vector2i,
+        cell_geometry: &HashMap<[i32; 2], CellGeometry>,
+    ) {
+        let Some(config) = self.grass_config.as_ref() else {
             return;
         };
 
-        let chunk_bind = chunk.bind();
-        let geo = match chunk_bind
-            .cell_geometry
-            .get(&[cell_coords.x, cell_coords.y])
-        {
+        // Get geometry from passed parameter instead of chunk lookup
+        let geo = match cell_geometry.get(&[cell_coords.x, cell_coords.y]) {
             Some(g) => g.clone(),
             None => return,
         };
-        drop(chunk_bind);
 
-        let t = terrain.bind();
-        let dim = t.dimensions;
-        let subdivisions = t.grass_subdivisions.max(1);
-        let cell_size = t.cell_size;
-        let ledge_threshold = t.ledge_threshold;
-        let ridge_threshold = t.ridge_threshold;
+        // Use cell_size from config instead of chunk lookup
+        let cell_size = config.cell_size;
+
+        let dim = config.dimensions;
+        let subdivisions = config.subdivisions.max(1);
+        let ledge_threshold = config.ledge_threshold;
+        let ridge_threshold = config.ridge_threshold;
         let tex_has_grass = [
             true, // tex1 (base grass) always has grass
-            t.tex2_has_grass,
-            t.tex3_has_grass,
-            t.tex4_has_grass,
-            t.tex5_has_grass,
-            t.tex6_has_grass,
+            config.tex_has_grass[0],
+            config.tex_has_grass[1],
+            config.tex_has_grass[2],
+            config.tex_has_grass[3],
+            config.tex_has_grass[4],
         ];
-        drop(t);
 
         let count = (subdivisions * subdivisions) as usize;
 
@@ -228,6 +255,14 @@ impl PixyGrassPlanter {
             mm.set_instance_transform(index as i32, hidden_transform);
             index += 1;
         }
+    }
+
+    /// Legacy method for backward compatibility - warns and does nothing.
+    #[func]
+    pub fn generate_grass_on_cell(&mut self, _cell_coords: Vector2i) {
+        godot_warn!(
+            "PixyGrassPlanter: generate_grass_on_cell() called without geometry - skipping"
+        );
     }
 }
 
@@ -320,6 +355,28 @@ impl PixyGrassPlanter {
         mat.set_shader_parameter("use_grass_tex_4", &tex_has_grass[2].to_variant());
         mat.set_shader_parameter("use_grass_tex_5", &tex_has_grass[3].to_variant());
         mat.set_shader_parameter("use_grass_tex_6", &tex_has_grass[4].to_variant());
+
+        // Wind animation parameters (mst_grass.gdshader lines 39-46)
+        // Values from Yugen's mst_grass_mesh.tres: wind_scale=0.02, wind_speed=0.14
+        mat.set_shader_parameter("wind_direction", &Vector2::new(1.0, 1.0).to_variant());
+        mat.set_shader_parameter("wind_scale", &0.02_f32.to_variant());
+        mat.set_shader_parameter("wind_speed", &0.14_f32.to_variant());
+        mat.set_shader_parameter("animate_active", &true.to_variant());
+
+        // Load wind noise texture for wind animation
+        if loader.exists(WIND_NOISE_TEXTURE_PATH) {
+            if let Some(wind_tex) = loader.load(WIND_NOISE_TEXTURE_PATH) {
+                mat.set_shader_parameter("wind_texture", &wind_tex.to_variant());
+            }
+        }
+
+        // Shading parameters (mst_grass.gdshader lines 48-52)
+        mat.set_shader_parameter(
+            "shadow_color",
+            &Color::from_rgba(0.0, 0.0, 0.0, 1.0).to_variant(),
+        );
+        mat.set_shader_parameter("bands", &5_i32.to_variant());
+        mat.set_shader_parameter("shadow_intensity", &0.0_f32.to_variant());
 
         self.base_mut().set_material_override(&mat);
         godot_print!("PixyGrassPlanter: Grass material set up successfully");
@@ -505,25 +562,24 @@ impl PixyGrassPlanter {
         }
     }
 
-    /// Get ground color for a given texture slot from terrain settings.
+    /// Get ground color for a given texture slot from cached grass config.
     fn get_ground_color_for_texture(
         &self,
         texture_id: i32,
         _cell_size: Vector2,
         _position: Vector3,
     ) -> Color {
-        let Some(ref terrain) = self.terrain_ref else {
+        let Some(config) = self.grass_config.as_ref() else {
             return Color::from_rgba(0.4, 0.5, 0.3, 1.0);
         };
-        let t = terrain.bind();
         match texture_id {
-            1 => t.ground_color,
-            2 => t.ground_color_2,
-            3 => t.ground_color_3,
-            4 => t.ground_color_4,
-            5 => t.ground_color_5,
-            6 => t.ground_color_6,
-            _ => t.ground_color,
+            1 => config.ground_colors[0],
+            2 => config.ground_colors[1],
+            3 => config.ground_colors[2],
+            4 => config.ground_colors[3],
+            5 => config.ground_colors[4],
+            6 => config.ground_colors[5],
+            _ => config.ground_colors[0],
         }
     }
 }

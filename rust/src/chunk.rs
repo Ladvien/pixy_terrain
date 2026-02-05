@@ -3,13 +3,38 @@ use std::collections::HashMap;
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::surface_tool::CustomFormat;
 use godot::classes::{
-    ArrayMesh, Engine, IMeshInstance3D, MeshInstance3D, Noise, StaticBody3D, SurfaceTool,
+    ArrayMesh, Engine, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D,
+    SurfaceTool,
 };
 use godot::prelude::*;
 
-use crate::grass_planter::PixyGrassPlanter;
+use crate::grass_planter::{GrassConfig, PixyGrassPlanter};
 use crate::marching_squares::{self, CellContext, CellGeometry, MergeMode};
-use crate::terrain::PixyTerrain;
+
+/// Cached terrain configuration (avoids needing to bind terrain during chunk operations).
+/// Passed from terrain to chunk at initialization time to break the borrow cycle.
+#[derive(Clone, Debug)]
+pub struct TerrainConfig {
+    pub dimensions: Vector3i,
+    pub cell_size: Vector2,
+    pub blend_mode: i32,
+    pub use_ridge_texture: bool,
+    pub ridge_threshold: f32,
+    pub extra_collision_layer: i32,
+}
+
+impl Default for TerrainConfig {
+    fn default() -> Self {
+        Self {
+            dimensions: Vector3i::new(33, 32, 33),
+            cell_size: Vector2::new(2.0, 2.0),
+            blend_mode: 0,
+            use_ridge_texture: false,
+            ridge_threshold: 1.0,
+            extra_collision_layer: 9,
+        }
+    }
+}
 
 /// Per-chunk mesh instance that holds heightmap data and generates geometry.
 /// Port of Yugen's MarchingSquaresTerrainChunk (MeshInstance3D).
@@ -99,8 +124,8 @@ pub struct PixyTerrainChunk {
     #[init(val = false)]
     pub skip_save_on_exit: bool,
 
-    /// Reference to parent terrain (set by terrain when adding chunk).
-    terrain_ref: Option<Gd<PixyTerrain>>,
+    /// Cached terrain configuration (set once at initialization, avoids needing to bind terrain).
+    terrain_config: TerrainConfig,
 
     /// Grass planter child node.
     grass_planter: Option<Gd<PixyGrassPlanter>>,
@@ -129,7 +154,7 @@ impl PixyTerrainChunk {
             higher_poly_floors: true,
             is_new_chunk: false,
             skip_save_on_exit: false,
-            terrain_ref: None,
+            terrain_config: TerrainConfig::default(),
             grass_planter: None,
         }
     }
@@ -267,72 +292,44 @@ impl PixyTerrainChunk {
 }
 
 impl PixyTerrainChunk {
-    /// Set the reference to the parent terrain node.
-    pub fn set_terrain_ref(&mut self, terrain: Gd<PixyTerrain>) {
-        self.terrain_ref = Some(terrain);
+    /// Set terrain configuration (called by terrain when adding/initializing chunk).
+    /// This caches all needed terrain data so we don't need to bind terrain later.
+    pub fn set_terrain_config(&mut self, config: TerrainConfig) {
+        self.terrain_config = config;
     }
 
-    /// Get the reference to the parent terrain node.
-    pub fn get_terrain_ref(&self) -> Option<&Gd<PixyTerrain>> {
-        self.terrain_ref.as_ref()
+    /// Get the cached terrain config (for external callers).
+    #[allow(dead_code)]
+    pub fn get_terrain_config(&self) -> &TerrainConfig {
+        &self.terrain_config
     }
 
-    /// Get dimensions from the terrain parent.
+    /// Get dimensions from cached config.
     fn get_dimensions_xz(&self) -> (i32, i32) {
-        if let Some(ref terrain) = self.terrain_ref {
-            let t = terrain.bind();
-            (t.dimensions.x, t.dimensions.z)
-        } else {
-            (33, 33) // fallback defaults
-        }
+        (
+            self.terrain_config.dimensions.x,
+            self.terrain_config.dimensions.z,
+        )
     }
 
     fn get_terrain_dimensions(&self) -> Vector3i {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().dimensions
-        } else {
-            Vector3i::new(33, 32, 33)
-        }
+        self.terrain_config.dimensions
     }
 
     fn get_cell_size(&self) -> Vector2 {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().cell_size
-        } else {
-            Vector2::new(2.0, 2.0)
-        }
+        self.terrain_config.cell_size
     }
 
     fn get_blend_mode(&self) -> i32 {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().blend_mode
-        } else {
-            0
-        }
+        self.terrain_config.blend_mode
     }
 
     fn get_use_ridge_texture(&self) -> bool {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().use_ridge_texture
-        } else {
-            false
-        }
+        self.terrain_config.use_ridge_texture
     }
 
     fn get_ridge_threshold(&self) -> f32 {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().ridge_threshold
-        } else {
-            1.0
-        }
-    }
-
-    fn get_noise(&self) -> Option<Gd<Noise>> {
-        if let Some(ref terrain) = self.terrain_ref {
-            terrain.bind().noise_hmap.clone()
-        } else {
-            None
-        }
+        self.terrain_config.ridge_threshold
     }
 
     /// Get height at a specific grid coordinate, returning None if out of bounds.
@@ -448,7 +445,14 @@ impl PixyTerrainChunk {
     // ═══════════════════════════════════════════
 
     /// Initialize terrain data (called by terrain parent after adding chunk to tree).
-    pub fn initialize_terrain(&mut self, should_regenerate_mesh: bool) {
+    /// All needed data is passed as parameters to avoid needing to bind terrain.
+    pub fn initialize_terrain(
+        &mut self,
+        should_regenerate_mesh: bool,
+        noise: Option<Gd<Noise>>,
+        terrain_material: Option<Gd<ShaderMaterial>>,
+        grass_config: GrassConfig,
+    ) {
         if !Engine::singleton().is_editor_hint() {
             godot_error!(
                 "PixyTerrainChunk: Trying to initialize terrain during runtime (NOT SUPPORTED)"
@@ -470,7 +474,7 @@ impl PixyTerrainChunk {
         if !restored {
             // Generate fresh data maps
             if self.height_map.is_empty() {
-                self.generate_height_map();
+                self.generate_height_map_with_noise(noise);
             }
             if self.color_map_0.is_empty() || self.color_map_1.is_empty() {
                 self.generate_color_maps();
@@ -488,8 +492,11 @@ impl PixyTerrainChunk {
             let mut planter = PixyGrassPlanter::new_alloc();
             planter.set_name("GrassPlanter");
 
-            let chunk_gd = self.to_gd();
-            planter.bind_mut().setup(chunk_gd, true);
+            // Pass config directly instead of instance IDs (avoids borrow issues)
+            let chunk_id = self.base().instance_id();
+            planter
+                .bind_mut()
+                .setup_with_config(chunk_id, grass_config, true);
 
             self.base_mut().add_child(&planter);
 
@@ -502,19 +509,19 @@ impl PixyTerrainChunk {
         }
 
         if should_regenerate_mesh && self.base().get_mesh().is_none() {
-            self.regenerate_mesh();
+            self.regenerate_mesh_with_material(terrain_material);
         }
     }
 
-    /// Generate a flat height map, optionally seeded by noise.
-    pub fn generate_height_map(&mut self) {
+    /// Generate a flat height map, optionally seeded by noise (passed as parameter).
+    pub fn generate_height_map_with_noise(&mut self, noise: Option<Gd<Noise>>) {
         let dim = self.get_terrain_dimensions();
         let dim_x = dim.x as usize;
         let dim_z = dim.z as usize;
 
         self.height_map = vec![vec![0.0; dim_x]; dim_z];
 
-        if let Some(noise) = self.get_noise() {
+        if let Some(noise) = noise {
             for z in 0..dim_z {
                 for x in 0..dim_x {
                     let noise_x = (self.chunk_coords.x * (dim.x - 1)) + x as i32;
@@ -550,7 +557,14 @@ impl PixyTerrainChunk {
     }
 
     /// Rebuild the mesh using SurfaceTool with CUSTOM0-2 format.
+    /// This version is for internal use when material is not passed (uses None).
     pub fn regenerate_mesh(&mut self) {
+        self.regenerate_mesh_with_material(None);
+    }
+
+    /// Rebuild the mesh using SurfaceTool with CUSTOM0-2 format.
+    /// Material is passed as parameter to avoid needing to bind terrain.
+    pub fn regenerate_mesh_with_material(&mut self, terrain_material: Option<Gd<ShaderMaterial>>) {
         let mut st = SurfaceTool::new_gd();
         st.begin(PrimitiveType::TRIANGLES);
         st.set_custom_format(0, CustomFormat::RGBA_FLOAT);
@@ -564,14 +578,11 @@ impl PixyTerrainChunk {
 
         let mesh = st.commit();
         if let Some(mesh) = mesh {
-            // Apply terrain material if available
-            if let Some(ref terrain) = self.terrain_ref {
-                let t = terrain.bind();
-                if let Some(ref mat) = t.terrain_material {
-                    mesh.clone()
-                        .cast::<ArrayMesh>()
-                        .surface_set_material(0, mat);
-                }
+            // Apply terrain material if available (passed as parameter)
+            if let Some(ref mat) = terrain_material {
+                mesh.clone()
+                    .cast::<ArrayMesh>()
+                    .surface_set_material(0, mat);
             }
             self.base_mut().set_mesh(&mesh);
         }
@@ -586,8 +597,11 @@ impl PixyTerrainChunk {
         self.sync_to_packed();
 
         // Regenerate grass on top of the new mesh
+        // Pass cell_geometry directly to avoid grass planter needing to bind chunk
         if let Some(ref mut planter) = self.grass_planter {
-            planter.bind_mut().regenerate_all_cells();
+            planter
+                .bind_mut()
+                .regenerate_all_cells_with_geometry(&self.cell_geometry);
         }
 
         godot_print!(
@@ -734,12 +748,10 @@ impl PixyTerrainChunk {
                 // Set layer 17 (bit 16) as base terrain layer
                 body.set_collision_layer(1 << 16);
 
-                // Add extra collision layer from terrain settings if available
-                if let Some(ref terrain) = self.terrain_ref {
-                    let extra = terrain.bind().extra_collision_layer;
-                    if (1..=32).contains(&extra) {
-                        body.set_collision_layer_value(extra, true);
-                    }
+                // Add extra collision layer from cached terrain config
+                let extra = self.terrain_config.extra_collision_layer;
+                if (1..=32).contains(&extra) {
+                    body.set_collision_layer_value(extra, true);
                 }
                 return;
             }

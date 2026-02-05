@@ -278,9 +278,9 @@ impl IEditorPlugin for PixyTerrainPlugin {
             tool_buttons.push(btn);
         }
 
-        // Pre-press Brush button
+        // Pre-press Brush button (deferred to avoid triggering signal during enter_tree)
         if let Some(first_btn) = tool_buttons.first_mut() {
-            first_btn.set_pressed(true);
+            first_btn.call_deferred("set_pressed", &[true.to_variant()]);
         }
 
         margin_container.add_child(&toolbar);
@@ -773,6 +773,20 @@ impl PixyTerrainPlugin {
         self.do_clear();
     }
 
+    /// Deferred rebuild of attributes panel - safe to call to_gd() here.
+    #[func]
+    fn _rebuild_attributes_deferred(&mut self) {
+        let plugin_ref = self.to_gd();
+        self.rebuild_attributes_impl(plugin_ref);
+    }
+
+    /// Deferred rebuild of texture panel - safe to call to_gd() here.
+    #[func]
+    fn _rebuild_texture_panel_deferred(&mut self) {
+        let plugin_ref = self.to_gd();
+        self.rebuild_texture_panel_impl(plugin_ref);
+    }
+
     /// Called when a tool mode toggle button is pressed.
     /// Godot passes signal args first (pressed: bool), then bound args (tool_index: i32).
     #[func]
@@ -792,7 +806,9 @@ impl PixyTerrainPlugin {
             8 => TerrainToolMode::TerrainSettings,
             _ => TerrainToolMode::Brush,
         };
-        self.rebuild_attributes();
+        // Use call_deferred to avoid borrow conflict from signal dispatch
+        self.base_mut()
+            .call_deferred("_rebuild_attributes_deferred", &[]);
     }
 
     /// Called when an attribute control value changes.
@@ -857,8 +873,9 @@ impl PixyTerrainPlugin {
                             let k = keys[idx];
                             self.selected_chunk_coords =
                                 Some(Vector2i::new(k.x as i32, k.y as i32));
-                            // Rebuild to update merge mode display
-                            self.rebuild_attributes();
+                            // Rebuild to update merge mode display (deferred to avoid borrow conflict)
+                            self.base_mut()
+                                .call_deferred("_rebuild_attributes_deferred", &[]);
                         }
                     }
                 }
@@ -1066,13 +1083,17 @@ impl PixyTerrainPlugin {
             tex_panel.set_visible(visible);
         }
         if visible {
-            self.rebuild_attributes();
-            self.rebuild_texture_panel();
+            // Use call_deferred to avoid borrow conflict from Godot dispatch
+            self.base_mut()
+                .call_deferred("_rebuild_attributes_deferred", &[]);
+            self.base_mut()
+                .call_deferred("_rebuild_texture_panel_deferred", &[]);
         }
     }
 
     /// Rebuild the bottom attributes panel controls based on the current tool mode.
-    fn rebuild_attributes(&mut self) {
+    /// This is the internal implementation - call via _rebuild_attributes_deferred.
+    fn rebuild_attributes_impl(&mut self, plugin_ref: Gd<PixyTerrainPlugin>) {
         // Clear existing children
         if let Some(ref mut hbox) = self.attributes_hbox {
             // Remove all children
@@ -1084,8 +1105,6 @@ impl PixyTerrainPlugin {
                 }
             }
         }
-
-        let plugin_ref = self.to_gd();
 
         match self.mode {
             TerrainToolMode::Brush => {
@@ -1942,7 +1961,8 @@ impl PixyTerrainPlugin {
     }
 
     /// Rebuild the right-side texture settings panel content.
-    fn rebuild_texture_panel(&mut self) {
+    /// This is the internal implementation - call via _rebuild_texture_panel_deferred.
+    fn rebuild_texture_panel_impl(&mut self, plugin_ref: Gd<PixyTerrainPlugin>) {
         // Clear existing children (borrow scroll, then release)
         if let Some(ref mut scroll) = self.texture_panel {
             let count = scroll.get_child_count();
@@ -2027,8 +2047,6 @@ impl PixyTerrainPlugin {
             t.grass_sprite_tex_6.clone(),
         ];
         drop(t);
-
-        let plugin_ref = self.to_gd();
 
         let mut vbox = VBoxContainer::new_alloc();
         vbox.set_name("TextureSettingsVBox");

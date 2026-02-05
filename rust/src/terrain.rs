@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use godot::classes::{Engine, Node3D, ResourceLoader, Shader, ShaderMaterial, Texture2D};
 use godot::prelude::*;
 
-use crate::chunk::PixyTerrainChunk;
+use crate::chunk::{PixyTerrainChunk, TerrainConfig};
+use crate::grass_planter::GrassConfig;
 use crate::marching_squares::MergeMode;
 
 /// Path to the terrain shader file.
@@ -357,14 +358,27 @@ impl PixyTerrain {
             }
         }
 
-        // Initialize all discovered chunks
+        // Create configs ONCE before iterating chunks (avoids borrow issues)
+        let terrain_config = self.make_terrain_config();
+        let grass_config = self.make_grass_config();
+        let noise = self.noise_hmap.clone();
+        let material = self.terrain_material.clone();
+
+        // Initialize all discovered chunks with cached configs
         let chunk_keys: Vec<[i32; 2]> = self.chunks.keys().cloned().collect();
         for key in chunk_keys {
             if let Some(chunk) = self.chunks.get(&key) {
                 let mut chunk = chunk.clone();
-                let terrain_ref = self.to_gd();
-                chunk.bind_mut().set_terrain_ref(terrain_ref);
-                chunk.bind_mut().initialize_terrain(true);
+                {
+                    let mut bind = chunk.bind_mut();
+                    bind.set_terrain_config(terrain_config.clone());
+                }
+                chunk.bind_mut().initialize_terrain(
+                    true,
+                    noise.clone(),
+                    material.clone(),
+                    grass_config.clone(),
+                );
             }
         }
     }
@@ -716,11 +730,19 @@ impl PixyTerrain {
         mut chunk: Gd<PixyTerrainChunk>,
         regenerate: bool,
     ) {
+        // Create configs BEFORE adding chunk (avoids borrow issues - terrain is borrowed here, but that's ok)
+        let terrain_config = self.make_terrain_config();
+        let grass_config = self.make_grass_config();
+        let noise = self.noise_hmap.clone();
+        let material = self.terrain_material.clone();
+
         self.chunks.insert([coords.x, coords.y], chunk.clone());
 
         {
             let mut chunk_bind = chunk.bind_mut();
             chunk_bind.chunk_coords = coords;
+            // Pass config directly - no terrain binding needed later
+            chunk_bind.set_terrain_config(terrain_config);
         }
 
         self.base_mut().add_child(&chunk);
@@ -745,10 +767,10 @@ impl PixyTerrain {
             }
         }
 
-        // Set terrain reference and initialize
-        let terrain_ref = self.to_gd();
-        chunk.bind_mut().set_terrain_ref(terrain_ref);
-        chunk.bind_mut().initialize_terrain(regenerate);
+        // Initialize terrain with all needed data passed as parameters
+        chunk
+            .bind_mut()
+            .initialize_terrain(regenerate, noise, material, grass_config);
 
         godot_print!("PixyTerrain: Added chunk at ({}, {})", coords.x, coords.y);
     }
@@ -762,5 +784,86 @@ impl PixyTerrain {
             };
             Self::set_owner_recursive(&mut child, owner);
         }
+    }
+
+    /// Create a TerrainConfig from current terrain settings.
+    /// This is called before chunk operations to avoid needing to bind terrain later.
+    fn make_terrain_config(&self) -> TerrainConfig {
+        TerrainConfig {
+            dimensions: self.dimensions,
+            cell_size: self.cell_size,
+            blend_mode: self.blend_mode,
+            use_ridge_texture: self.use_ridge_texture,
+            ridge_threshold: self.ridge_threshold,
+            extra_collision_layer: self.extra_collision_layer,
+        }
+    }
+
+    /// Create a GrassConfig from current terrain settings.
+    /// This is called before chunk operations to avoid needing to bind terrain later.
+    fn make_grass_config(&self) -> GrassConfig {
+        GrassConfig {
+            dimensions: self.dimensions,
+            subdivisions: self.grass_subdivisions,
+            grass_size: self.grass_size,
+            cell_size: self.cell_size,
+            wall_threshold: self.wall_threshold,
+            merge_mode: self.merge_mode,
+            animation_fps: self.animation_fps,
+            ledge_threshold: self.ledge_threshold,
+            ridge_threshold: self.ridge_threshold,
+            grass_sprites: [
+                self.get_grass_sprite_or_default(0),
+                self.get_grass_sprite_or_default(1),
+                self.get_grass_sprite_or_default(2),
+                self.get_grass_sprite_or_default(3),
+                self.get_grass_sprite_or_default(4),
+                self.get_grass_sprite_or_default(5),
+            ],
+            ground_colors: [
+                self.ground_color,
+                self.ground_color_2,
+                self.ground_color_3,
+                self.ground_color_4,
+                self.ground_color_5,
+                self.ground_color_6,
+            ],
+            tex_has_grass: [
+                self.tex2_has_grass,
+                self.tex3_has_grass,
+                self.tex4_has_grass,
+                self.tex5_has_grass,
+                self.tex6_has_grass,
+            ],
+            grass_mesh: self.grass_mesh.clone(),
+        }
+    }
+
+    /// Get grass sprite for a texture slot, falling back to default for base grass (slot 0).
+    fn get_grass_sprite_or_default(&self, index: usize) -> Option<Gd<Texture2D>> {
+        let sprite = match index {
+            0 => &self.grass_sprite,
+            1 => &self.grass_sprite_tex_2,
+            2 => &self.grass_sprite_tex_3,
+            3 => &self.grass_sprite_tex_4,
+            4 => &self.grass_sprite_tex_5,
+            5 => &self.grass_sprite_tex_6,
+            _ => return None,
+        };
+
+        if sprite.is_some() {
+            return sprite.clone();
+        }
+
+        // Load default grass sprite for all slots if no custom texture assigned
+        let mut loader = ResourceLoader::singleton();
+        let path = "res://resources/textures/grass_leaf_sprite.png";
+        if loader.exists(path) {
+            return loader
+                .load(path)
+                .and_then(|r| r.try_cast::<Texture2D>().ok());
+        }
+
+        None
     }
 }
