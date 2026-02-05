@@ -6,7 +6,8 @@ use godot::classes::{
     Button, ButtonGroup, Camera3D, CenterContainer, CheckBox, ColorPickerButton, EditorPlugin,
     EditorResourcePicker, HBoxContainer, HSeparator, HSlider, IEditorPlugin, Input, InputEvent,
     InputEventKey, InputEventMouseButton, InputEventMouseMotion, Label, MarginContainer,
-    OptionButton, PhysicsRayQueryParameters3D, ScrollContainer, SpinBox, VBoxContainer,
+    OptionButton, PhysicsRayQueryParameters3D, ScrollContainer, SpinBox, StaticBody3D,
+    VBoxContainer,
 };
 use godot::prelude::*;
 
@@ -192,6 +193,12 @@ pub struct PixyTerrainPlugin {
     #[init(val = None)]
     current_quick_paint: Option<Gd<PixyQuickPaint>>,
 
+    // Collision debug toggle
+    #[init(val = false)]
+    show_collision_wireframes: bool,
+    #[init(val = None)]
+    collision_toggle_button: Option<Gd<CheckBox>>,
+
     // Chunk management state
     #[init(val = None)]
     selected_chunk_coords: Option<Vector2i>,
@@ -292,6 +299,20 @@ impl IEditorPlugin for PixyTerrainPlugin {
             tool_buttons.push(btn);
         }
 
+        // ── Debug Options ──
+        let debug_sep = HSeparator::new_alloc();
+        toolbar.add_child(&debug_sep);
+
+        let mut collision_toggle = CheckBox::new_alloc();
+        collision_toggle.set_text("Show Colliders");
+        collision_toggle.set_tooltip_text("Toggle collision wireframe visibility");
+        collision_toggle.set_pressed(false);
+        collision_toggle.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        let collision_callable =
+            Callable::from_object_method(&plugin_ref, "on_collision_toggle_changed");
+        collision_toggle.connect("toggled", &collision_callable);
+        toolbar.add_child(&collision_toggle);
+
         // Pre-press Brush button (deferred to avoid triggering signal during enter_tree)
         if let Some(first_btn) = tool_buttons.first_mut() {
             first_btn.call_deferred("set_pressed", &[true.to_variant()]);
@@ -334,6 +355,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         self.generate_button = Some(generate_button);
         self.clear_button = Some(clear_button);
         self.tool_buttons = tool_buttons;
+        self.collision_toggle_button = Some(collision_toggle);
 
         // Register gizmo plugin
         let mut gizmo_plugin = Gd::<PixyTerrainGizmoPlugin>::default();
@@ -365,6 +387,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         self.generate_button = None;
         self.clear_button = None;
+        self.collision_toggle_button = None;
         self.tool_buttons.clear();
         self.toolbar = None;
         self.attributes_hbox = None;
@@ -403,6 +426,8 @@ impl IEditorPlugin for PixyTerrainPlugin {
             if let Ok(node) = obj.try_cast::<Node>() {
                 self.current_terrain = Some(node);
                 self.set_ui_visible(true);
+                self.base_mut()
+                    .call_deferred("apply_collision_visibility_deferred", &[]);
                 return;
             }
         }
@@ -806,6 +831,17 @@ impl PixyTerrainPlugin {
         self.do_clear();
     }
 
+    #[func]
+    fn on_collision_toggle_changed(&mut self, pressed: bool) {
+        self.show_collision_wireframes = pressed;
+        self.apply_collision_visibility_to_all_chunks();
+    }
+
+    #[func]
+    fn apply_collision_visibility_deferred(&self) {
+        self.apply_collision_visibility_to_all_chunks();
+    }
+
     /// Deferred rebuild of attributes panel - safe to call to_gd() here.
     #[func]
     fn _rebuild_attributes_deferred(&mut self) {
@@ -1027,6 +1063,35 @@ impl PixyTerrainPlugin {
 // ═══════════════════════════════════════════
 
 impl PixyTerrainPlugin {
+    fn apply_collision_visibility_to_all_chunks(&self) {
+        let Some(ref terrain_node) = self.current_terrain else {
+            return;
+        };
+        if !terrain_node.is_instance_valid() {
+            return;
+        }
+        let terrain: Gd<PixyTerrain> = terrain_node.clone().cast();
+        let t = terrain.bind();
+        let keys = t.get_chunk_keys();
+        for i in 0..keys.len() {
+            let k = keys[i];
+            if let Some(chunk) = t.get_chunk(k.x as i32, k.y as i32) {
+                Self::set_chunk_collision_visible(&chunk.upcast::<Node>(), self.show_collision_wireframes);
+            }
+        }
+    }
+
+    fn set_chunk_collision_visible(chunk_node: &Gd<Node>, visible: bool) {
+        let children = chunk_node.get_children();
+        for i in 0..children.len() {
+            if let Some(child) = children.get(i) {
+                if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
+                    body.set_visible(visible);
+                }
+            }
+        }
+    }
+
     fn set_ui_visible(&mut self, visible: bool) {
         if let Some(ref mut margin) = self.margin_container {
             margin.set_visible(visible);
@@ -2160,6 +2225,8 @@ impl PixyTerrainPlugin {
 
     fn do_generate(&mut self) {
         self.call_terrain_method("regenerate");
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
     }
 
     fn do_clear(&mut self) {
@@ -3221,6 +3288,8 @@ impl PixyTerrainPlugin {
             &[undo_patterns.to_variant()],
         );
         undo_redo.commit_action();
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
     }
 
     /// Register undo/redo for chunk add/remove operations.
@@ -3266,5 +3335,7 @@ impl PixyTerrainPlugin {
             );
             undo_redo.commit_action();
         }
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
     }
 }
