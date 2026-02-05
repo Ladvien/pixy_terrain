@@ -127,6 +127,9 @@ pub struct PixyTerrainChunk {
     /// Cached terrain configuration (set once at initialization, avoids needing to bind terrain).
     terrain_config: TerrainConfig,
 
+    /// Terrain material reference for mesh regeneration (stored so regenerate_mesh() can use it).
+    terrain_material: Option<Gd<ShaderMaterial>>,
+
     /// Grass planter child node.
     grass_planter: Option<Gd<PixyGrassPlanter>>,
 }
@@ -155,6 +158,7 @@ impl PixyTerrainChunk {
             is_new_chunk: false,
             skip_save_on_exit: false,
             terrain_config: TerrainConfig::default(),
+            terrain_material: None,
             grass_planter: None,
         }
     }
@@ -343,11 +347,19 @@ impl PixyTerrainChunk {
     }
 
     /// Set height at a specific grid coordinate.
+    /// Guards against NaN/Inf values to prevent mesh corruption.
     pub fn set_height_at(&mut self, x: i32, z: i32, h: f32) {
         let z_idx = z as usize;
         let x_idx = x as usize;
         if z_idx < self.height_map.len() && x_idx < self.height_map[z_idx].len() {
-            self.height_map[z_idx][x_idx] = h;
+            // Guard against NaN/Inf - use 0.0 as fallback
+            let safe_h = if h.is_finite() {
+                h
+            } else {
+                godot_warn!("NaN/Inf height detected at ({}, {}), using 0.0", x, z);
+                0.0
+            };
+            self.height_map[z_idx][x_idx] = safe_h;
         }
     }
 
@@ -460,6 +472,9 @@ impl PixyTerrainChunk {
             return;
         }
 
+        // Store terrain material reference for use by regenerate_mesh()
+        self.terrain_material = terrain_material.clone();
+
         let dim = self.get_terrain_dimensions();
 
         // Initialize needs_update grid
@@ -557,14 +572,27 @@ impl PixyTerrainChunk {
     }
 
     /// Rebuild the mesh using SurfaceTool with CUSTOM0-2 format.
-    /// This version is for internal use when material is not passed (uses None).
+    /// Uses the stored terrain_material reference (set during initialize_terrain).
     pub fn regenerate_mesh(&mut self) {
-        self.regenerate_mesh_with_material(None);
+        // Use stored material reference instead of None
+        let material = self.terrain_material.clone();
+        self.regenerate_mesh_with_material(material);
     }
 
     /// Rebuild the mesh using SurfaceTool with CUSTOM0-2 format.
     /// Material is passed as parameter to avoid needing to bind terrain.
     pub fn regenerate_mesh_with_material(&mut self, terrain_material: Option<Gd<ShaderMaterial>>) {
+        // Clear geometry cache to force full regeneration (debug: isolate caching issues)
+        self.cell_geometry.clear();
+
+        // Mark all cells as needing update
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        for z in 0..(dim_z - 1) {
+            for x in 0..(dim_x - 1) {
+                self.needs_update[z as usize][x as usize] = true;
+            }
+        }
+
         let mut st = SurfaceTool::new_gd();
         st.begin(PrimitiveType::TRIANGLES);
         st.set_custom_format(0, CustomFormat::RGBA_FLOAT);
@@ -675,7 +703,7 @@ impl PixyTerrainChunk {
                 // If geometry didn't change, replay cached geometry
                 if !self.needs_update[z as usize][x as usize] {
                     if let Some(geo) = self.cell_geometry.get(&key) {
-                        replay_geometry(st, geo);
+                        let _ = replay_geometry(st, geo);
                         continue;
                     }
                 }
@@ -690,6 +718,7 @@ impl PixyTerrainChunk {
                 let dy = self.height_map[(z + 1) as usize][(x + 1) as usize];
 
                 // Update per-cell context fields (reuse shared ctx)
+                // CRITICAL: Reset ALL per-cell state to avoid corruption from previous cells
                 ctx.heights = [ay, by, dy, cy];
                 ctx.edges = [true; 4];
                 ctx.rotation = 0;
@@ -699,13 +728,39 @@ impl PixyTerrainChunk {
                 ctx.cell_is_boundary = false;
                 ctx.floor_mode = true;
 
+                // Reset color/material state that persists from previous cell
+                ctx.cell_floor_lower_color_0 = default_color;
+                ctx.cell_floor_upper_color_0 = default_color;
+                ctx.cell_floor_lower_color_1 = default_color;
+                ctx.cell_floor_upper_color_1 = default_color;
+                ctx.cell_wall_lower_color_0 = default_color;
+                ctx.cell_wall_upper_color_0 = default_color;
+                ctx.cell_wall_lower_color_1 = default_color;
+                ctx.cell_wall_upper_color_1 = default_color;
+                ctx.cell_mat_a = 0;
+                ctx.cell_mat_b = 0;
+                ctx.cell_mat_c = 0;
+
                 let mut geo = CellGeometry::default();
 
                 // Generate geometry for this cell
                 marching_squares::generate_cell(&mut ctx, &mut geo);
 
+                // Validate geometry before commit - must have complete triangles
+                if geo.verts.len() % 3 != 0 {
+                    godot_error!(
+                        "Cell ({}, {}) generated invalid geometry: {} verts (not divisible by 3). Heights: [{:.2}, {:.2}, {:.2}, {:.2}]. Replacing with flat floor.",
+                        x, z, geo.verts.len(),
+                        ctx.heights[0], ctx.heights[1], ctx.heights[2], ctx.heights[3]
+                    );
+                    // Reset and generate safe fallback (flat floor)
+                    geo = CellGeometry::default();
+                    ctx.rotation = 0;
+                    marching_squares::add_full_floor(&mut ctx, &mut geo);
+                }
+
                 // Commit geometry to SurfaceTool
-                replay_geometry(st, &geo);
+                let _ = replay_geometry(st, &geo);
 
                 // Cache the geometry
                 self.cell_geometry.insert(key, geo);
@@ -725,12 +780,28 @@ impl PixyTerrainChunk {
     }
 
     /// Mark a cell as needing update.
+    /// Also marks adjacent cells (8 neighbors) because their geometry depends on edge connectivity.
     pub fn notify_needs_update(&mut self, z: i32, x: i32) {
+        self.mark_cell_needs_update(x, z);
+    }
+
+    /// Mark a cell and its 8 neighbors as needing update.
+    /// Adjacent cells must be invalidated because marching squares geometry depends on
+    /// edge connectivity with neighbors - a height change in one cell affects how
+    /// adjacent cells render their shared edges.
+    fn mark_cell_needs_update(&mut self, x: i32, z: i32) {
         let (dim_x, dim_z) = self.get_dimensions_xz();
-        if z < 0 || z >= dim_z - 1 || x < 0 || x >= dim_x - 1 {
-            return;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let nx = x + dx;
+                let nz = z + dz;
+                if nx >= 0 && nx < dim_x - 1 && nz >= 0 && nz < dim_z - 1 {
+                    self.needs_update[nz as usize][nx as usize] = true;
+                    // Also invalidate cached geometry for this cell
+                    self.cell_geometry.remove(&[nx, nz]);
+                }
+            }
         }
-        self.needs_update[z as usize][x as usize] = true;
     }
 
     /// Configure collision layer on the StaticBody3D created by create_trimesh_collision().
@@ -760,9 +831,31 @@ impl PixyTerrainChunk {
 }
 
 /// Replay cached geometry into a SurfaceTool.
-fn replay_geometry(st: &mut Gd<SurfaceTool>, geo: &CellGeometry) {
+/// Returns true if geometry was valid and added, false if skipped due to invalid vertex count.
+fn replay_geometry(st: &mut Gd<SurfaceTool>, geo: &CellGeometry) -> bool {
+    // CRITICAL: Skip cells with incomplete triangles to prevent index errors
+    if geo.verts.len() % 3 != 0 {
+        godot_warn!(
+            "Skipping cell with invalid vertex count: {} (not divisible by 3)",
+            geo.verts.len()
+        );
+        return false;
+    }
+
     for i in 0..geo.verts.len() {
-        // Smooth group: 0 for floor, -1 for wall
+        // Additional NaN guard on vertex position
+        let vert = geo.verts[i];
+        if !vert.x.is_finite() || !vert.y.is_finite() || !vert.z.is_finite() {
+            godot_warn!(
+                "Skipping vertex with NaN/Inf coordinates: ({}, {}, {})",
+                vert.x,
+                vert.y,
+                vert.z
+            );
+            // Skip the entire cell since we can't have incomplete triangles
+            return false;
+        }
+
         let smooth_group = if geo.is_floor[i] { 0 } else { u32::MAX };
         st.set_smooth_group(smooth_group);
         st.set_uv(geo.uvs[i]);
@@ -771,6 +864,7 @@ fn replay_geometry(st: &mut Gd<SurfaceTool>, geo: &CellGeometry) {
         st.set_custom(0, geo.colors_1[i]);
         st.set_custom(1, geo.grass_mask[i]);
         st.set_custom(2, geo.mat_blend[i]);
-        st.add_vertex(geo.verts[i]);
+        st.add_vertex(vert);
     }
+    true
 }

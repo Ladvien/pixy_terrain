@@ -214,11 +214,60 @@ pub fn add_point(
     uv_y: f32,
     diag_midpoint: bool,
 ) {
+    // Guard ALL input coordinates against NaN/Inf - replace with safe fallbacks
+    // instead of skipping (skipping would cause incomplete triangles)
+    let safe_x = if x.is_finite() {
+        x
+    } else {
+        godot_warn!(
+            "NaN/Inf x-coordinate at cell ({}, {}): x={}. Using 0.5 fallback.",
+            ctx.cell_coords.x,
+            ctx.cell_coords.y,
+            x
+        );
+        0.5
+    };
+    let safe_y = if y.is_finite() {
+        y
+    } else {
+        godot_warn!(
+            "NaN/Inf y-coordinate at cell ({}, {}): y={}. Using 0.0 fallback.",
+            ctx.cell_coords.x,
+            ctx.cell_coords.y,
+            y
+        );
+        0.0
+    };
+    let safe_z = if z.is_finite() {
+        z
+    } else {
+        godot_warn!(
+            "NaN/Inf z-coordinate at cell ({}, {}): z={}. Using 0.5 fallback.",
+            ctx.cell_coords.x,
+            ctx.cell_coords.y,
+            z
+        );
+        0.5
+    };
+    x = safe_x;
+    z = safe_z;
+
     // Rotate the point
     for _ in 0..ctx.rotation {
         let temp = x;
         x = 1.0 - z;
         z = temp;
+    }
+
+    // Post-rotation NaN check (rotation math could produce NaN if inputs were bad)
+    if !x.is_finite() || !z.is_finite() {
+        godot_warn!(
+            "NaN after rotation at cell ({}, {}). Using center fallback.",
+            ctx.cell_coords.x,
+            ctx.cell_coords.y
+        );
+        x = 0.5;
+        z = 0.5;
     }
 
     // UV: floor uses provided values, walls always (1, 1)
@@ -297,7 +346,11 @@ pub fn add_point(
             source_map_0[(cc.y * dim_x + cc.x) as usize]
         } else {
             let height_range = ctx.cell_max_height - ctx.cell_min_height;
-            let height_factor = ((y - ctx.cell_min_height) / height_range).clamp(0.0, 1.0);
+            let height_factor = if height_range > 0.001 {
+                ((y - ctx.cell_min_height) / height_range).clamp(0.0, 1.0)
+            } else {
+                0.5 // Flat surface - use middle blend to avoid division by zero
+            };
             let (lower_0, upper_0) = if use_wall_colors {
                 (ctx.cell_wall_lower_color_0, ctx.cell_wall_upper_color_0)
             } else {
@@ -366,7 +419,11 @@ pub fn add_point(
             source_map_1[(cc.y * dim_x + cc.x) as usize]
         } else {
             let height_range = ctx.cell_max_height - ctx.cell_min_height;
-            let height_factor = ((y - ctx.cell_min_height) / height_range).clamp(0.0, 1.0);
+            let height_factor = if height_range > 0.001 {
+                ((y - ctx.cell_min_height) / height_range).clamp(0.0, 1.0)
+            } else {
+                0.5 // Flat surface - use middle blend to avoid division by zero
+            };
             let (lower_1, upper_1) = if use_wall_colors {
                 (ctx.cell_wall_lower_color_1, ctx.cell_wall_upper_color_1)
             } else {
@@ -413,12 +470,40 @@ pub fn add_point(
         mat_blend.a = 2.0;
     }
 
-    // Compute final vertex position
+    // Compute final vertex position (NaN already guarded at function entry)
     let vert = Vector3::new(
         (cc.x as f32 + x) * ctx.cell_size.x,
-        y,
+        safe_y,
         (cc.y as f32 + z) * ctx.cell_size.y,
     );
+
+    // Final sanity check on computed vertex
+    if !vert.x.is_finite() || !vert.y.is_finite() || !vert.z.is_finite() {
+        godot_error!(
+            "NaN in final vertex at cell ({}, {}): ({}, {}, {}). Using origin fallback.",
+            cc.x,
+            cc.y,
+            vert.x,
+            vert.y,
+            vert.z
+        );
+        // Use a safe fallback vertex at cell center
+        let fallback_vert = Vector3::new(
+            (cc.x as f32 + 0.5) * ctx.cell_size.x,
+            0.0,
+            (cc.y as f32 + 0.5) * ctx.cell_size.y,
+        );
+        geo.verts.push(fallback_vert);
+        geo.uvs.push(uv);
+        geo.uv2s
+            .push(Vector2::new(fallback_vert.x, fallback_vert.z) / ctx.cell_size);
+        geo.colors_0.push(color_0);
+        geo.colors_1.push(color_1);
+        geo.grass_mask.push(g_mask);
+        geo.mat_blend.push(mat_blend);
+        geo.is_floor.push(ctx.floor_mode);
+        return;
+    }
 
     // UV2: floor uses world XZ / cell_size, walls use global XY+ZY with chunk offset
     let uv2 = if ctx.floor_mode {
@@ -694,6 +779,9 @@ pub fn add_diagonal_floor(
 /// Generate geometry for a single cell based on the 17-case marching squares algorithm.
 /// For Phase 1, only Case 0 (full floor) is implemented. Other cases will be added in Phase 2.
 pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
+    // Track initial vertex count for validation
+    let initial_vert_count = geo.verts.len();
+
     let ay = ctx.ay();
     let by = ctx.by();
     let cy = ctx.cy();
@@ -805,8 +893,8 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_inner_corner(ctx, geo, true, true, false, false, false);
             case_found = true;
         }
-        // Case 7: A lowest, BD connected, C higher than D
-        // (GDScript Case 8: inner corner + custom floor/wall/upper corner)
+        // Case 7: A lowest, BD connected (not CD), C higher than D (Yugen Case 8)
+        // Inner corner + custom floor/wall/upper corner
         else if ctx.is_lower(ay, by)
             && ctx.is_lower(ay, cy)
             && ctx.bd()
@@ -857,8 +945,8 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
 
             case_found = true;
         }
-        // Case 8: A lowest, CD connected, B higher than D
-        // (GDScript Case 9: inner corner + custom floor/wall/upper corner)
+        // Case 8: A lowest, CD connected (not BD), B higher than D (Yugen Case 9)
+        // Inner corner + custom floor/wall/upper corner
         else if ctx.is_lower(ay, by)
             && ctx.is_lower(ay, cy)
             && !ctx.bd()
@@ -924,7 +1012,7 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_outer_corner(ctx, geo, true, false, false, -1.0);
             case_found = true;
         }
-        // Case 10: A only lower than B (not C)
+        // Case 10: A only lower than B (not C), edge on CD side
         else if ctx.is_lower(ay, by)
             && ctx.is_merged(ay, cy)
             && ctx.is_higher(by, dy)
@@ -935,7 +1023,7 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_edge(ctx, geo, true, true, 0.0, 1.0);
             case_found = true;
         }
-        // Case 11: A lower than C, merged with B
+        // Case 11: A lower than C, merged with B, edge on AB side
         else if ctx.is_merged(ay, by)
             && ctx.is_lower(ay, cy)
             && ctx.is_higher(cy, dy)
@@ -1149,6 +1237,18 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
         // Fallback: unknown cell configuration, place a full floor
         ctx.rotation = 0;
         add_full_floor(ctx, geo);
+    }
+
+    // Validate vertex count after case handling
+    let final_vert_count = geo.verts.len();
+    let added = final_vert_count - initial_vert_count;
+    if added % 3 != 0 {
+        godot_error!(
+            "GEOMETRY BUG: Case at rotation {} for cell ({},{}) added {} vertices (not divisible by 3)! Heights: [{:.2}, {:.2}, {:.2}, {:.2}], Edges: [{}, {}, {}, {}]",
+            ctx.rotation, ctx.cell_coords.x, ctx.cell_coords.y, added,
+            ctx.heights[0], ctx.heights[1], ctx.heights[2], ctx.heights[3],
+            ctx.edges[0], ctx.edges[1], ctx.edges[2], ctx.edges[3]
+        );
     }
 }
 
