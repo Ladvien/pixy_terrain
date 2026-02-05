@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use godot::classes::base_material_3d::{DepthDrawMode, ShadingMode, Transparency};
 use godot::classes::{
     EditorNode3DGizmo, EditorNode3DGizmoPlugin, IEditorNode3DGizmoPlugin, StandardMaterial3D,
 };
@@ -110,20 +111,26 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
             }
         }
 
-        // ── Draw pattern visualization ──
+        // ── Draw pattern visualization with height preview ──
         let pattern_mat = self.base_mut().get_material("brush_pattern");
 
         if !state.draw_pattern.is_empty() {
             let mut lines = PackedVector3Array::new();
+
+            // Calculate height difference for setting mode preview
+            let height_diff = if state.is_setting && state.draw_height_set {
+                state.brush_position.y - state.draw_height
+            } else {
+                0.0
+            };
 
             for (chunk_key, cells) in &state.draw_pattern {
                 for (cell_key, sample) in cells {
                     let world_x = (chunk_key[0] * (dim.x - 1) + cell_key[0]) as f32 * cell_size.x;
                     let world_z = (chunk_key[1] * (dim.z - 1) + cell_key[1]) as f32 * cell_size.y;
 
-                    let y = if state.flatten {
-                        state.draw_height
-                    } else if let Some(chunk) = t.get_chunk(chunk_key[0], chunk_key[1]) {
+                    // Get base height from terrain
+                    let base_y = if let Some(chunk) = t.get_chunk(chunk_key[0], chunk_key[1]) {
                         chunk
                             .bind()
                             .get_height(Vector2i::new(cell_key[0], cell_key[1]))
@@ -131,8 +138,27 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
                         0.0
                     };
 
+                    // Calculate preview height based on mode
+                    let preview_y = if state.is_setting && state.draw_height_set {
+                        // Setting mode: show height preview at predicted final position
+                        if state.flatten {
+                            // Flatten mode: lerp towards brush_position.y
+                            let t = *sample;
+                            base_y + (state.brush_position.y - base_y) * t
+                        } else {
+                            // Non-flatten: add height delta scaled by sample
+                            base_y + height_diff * *sample
+                        }
+                    } else if state.flatten {
+                        // Flatten mode (not in setting): show at draw_height
+                        state.draw_height
+                    } else {
+                        // Default: show at terrain height
+                        base_y
+                    };
+
                     let half = *sample * cell_size.x * 0.4;
-                    let center = Vector3::new(world_x, y + 0.05, world_z);
+                    let center = Vector3::new(world_x, preview_y + 0.2, world_z);
 
                     // Draw a small square for each pattern cell
                     lines.push(center + Vector3::new(-half, 0.0, -half));
@@ -169,18 +195,18 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
                         let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
                         brush_lines.push(Vector3::new(
                             pos.x + half * a0.cos(),
-                            pos.y + 0.1,
+                            pos.y + 0.3,
                             pos.z + half * a0.sin(),
                         ));
                         brush_lines.push(Vector3::new(
                             pos.x + half * a1.cos(),
-                            pos.y + 0.1,
+                            pos.y + 0.3,
                             pos.z + half * a1.sin(),
                         ));
                     }
                 }
                 BrushType::Square => {
-                    let y = pos.y + 0.1;
+                    let y = pos.y + 0.3;
                     brush_lines.push(Vector3::new(pos.x - half, y, pos.z - half));
                     brush_lines.push(Vector3::new(pos.x + half, y, pos.z - half));
                     brush_lines.push(Vector3::new(pos.x + half, y, pos.z - half));
@@ -212,10 +238,23 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
 
 impl PixyTerrainGizmoPlugin {
     pub fn create_materials(&mut self) {
-        self.base_mut()
-            .create_material("brush", Color::from_rgba(1.0, 1.0, 1.0, 0.5));
-        self.base_mut()
-            .create_material("brush_pattern", Color::from_rgba(0.7, 0.7, 0.7, 0.5));
+        // Create brush material with depth draw disabled so it renders on top of grass/terrain
+        let mut brush_mat = StandardMaterial3D::new_gd();
+        brush_mat.set_depth_draw_mode(DepthDrawMode::DISABLED);
+        brush_mat.set_shading_mode(ShadingMode::UNSHADED);
+        brush_mat.set_transparency(Transparency::ALPHA);
+        brush_mat.set_albedo(Color::from_rgba(1.0, 1.0, 1.0, 0.7));
+        self.base_mut().add_material("brush", &brush_mat);
+
+        // Brush pattern material (draw pattern visualization)
+        let mut pattern_mat = StandardMaterial3D::new_gd();
+        pattern_mat.set_depth_draw_mode(DepthDrawMode::DISABLED);
+        pattern_mat.set_shading_mode(ShadingMode::UNSHADED);
+        pattern_mat.set_transparency(Transparency::ALPHA);
+        pattern_mat.set_albedo(Color::from_rgba(0.7, 0.7, 0.7, 0.6));
+        self.base_mut().add_material("brush_pattern", &pattern_mat);
+
+        // Chunk management materials (these can use basic create_material since they're at Y=0)
         self.base_mut()
             .create_material("removechunk", Color::from_rgba(1.0, 0.0, 0.0, 0.5));
         self.base_mut()
@@ -284,6 +323,7 @@ fn draw_chunk_lines(
 }
 
 /// State snapshot passed from editor plugin to gizmo plugin.
+#[allow(dead_code)]
 pub struct GizmoState {
     pub mode: TerrainToolMode,
     pub brush_type: BrushType,
@@ -293,6 +333,12 @@ pub struct GizmoState {
     pub flatten: bool,
     pub draw_height: f32,
     pub draw_pattern: HashMap<[i32; 2], HashMap<[i32; 2], f32>>,
+    /// Whether the plugin is in setting mode (first click done, waiting for drag/release).
+    pub is_setting: bool,
+    /// Whether draw_height has been captured for this setting session.
+    pub draw_height_set: bool,
+    /// Whether the plugin is in active drawing mode.
+    pub is_drawing: bool,
 }
 
 /// Initialize gizmo materials. Must be called after construction.

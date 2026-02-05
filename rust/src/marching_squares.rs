@@ -880,7 +880,7 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             && ctx.is_higher(by, cy)
         {
             add_inner_corner(ctx, geo, true, false, true, false, false);
-            add_diagonal_floor(ctx, geo, cy, cy, true, true);
+            add_diagonal_floor(ctx, geo, by, cy, true, true);
             ctx.rotate_cell(2);
             add_inner_corner(ctx, geo, true, false, true, false, false);
             // Higher corner B
@@ -1012,26 +1012,22 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             add_outer_corner(ctx, geo, true, false, false, -1.0);
             case_found = true;
         }
-        // Case 10: A only lower than B (not C), edge on CD side
-        else if ctx.is_lower(ay, by)
-            && ctx.is_merged(ay, cy)
-            && ctx.is_higher(by, dy)
-            && ctx.cd()
-            && !ctx.ab()
+        // Case 10: Inner corner at A with edge atop BD (GDScript Case 10)
+        // A is lower than B and C, D is higher than C, BD edge connected
+        else if ctx.is_lower(ay, by) && ctx.is_lower(ay, cy) && ctx.is_higher(dy, cy) && ctx.bd()
         {
+            add_inner_corner(ctx, geo, true, false, true, true, false);
             ctx.rotate_cell(1);
-            add_edge(ctx, geo, true, true, 0.0, 1.0);
+            add_edge(ctx, geo, false, true, 0.0, 1.0);
             case_found = true;
         }
-        // Case 11: A lower than C, merged with B, edge on AB side
-        else if ctx.is_merged(ay, by)
-            && ctx.is_lower(ay, cy)
-            && ctx.is_higher(cy, dy)
-            && ctx.ab()
-            && !ctx.cd()
+        // Case 11: Inner corner at A with edge atop CD (GDScript Case 11)
+        // A is lower than B and C, D is higher than B, CD edge connected
+        else if ctx.is_lower(ay, by) && ctx.is_lower(ay, cy) && ctx.is_higher(dy, by) && ctx.cd()
         {
-            ctx.rotate_cell(-1);
-            add_edge(ctx, geo, true, true, 0.0, 1.0);
+            add_inner_corner(ctx, geo, true, false, true, false, true);
+            ctx.rotate_cell(2);
+            add_edge(ctx, geo, false, true, 0.0, 1.0);
             case_found = true;
         }
         // Case 12 (GDScript): Clockwise upwards spiral A<B<D<C
@@ -1043,9 +1039,9 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
         {
             add_inner_corner(ctx, geo, true, false, true, false, true);
             ctx.rotate_cell(2);
-            add_edge(ctx, geo, false, true, 0.0, 0.5);
+            add_edge(ctx, geo, true, true, 0.0, 0.5);
             ctx.rotate_cell(1);
-            add_outer_corner(ctx, geo, false, true, true, cy);
+            add_outer_corner(ctx, geo, true, true, true, cy);
             case_found = true;
         }
         // Case 13 (GDScript): Clockwise upwards spiral A<C<D<B
@@ -1057,8 +1053,8 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
         {
             add_inner_corner(ctx, geo, true, false, true, true, false);
             ctx.rotate_cell(1);
-            add_edge(ctx, geo, false, true, 0.5, 1.0);
-            add_outer_corner(ctx, geo, false, true, true, by);
+            add_edge(ctx, geo, true, true, 0.5, 1.0);
+            add_outer_corner(ctx, geo, true, true, true, by);
             case_found = true;
         }
         // Case 14 (GDScript): A<B<C<D staircase pattern
@@ -1066,17 +1062,17 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
         else if ctx.is_lower(ay, by) && ctx.is_lower(by, cy) && ctx.is_lower(cy, dy) {
             add_inner_corner(ctx, geo, true, false, true, false, true);
             ctx.rotate_cell(2);
-            add_edge(ctx, geo, false, true, 0.5, 1.0);
-            add_outer_corner(ctx, geo, false, true, true, by);
+            add_edge(ctx, geo, true, true, 0.5, 1.0);
+            add_outer_corner(ctx, geo, true, true, true, by);
             case_found = true;
         }
         // Case 15 (GDScript): A<C<B<D staircase variant
         else if ctx.is_lower(ay, cy) && ctx.is_lower(cy, by) && ctx.is_lower(by, dy) {
             add_inner_corner(ctx, geo, true, false, true, true, false);
             ctx.rotate_cell(1);
-            add_edge(ctx, geo, false, true, 0.0, 0.5);
+            add_edge(ctx, geo, true, true, 0.0, 0.5);
             ctx.rotate_cell(1);
-            add_outer_corner(ctx, geo, false, true, true, cy);
+            add_outer_corner(ctx, geo, true, true, true, cy);
             case_found = true;
         }
         // Case 12 (original): A only higher than C

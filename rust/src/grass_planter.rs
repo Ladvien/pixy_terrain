@@ -391,7 +391,7 @@ impl PixyGrassPlanter {
         index: &mut usize,
         end_index: usize,
         mm: &mut Gd<MultiMesh>,
-        cell_size: Vector2,
+        _cell_size: Vector2,
         ledge_threshold: f32,
         ridge_threshold: f32,
         tex_has_grass: &[bool; 6],
@@ -542,11 +542,11 @@ impl PixyGrassPlanter {
                             _ => 0.0, // base grass
                         };
 
-                        // Use the terrain's ground color for the grass tint
-                        let grass_color =
-                            self.get_ground_color_for_texture(texture_id, cell_size, p);
-                        let instance_color =
-                            Color::from_rgba(grass_color.r, grass_color.g, grass_color.b, alpha);
+                        // Set instance_color to WHITE so shader multiplication produces correct brightness.
+                        // The shader computes: instance_color * grass_base_color
+                        // Using WHITE (1.0) means: 1.0 * grass_base_color = grass_base_color (unchanged)
+                        // Alpha channel encodes the texture slot ID for sprite selection.
+                        let instance_color = Color::from_rgba(1.0, 1.0, 1.0, alpha);
                         mm.set_instance_custom_data(*index as i32, instance_color);
                     } else {
                         mm.set_instance_transform(*index as i32, hidden_transform);
@@ -559,27 +559,6 @@ impl PixyGrassPlanter {
             }
 
             tri_idx += 3;
-        }
-    }
-
-    /// Get ground color for a given texture slot from cached grass config.
-    fn get_ground_color_for_texture(
-        &self,
-        texture_id: i32,
-        _cell_size: Vector2,
-        _position: Vector3,
-    ) -> Color {
-        let Some(config) = self.grass_config.as_ref() else {
-            return Color::from_rgba(0.4, 0.5, 0.3, 1.0);
-        };
-        match texture_id {
-            1 => config.ground_colors[0],
-            2 => config.ground_colors[1],
-            3 => config.ground_colors[2],
-            4 => config.ground_colors[3],
-            5 => config.ground_colors[4],
-            6 => config.ground_colors[5],
-            _ => config.ground_colors[0],
         }
     }
 }

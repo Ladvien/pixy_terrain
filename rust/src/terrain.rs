@@ -10,6 +10,9 @@ use crate::marching_squares::MergeMode;
 /// Path to the terrain shader file.
 const TERRAIN_SHADER_PATH: &str = "res://resources/shaders/mst_terrain.gdshader";
 
+/// Path to the default ground noise texture.
+const DEFAULT_GROUND_TEXTURE_PATH: &str = "res://resources/textures/default_ground_noise.tres";
+
 /// Texture uniform names in the shader (16 slots, index 0-15).
 const TEXTURE_UNIFORM_NAMES: [&str; 16] = [
     "vc_tex_rr",
@@ -631,6 +634,90 @@ impl PixyTerrain {
             }
         }
     }
+
+    /// Apply a composite pattern action. Called by undo/redo.
+    /// `patterns` is a VarDictionary with keys: "height", "color_0", "color_1",
+    /// "wall_color_0", "wall_color_1", "grass_mask".
+    /// Each value is Dict<Vector2i(chunk), Dict<Vector2i(cell), value>>.
+    #[func]
+    pub fn apply_composite_pattern(&mut self, patterns: VarDictionary) {
+        let mut affected_chunks: HashMap<[i32; 2], Gd<PixyTerrainChunk>> = HashMap::new();
+
+        // Apply order: wall_color_0, wall_color_1, height, grass_mask, color_0, color_1
+        let keys_in_order = [
+            "wall_color_0",
+            "wall_color_1",
+            "height",
+            "grass_mask",
+            "color_0",
+            "color_1",
+        ];
+
+        for &key in &keys_in_order {
+            let Some(outer_variant) = patterns.get(key) else {
+                continue;
+            };
+            let outer_dict: VarDictionary = outer_variant.to();
+
+            // Snapshot outer dict to avoid borrow conflicts with iter_shared
+            let chunk_entries: Vec<(Vector2i, VarDictionary)> = outer_dict
+                .iter_shared()
+                .map(|(k, v)| (k.to::<Vector2i>(), v.to::<VarDictionary>()))
+                .collect();
+
+            for (chunk_coords, cell_dict) in chunk_entries {
+                let Some(mut chunk) = self.get_chunk(chunk_coords.x, chunk_coords.y) else {
+                    continue;
+                };
+
+                affected_chunks
+                    .entry([chunk_coords.x, chunk_coords.y])
+                    .or_insert_with(|| chunk.clone());
+
+                // Snapshot cell data to release iterator's borrow before calling bind_mut
+                let cell_entries: Vec<(Vector2i, Variant)> = cell_dict
+                    .iter_shared()
+                    .map(|(k, v)| (k.to::<Vector2i>(), v.clone()))
+                    .collect();
+
+                for (cell, cell_value) in cell_entries {
+                    let mut c = chunk.bind_mut();
+                    match key {
+                        "height" => {
+                            let h: f32 = cell_value.to();
+                            c.draw_height(cell.x, cell.y, h);
+                        }
+                        "color_0" => {
+                            let color: Color = cell_value.to();
+                            c.draw_color_0(cell.x, cell.y, color);
+                        }
+                        "color_1" => {
+                            let color: Color = cell_value.to();
+                            c.draw_color_1(cell.x, cell.y, color);
+                        }
+                        "wall_color_0" => {
+                            let color: Color = cell_value.to();
+                            c.draw_wall_color_0(cell.x, cell.y, color);
+                        }
+                        "wall_color_1" => {
+                            let color: Color = cell_value.to();
+                            c.draw_wall_color_1(cell.x, cell.y, color);
+                        }
+                        "grass_mask" => {
+                            let mask: Color = cell_value.to();
+                            c.draw_grass_mask(cell.x, cell.y, mask);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Regenerate mesh once per affected chunk
+        for (_, mut chunk) in affected_chunks {
+            chunk.bind_mut().regenerate_mesh();
+        }
+    }
 }
 
 impl PixyTerrain {
@@ -694,25 +781,74 @@ impl PixyTerrain {
     }
 
     /// Collect all 16 texture slots (index 0 = ground_texture, 1-14 = texture_2..15, 15 = void/None).
+    /// Uses default ground noise texture as fallback when no custom texture is assigned.
     fn get_texture_slots(&self) -> [Option<Gd<Texture2D>>; 16] {
         [
-            self.ground_texture.clone(),
-            self.texture_2.clone(),
-            self.texture_3.clone(),
-            self.texture_4.clone(),
-            self.texture_5.clone(),
-            self.texture_6.clone(),
-            self.texture_7.clone(),
-            self.texture_8.clone(),
-            self.texture_9.clone(),
-            self.texture_10.clone(),
-            self.texture_11.clone(),
-            self.texture_12.clone(),
-            self.texture_13.clone(),
-            self.texture_14.clone(),
-            self.texture_15.clone(),
+            self.get_ground_texture_or_default(0),
+            self.get_ground_texture_or_default(1),
+            self.get_ground_texture_or_default(2),
+            self.get_ground_texture_or_default(3),
+            self.get_ground_texture_or_default(4),
+            self.get_ground_texture_or_default(5),
+            self.get_ground_texture_or_default(6),
+            self.get_ground_texture_or_default(7),
+            self.get_ground_texture_or_default(8),
+            self.get_ground_texture_or_default(9),
+            self.get_ground_texture_or_default(10),
+            self.get_ground_texture_or_default(11),
+            self.get_ground_texture_or_default(12),
+            self.get_ground_texture_or_default(13),
+            self.get_ground_texture_or_default(14),
             None, // Slot 15: void texture (transparent)
         ]
+    }
+
+    /// Get ground texture for a slot, falling back to default noise texture if none assigned.
+    fn get_ground_texture_or_default(&self, index: usize) -> Option<Gd<Texture2D>> {
+        let texture = match index {
+            0 => &self.ground_texture,
+            1 => &self.texture_2,
+            2 => &self.texture_3,
+            3 => &self.texture_4,
+            4 => &self.texture_5,
+            5 => &self.texture_6,
+            6 => &self.texture_7,
+            7 => &self.texture_8,
+            8 => &self.texture_9,
+            9 => &self.texture_10,
+            10 => &self.texture_11,
+            11 => &self.texture_12,
+            12 => &self.texture_13,
+            13 => &self.texture_14,
+            14 => &self.texture_15,
+            _ => return None,
+        };
+
+        if texture.is_some() {
+            return texture.clone();
+        }
+
+        // Load default ground noise texture
+        let mut loader = ResourceLoader::singleton();
+        if loader.exists(DEFAULT_GROUND_TEXTURE_PATH) {
+            let result = loader
+                .load(DEFAULT_GROUND_TEXTURE_PATH)
+                .and_then(|r| r.try_cast::<Texture2D>().ok());
+            if result.is_none() {
+                godot_warn!(
+                    "Failed to cast default ground texture at {}",
+                    DEFAULT_GROUND_TEXTURE_PATH
+                );
+            }
+            return result;
+        } else {
+            godot_warn!(
+                "Default ground texture not found at {}",
+                DEFAULT_GROUND_TEXTURE_PATH
+            );
+        }
+
+        None
     }
 
     /// Set a single shader parameter if the material exists.

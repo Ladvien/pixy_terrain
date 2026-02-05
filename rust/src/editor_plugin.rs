@@ -581,7 +581,6 @@ impl IEditorPlugin for PixyTerrainPlugin {
                     }
 
                     if btn.is_pressed() && draw_area_hovered {
-
                         // Mode-specific press initialization
                         if self.mode == TerrainToolMode::Bridge && !self.is_making_bridge {
                             self.flatten = false;
