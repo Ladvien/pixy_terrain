@@ -10,7 +10,6 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
-use crate::chunk::PixyTerrainChunk;
 use crate::gizmo::{self, GizmoState, PixyTerrainGizmoPlugin};
 use crate::marching_squares;
 use crate::quick_paint::PixyQuickPaint;
@@ -164,6 +163,9 @@ pub struct PixyTerrainPlugin {
     draw_height: f32,
     #[init(val = false)]
     is_setting: bool,
+    /// Original click position for height drag calculations (two-click workflow).
+    #[init(val = Vector3::ZERO)]
+    setting_start_position: Vector3,
 
     // Gizmo plugin
     #[init(val = None)]
@@ -253,6 +255,17 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "Chunks",
             "Settings",
         ];
+        let tool_tooltips = [
+            "Brush Tool\n\nElevate or lower terrain height.\n\n[Shortcuts]\n• Click+Drag: Set height by dragging up/down\n• Shift+Click+Drag: Paint selection continuously\n• Shift+Scroll: Adjust brush size\n• Alt: Clear current selection",
+            "Level Tool\n\nSet terrain to a specific height.\n\n[Shortcuts]\n• Ctrl+Click: Sample height from terrain\n• Shift+Click+Drag: Paint at set height",
+            "Smooth Tool\n\nSmooth out rough terrain areas.\n\n[Shortcuts]\n• Shift+Click+Drag: Smooth terrain",
+            "Bridge Tool\n\nCreate slopes between two points.\n\n[Shortcuts]\n• Click start, drag to end\n• Ease controls slope curve",
+            "Grass Mask Tool\n\nEnable/disable grass on terrain.\n\n[Shortcuts]\n• Click to toggle grass mask",
+            "Vertex Paint Tool\n\nPaint texture materials on terrain.\n\n[Shortcuts]\n• Select material slot first\n• Paint Walls: toggle wall vs floor painting",
+            "Debug Brush\n\nPrint cell data to console.\n\nUseful for debugging terrain data.",
+            "Chunk Management\n\nAdd/remove terrain chunks.\n\n[Shortcuts]\n• Click empty area: Add chunk (if adjacent)\n• Click existing chunk: Remove chunk",
+            "Terrain Settings\n\nAdjust global terrain parameters.\n\nDimensions, cell size, blend mode, etc.",
+        ];
 
         let plugin_ref = self.to_gd();
         let mut tool_buttons: Vec<Gd<Button>> = Vec::new();
@@ -266,6 +279,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
             let mut btn = Button::new_alloc();
             btn.set_text(*label);
+            btn.set_tooltip_text(tool_tooltips[i]);
             btn.set_toggle_mode(true);
             btn.set_button_group(&button_group);
             btn.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
@@ -525,7 +539,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
                     if let Some(mut space) = world.get_direct_space_state() {
                         let ray_end = ray_origin + ray_dir * 10000.0;
                         let query = PhysicsRayQueryParameters3D::create_ex(ray_origin, ray_end)
-                            .collision_mask(16)
+                            .collision_mask(1 << 16) // Layer 17 (bit 16) - matches chunk collision layer
                             .done()
                             .unwrap();
                         let result = space.intersect_ray(&query);
@@ -557,8 +571,16 @@ impl IEditorPlugin for PixyTerrainPlugin {
             if is_button_event {
                 let btn: Gd<InputEventMouseButton> = event.clone().cast();
                 if btn.get_button_index() == godot::global::MouseButton::LEFT {
-                    if btn.is_pressed() && draw_area_hovered {
+                    // Second click while in height adjustment mode → apply and reset
+                    if btn.is_pressed() && self.is_setting && self.draw_height_set {
+                        self.draw_pattern(&terrain, dim, cell_size);
+                        self.is_setting = false;
                         self.draw_height_set = false;
+                        self.current_draw_pattern.clear();
+                        return AfterGuiInput::STOP.ord();
+                    }
+
+                    if btn.is_pressed() && draw_area_hovered {
 
                         // Mode-specific press initialization
                         if self.mode == TerrainToolMode::Bridge && !self.is_making_bridge {
@@ -637,15 +659,14 @@ impl IEditorPlugin for PixyTerrainPlugin {
                             ) {
                                 self.current_draw_pattern.clear();
                             }
+                            self.draw_height_set = false;
                         }
-                        if self.is_setting {
-                            self.is_setting = false;
-                            self.draw_pattern(&terrain, dim, cell_size);
-                            if shift_held {
-                                self.draw_height = self.brush_position.y;
-                            } else {
-                                self.current_draw_pattern.clear();
-                            }
+                        // Two-click workflow: release enters height adjustment mode
+                        if self.is_setting && !self.draw_height_set {
+                            // First release: enter height adjustment mode
+                            // Pattern is locked, mouse movement adjusts height preview
+                            self.draw_height_set = true;
+                            // Keep is_setting = true, wait for second click to apply
                         }
                     }
                     return AfterGuiInput::STOP.ord();
@@ -671,7 +692,20 @@ impl IEditorPlugin for PixyTerrainPlugin {
                 }
             }
 
-            // ── Mouse motion while drawing ──
+            // ── Mouse motion during paint phase (first click held, dragging) ──
+            // Build pattern as user drags to expand painted area
+            if is_motion_event && self.is_setting && !self.draw_height_set && draw_area_hovered {
+                self.build_draw_pattern(&terrain, dim, cell_size);
+            }
+
+            // ── Mouse motion in height adjustment mode (after first release) ──
+            // brush_position.y is updated by the vertical plane raycast above
+            // Pattern is locked, just let gizmo redraw show height preview
+            if is_motion_event && self.is_setting && self.draw_height_set {
+                // Pattern already built, gizmo will show updated height
+            }
+
+            // ── Mouse motion while drawing (shift+drag mode) ──
             if is_motion_event && draw_area_hovered && self.is_drawing {
                 self.build_draw_pattern(&terrain, dim, cell_size);
 
@@ -925,84 +959,6 @@ impl PixyTerrainPlugin {
                 self.apply_terrain_setting(name, &value);
             }
             _ => {}
-        }
-    }
-
-    /// Apply a composite pattern action. Called by undo/redo.
-    /// `patterns` is a VarDictionary with keys: "height", "color_0", "color_1",
-    /// "wall_color_0", "wall_color_1", "grass_mask".
-    /// Each value is Dict<Vector2i(chunk), Dict<Vector2i(cell), value>>.
-    #[func]
-    fn apply_composite_pattern_action(&mut self, terrain: Gd<Node>, patterns: VarDictionary) {
-        let terrain: Gd<PixyTerrain> = terrain.cast();
-        let mut affected_chunks: HashMap<[i32; 2], Gd<PixyTerrainChunk>> = HashMap::new();
-
-        // Apply order: wall_color_0, wall_color_1, height, grass_mask, color_0, color_1
-        let keys_in_order = [
-            "wall_color_0",
-            "wall_color_1",
-            "height",
-            "grass_mask",
-            "color_0",
-            "color_1",
-        ];
-
-        for &key in &keys_in_order {
-            let Some(outer_variant) = patterns.get(key) else {
-                continue;
-            };
-            let outer_dict: VarDictionary = outer_variant.to();
-
-            for (chunk_key, chunk_value) in outer_dict.iter_shared() {
-                let chunk_coords: Vector2i = chunk_key.to();
-                let cell_dict: VarDictionary = chunk_value.to();
-
-                let chunk = terrain.bind().get_chunk(chunk_coords.x, chunk_coords.y);
-                let Some(mut chunk) = chunk else {
-                    continue;
-                };
-
-                affected_chunks
-                    .entry([chunk_coords.x, chunk_coords.y])
-                    .or_insert_with(|| chunk.clone());
-
-                for (cell_key, cell_value) in cell_dict.iter_shared() {
-                    let cell: Vector2i = cell_key.to();
-                    let mut c = chunk.bind_mut();
-                    match key {
-                        "height" => {
-                            let h: f32 = cell_value.to();
-                            c.draw_height(cell.x, cell.y, h);
-                        }
-                        "color_0" => {
-                            let color: Color = cell_value.to();
-                            c.draw_color_0(cell.x, cell.y, color);
-                        }
-                        "color_1" => {
-                            let color: Color = cell_value.to();
-                            c.draw_color_1(cell.x, cell.y, color);
-                        }
-                        "wall_color_0" => {
-                            let color: Color = cell_value.to();
-                            c.draw_wall_color_0(cell.x, cell.y, color);
-                        }
-                        "wall_color_1" => {
-                            let color: Color = cell_value.to();
-                            c.draw_wall_color_1(cell.x, cell.y, color);
-                        }
-                        "grass_mask" => {
-                            let mask: Color = cell_value.to();
-                            c.draw_grass_mask(cell.x, cell.y, mask);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Regenerate mesh once per affected chunk
-        for (_, mut chunk) in affected_chunks {
-            chunk.bind_mut().regenerate_mesh();
         }
     }
 
@@ -2174,6 +2130,9 @@ impl PixyTerrainPlugin {
             flatten: self.flatten,
             draw_height: self.draw_height,
             draw_pattern: self.current_draw_pattern.clone(),
+            is_setting: self.is_setting,
+            draw_height_set: self.draw_height_set,
+            is_drawing: self.is_drawing,
         }
     }
 
@@ -2216,15 +2175,33 @@ impl PixyTerrainPlugin {
         self.vertex_color_idx = idx;
     }
 
-    /// Initialize draw_height_set state (logic moved from Yugen's gizmo _redraw).
+    /// Initialize draw_height_set state (two-click workflow).
+    ///
+    /// Two-click workflow:
+    /// 1. First click: `is_setting=true`, builds pattern, stays in paint phase (`draw_height_set=false`)
+    /// 2. Drag/motion: Pattern expands as user drags brush over terrain
+    /// 3. Release: Enter height adjustment mode (`draw_height_set=true`), pattern locked
+    /// 4. Mouse movement: Adjust height preview via vertical plane raycast
+    /// 5. Second click: Apply pattern and reset for next stroke
+    ///
+    /// Special cases:
+    /// - Clicking on existing pattern: go directly to height mode (skip paint phase)
+    /// - ALT+click on pattern: isolate clicked cell for height adjustment
     fn initialize_draw_state(
         &mut self,
         terrain: &Gd<PixyTerrain>,
         dim: Vector3i,
         cell_size: Vector2,
     ) {
+        // Two-click workflow initialization:
+        // Phase 1 (paint): is_setting=true, draw_height_set=false
+        //   - Build pattern on initial click and during drag
+        // Phase 2 (height): is_setting=true, draw_height_set=true (set on release)
+        //   - Pattern locked, mouse movement adjusts height preview
+        // Phase 3 (apply): second click applies and resets
         if self.is_setting && !self.draw_height_set {
-            self.draw_height_set = true;
+            // DON'T set draw_height_set = true here!
+            // This is the paint phase - we stay in this phase until mouse release.
 
             // Check if clicked cell is in the current pattern
             let pos = self.brush_position;
@@ -2249,13 +2226,17 @@ impl PixyTerrainPlugin {
             let alt_held = Input::singleton().is_key_pressed(godot::global::Key::ALT);
 
             if !in_pattern && !alt_held {
-                // Not on existing pattern → clear and switch to drawing
+                // Not on existing pattern → clear pattern, build new one, stay in paint phase
                 self.current_draw_pattern.clear();
-                self.is_setting = false;
-                self.is_drawing = true;
                 self.draw_height = pos.y;
+                self.setting_start_position = pos;
+                self.base_position = pos;
+                // Build the pattern immediately at click position
+                self.build_draw_pattern(terrain, dim, cell_size);
             } else {
-                // On existing pattern → drag mode
+                // On existing pattern → go directly to height mode on this click
+                // (second click on existing pattern)
+                self.draw_height_set = true;
                 if alt_held {
                     // ALT: only drag the clicked cell
                     let chunk_key = [cursor_chunk_x, cursor_chunk_z];
@@ -2272,6 +2253,7 @@ impl PixyTerrainPlugin {
                     }
                     self.draw_height = pos.y;
                 }
+                self.setting_start_position = pos;
                 self.base_position = pos;
             }
         }
@@ -2743,22 +2725,22 @@ impl PixyTerrainPlugin {
                         let old_wc1 = adj_chunk_gd.bind().get_wall_color_1(adj_x, adj_z);
 
                         let mut do_chunk_0: VarDictionary =
-                            do_wall_color_0.get_or_nil(adj_chunk).to();
+                            Self::get_or_create_dict(&do_wall_color_0, adj_chunk);
                         do_chunk_0.set(adj_cell, wall_c0);
                         do_wall_color_0.set(adj_chunk, do_chunk_0);
 
                         let mut undo_chunk_0: VarDictionary =
-                            undo_wall_color_0.get_or_nil(adj_chunk).to();
+                            Self::get_or_create_dict(&undo_wall_color_0, adj_chunk);
                         undo_chunk_0.set(adj_cell, old_wc0);
                         undo_wall_color_0.set(adj_chunk, undo_chunk_0);
 
                         let mut do_chunk_1: VarDictionary =
-                            do_wall_color_1.get_or_nil(adj_chunk).to();
+                            Self::get_or_create_dict(&do_wall_color_1, adj_chunk);
                         do_chunk_1.set(adj_cell, wall_c1);
                         do_wall_color_1.set(adj_chunk, do_chunk_1);
 
                         let mut undo_chunk_1: VarDictionary =
-                            undo_wall_color_1.get_or_nil(adj_chunk).to();
+                            Self::get_or_create_dict(&undo_wall_color_1, adj_chunk);
                         undo_chunk_1.set(adj_cell, old_wc1);
                         undo_wall_color_1.set(adj_chunk, undo_chunk_1);
                     }
@@ -3073,6 +3055,14 @@ impl PixyTerrainPlugin {
         }
     }
 
+    /// Safely get or create a VarDictionary from a nested dictionary.
+    /// Returns an empty VarDictionary if the key doesn't exist or isn't a dictionary.
+    fn get_or_create_dict(dict: &VarDictionary, key: Vector2i) -> VarDictionary {
+        dict.get(key)
+            .and_then(|v| v.try_to::<VarDictionary>().ok())
+            .unwrap_or_default()
+    }
+
     /// Copy a value from src nested dict entry to adj nested dict entry.
     fn copy_dict_entry(
         dict: &mut VarDictionary,
@@ -3084,7 +3074,7 @@ impl PixyTerrainPlugin {
         if let Some(src_outer) = dict.get(src_chunk) {
             let src_dict: VarDictionary = src_outer.to();
             if let Some(val) = src_dict.get(src_cell) {
-                let mut adj_dict: VarDictionary = dict.get_or_nil(adj_chunk).to();
+                let mut adj_dict: VarDictionary = Self::get_or_create_dict(dict, adj_chunk);
                 adj_dict.set(adj_cell, val);
                 dict.set(adj_chunk, adj_dict);
             }
@@ -3093,7 +3083,7 @@ impl PixyTerrainPlugin {
 
     /// Set a value in a nested VarDictionary (outer[chunk][cell] = value).
     fn set_nested_dict(dict: &mut VarDictionary, chunk: Vector2i, cell: Vector2i, value: Variant) {
-        let mut inner: VarDictionary = dict.get_or_nil(chunk).to();
+        let mut inner: VarDictionary = Self::get_or_create_dict(dict, chunk);
         inner.set(cell, value);
         dict.set(chunk, inner);
     }
@@ -3181,19 +3171,23 @@ impl PixyTerrainPlugin {
                     let old_wc1 = adj_chunk_gd.bind().get_wall_color_1(adj_x, adj_z);
 
                     // Set do values
-                    let mut do_chunk_0: VarDictionary = do_wall_0.get_or_nil(adj_chunk).to();
+                    let mut do_chunk_0: VarDictionary =
+                        Self::get_or_create_dict(do_wall_0, adj_chunk);
                     do_chunk_0.set(adj_cell, vc0);
                     do_wall_0.set(adj_chunk, do_chunk_0);
 
-                    let mut undo_chunk_0: VarDictionary = undo_wall_0.get_or_nil(adj_chunk).to();
+                    let mut undo_chunk_0: VarDictionary =
+                        Self::get_or_create_dict(undo_wall_0, adj_chunk);
                     undo_chunk_0.set(adj_cell, old_wc0);
                     undo_wall_0.set(adj_chunk, undo_chunk_0);
 
-                    let mut do_chunk_1: VarDictionary = do_wall_1.get_or_nil(adj_chunk).to();
+                    let mut do_chunk_1: VarDictionary =
+                        Self::get_or_create_dict(do_wall_1, adj_chunk);
                     do_chunk_1.set(adj_cell, vc1);
                     do_wall_1.set(adj_chunk, do_chunk_1);
 
-                    let mut undo_chunk_1: VarDictionary = undo_wall_1.get_or_nil(adj_chunk).to();
+                    let mut undo_chunk_1: VarDictionary =
+                        Self::get_or_create_dict(undo_wall_1, adj_chunk);
                     undo_chunk_1.set(adj_cell, old_wc1);
                     undo_wall_1.set(adj_chunk, undo_chunk_1);
                 }
@@ -3202,6 +3196,8 @@ impl PixyTerrainPlugin {
     }
 
     /// Register an undo/redo action for a composite pattern operation.
+    /// Registers callbacks on the terrain, not the plugin, to avoid borrow conflicts
+    /// when undo/redo fires (the plugin may already be borrowed at that point).
     fn register_undo_redo(
         &mut self,
         action_name: &str,
@@ -3214,18 +3210,16 @@ impl PixyTerrainPlugin {
             return;
         };
 
-        let plugin_gd = self.to_gd();
-
         undo_redo.create_action(action_name);
         undo_redo.add_do_method(
-            &plugin_gd,
-            "apply_composite_pattern_action",
-            &[terrain_node.to_variant(), do_patterns.to_variant()],
+            terrain_node,
+            "apply_composite_pattern",
+            &[do_patterns.to_variant()],
         );
         undo_redo.add_undo_method(
-            &plugin_gd,
-            "apply_composite_pattern_action",
-            &[terrain_node.to_variant(), undo_patterns.to_variant()],
+            terrain_node,
+            "apply_composite_pattern",
+            &[undo_patterns.to_variant()],
         );
         undo_redo.commit_action();
     }
