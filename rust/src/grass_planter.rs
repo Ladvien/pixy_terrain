@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use godot::classes::{
-    IMultiMeshInstance3D, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ResourceLoader, Shader,
-    ShaderMaterial, Texture2D,
+    IMultiMeshInstance3D, Image, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ResourceLoader,
+    Shader, ShaderMaterial, Texture2D,
 };
 use godot::obj::InstanceId;
 use godot::prelude::*;
@@ -27,6 +27,8 @@ pub struct GrassConfig {
     pub ground_colors: [Color; 6],
     pub tex_has_grass: [bool; 5],
     pub grass_mesh: Option<Gd<Mesh>>,
+    pub ground_images: [Option<Gd<Image>>; 6],
+    pub texture_scales: [f32; 6],
 }
 
 impl Default for GrassConfig {
@@ -52,6 +54,8 @@ impl Default for GrassConfig {
             ],
             tex_has_grass: [true, true, true, true, true],
             grass_mesh: None,
+            ground_images: [None, None, None, None, None, None],
+            texture_scales: [1.0; 6],
         }
     }
 }
@@ -244,6 +248,7 @@ impl PixyGrassPlanter {
             ledge_threshold,
             ridge_threshold,
             &tex_has_grass,
+            config,
         );
 
         // Hide remaining unused instances
@@ -395,6 +400,7 @@ impl PixyGrassPlanter {
         ledge_threshold: f32,
         ridge_threshold: f32,
         tex_has_grass: &[bool; 6],
+        config: &GrassConfig,
     ) {
         let hidden_transform = Transform3D::new(
             Basis::from_scale(Vector3::ZERO),
@@ -531,7 +537,7 @@ impl PixyGrassPlanter {
 
                         mm.set_instance_transform(*index as i32, Transform3D::new(basis, p));
 
-                        // Set custom data: RGB = grass color (from terrain ground color),
+                        // Set custom data: RGB = sampled terrain color (per-blade variation),
                         // A = sprite ID encoding (0.0 = tex1, 0.2 = tex2, ... 1.0 = tex6)
                         let alpha = match texture_id {
                             6 => 1.0,
@@ -542,11 +548,34 @@ impl PixyGrassPlanter {
                             _ => 0.0, // base grass
                         };
 
-                        // Set instance_color to WHITE so shader multiplication produces correct brightness.
-                        // The shader computes: instance_color * grass_base_color
-                        // Using WHITE (1.0) means: 1.0 * grass_base_color = grass_base_color (unchanged)
-                        // Alpha channel encodes the texture slot ID for sprite selection.
-                        let instance_color = Color::from_rgba(1.0, 1.0, 1.0, alpha);
+                        // Sample ground texture at blade position for per-blade color variation.
+                        // Matches Yugen's approach: each blade inherits the terrain pixel beneath it.
+                        let slot_idx = (texture_id - 1).clamp(0, 5) as usize;
+                        let rgb = if let Some(ref img) = config.ground_images[slot_idx] {
+                            let dim = config.dimensions;
+                            let total_x = dim.x as f32 * config.cell_size.x;
+                            let total_z = dim.z as f32 * config.cell_size.y;
+                            let mut uv_x = (p.x / total_x).clamp(0.0, 1.0);
+                            let mut uv_y = (p.z / total_z).clamp(0.0, 1.0);
+
+                            uv_x *= config.texture_scales[slot_idx];
+                            uv_y *= config.texture_scales[slot_idx];
+
+                            uv_x = uv_x.rem_euclid(1.0).abs();
+                            uv_y = uv_y.rem_euclid(1.0).abs();
+
+                            let w = img.get_width().max(1);
+                            let h = img.get_height().max(1);
+                            let px = (uv_x * (w - 1) as f32) as i32;
+                            let py = (uv_y * (h - 1) as f32) as i32;
+
+                            img.get_pixel(px, py)
+                        } else {
+                            // No texture image — fall back to ground color
+                            config.ground_colors[slot_idx]
+                        };
+
+                        let instance_color = Color::from_rgba(rgb.r, rgb.g, rgb.b, alpha);
                         mm.set_instance_custom_data(*index as i32, instance_color);
                     } else {
                         mm.set_instance_transform(*index as i32, hidden_transform);

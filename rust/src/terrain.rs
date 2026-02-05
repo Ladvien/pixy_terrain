@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use godot::classes::{Engine, Node3D, ResourceLoader, Shader, ShaderMaterial, Texture2D};
+use godot::classes::{Engine, Image, Node3D, ResourceLoader, Shader, ShaderMaterial, Texture2D};
 use godot::prelude::*;
 
 use crate::chunk::{PixyTerrainChunk, TerrainConfig};
@@ -972,7 +972,33 @@ impl PixyTerrain {
                 self.tex6_has_grass,
             ],
             grass_mesh: self.grass_mesh.clone(),
+            ground_images: [
+                self.extract_ground_image(0),
+                self.extract_ground_image(1),
+                self.extract_ground_image(2),
+                self.extract_ground_image(3),
+                self.extract_ground_image(4),
+                self.extract_ground_image(5),
+            ],
+            texture_scales: [
+                self.texture_scale_1,
+                self.texture_scale_2,
+                self.texture_scale_3,
+                self.texture_scale_4,
+                self.texture_scale_5,
+                self.texture_scale_6,
+            ],
         }
+    }
+
+    /// Extract a CPU-side Image from a ground texture slot for pixel sampling.
+    /// Calls get_image() + decompress() so compressed formats can be read.
+    fn extract_ground_image(&self, index: usize) -> Option<Gd<Image>> {
+        let tex = self.get_ground_texture_or_default(index)?;
+        let mut img = tex.get_image()?;
+        // Decompress so get_pixel() works on compressed formats (e.g. DXT, ETC2)
+        img.decompress();
+        Some(img)
     }
 
     /// Get grass sprite for a texture slot, falling back to default for base grass (slot 0).

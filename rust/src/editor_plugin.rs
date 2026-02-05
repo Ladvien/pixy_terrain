@@ -1076,7 +1076,10 @@ impl PixyTerrainPlugin {
         for i in 0..keys.len() {
             let k = keys[i];
             if let Some(chunk) = t.get_chunk(k.x as i32, k.y as i32) {
-                Self::set_chunk_collision_visible(&chunk.upcast::<Node>(), self.show_collision_wireframes);
+                Self::set_chunk_collision_visible(
+                    &chunk.upcast::<Node>(),
+                    self.show_collision_wireframes,
+                );
             }
         }
     }
