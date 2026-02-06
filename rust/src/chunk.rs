@@ -191,12 +191,20 @@ impl PixyTerrainChunk {
     /// Get height at a grid point.
     #[func]
     pub fn get_height(&self, coords: Vector2i) -> f32 {
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if coords.x < 0 || coords.y < 0 || coords.x >= dim_x || coords.y >= dim_z {
+            return 0.0;
+        }
         self.height_map[coords.y as usize][coords.x as usize]
     }
 
     /// Draw (set) height at a grid point and mark surrounding cells dirty.
     #[func]
     pub fn draw_height(&mut self, x: i32, z: i32, y: f32) {
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.height_map[z as usize][x as usize] = y;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -207,7 +215,10 @@ impl PixyTerrainChunk {
     /// Draw ground color channel 0 at a grid point.
     #[func]
     pub fn draw_color_0(&mut self, x: i32, z: i32, color: Color) {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.color_map_0[(z * dim_x + x) as usize] = color;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -218,7 +229,10 @@ impl PixyTerrainChunk {
     /// Draw ground color channel 1 at a grid point.
     #[func]
     pub fn draw_color_1(&mut self, x: i32, z: i32, color: Color) {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.color_map_1[(z * dim_x + x) as usize] = color;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -229,7 +243,10 @@ impl PixyTerrainChunk {
     /// Draw wall color channel 0.
     #[func]
     pub fn draw_wall_color_0(&mut self, x: i32, z: i32, color: Color) {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.wall_color_map_0[(z * dim_x + x) as usize] = color;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -240,7 +257,10 @@ impl PixyTerrainChunk {
     /// Draw wall color channel 1.
     #[func]
     pub fn draw_wall_color_1(&mut self, x: i32, z: i32, color: Color) {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.wall_color_map_1[(z * dim_x + x) as usize] = color;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -251,7 +271,10 @@ impl PixyTerrainChunk {
     /// Draw grass mask.
     #[func]
     pub fn draw_grass_mask(&mut self, x: i32, z: i32, masked: Color) {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return;
+        }
         self.grass_mask_map[(z * dim_x + x) as usize] = masked;
         self.notify_needs_update(z, x);
         self.notify_needs_update(z, x - 1);
@@ -262,35 +285,50 @@ impl PixyTerrainChunk {
     /// Get ground color channel 0 at a grid point.
     #[func]
     pub fn get_color_0(&self, x: i32, z: i32) -> Color {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return Color::default();
+        }
         self.color_map_0[(z * dim_x + x) as usize]
     }
 
     /// Get ground color channel 1 at a grid point.
     #[func]
     pub fn get_color_1(&self, x: i32, z: i32) -> Color {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return Color::default();
+        }
         self.color_map_1[(z * dim_x + x) as usize]
     }
 
     /// Get wall color channel 0 at a grid point.
     #[func]
     pub fn get_wall_color_0(&self, x: i32, z: i32) -> Color {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return Color::default();
+        }
         self.wall_color_map_0[(z * dim_x + x) as usize]
     }
 
     /// Get wall color channel 1 at a grid point.
     #[func]
     pub fn get_wall_color_1(&self, x: i32, z: i32) -> Color {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return Color::default();
+        }
         self.wall_color_map_1[(z * dim_x + x) as usize]
     }
 
     /// Get grass mask at a grid point.
     #[func]
     pub fn get_grass_mask_at(&self, x: i32, z: i32) -> Color {
-        let dim_x = self.get_dimensions_xz().0;
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        if x < 0 || z < 0 || x >= dim_x || z >= dim_z {
+            return Color::default();
+        }
         self.grass_mask_map[(z * dim_x + x) as usize]
     }
 }
@@ -372,6 +410,40 @@ impl PixyTerrainChunk {
         let dim = self.get_terrain_dimensions();
         let dim_x = dim.x as usize;
         let dim_z = dim.z as usize;
+        let expected_total = dim_x * dim_z;
+
+        // Validate height map dimensions before packing
+        if !self.height_map.is_empty() {
+            if self.height_map.len() != dim_z {
+                godot_warn!(
+                    "PixyTerrainChunk: sync_to_packed height_map row count mismatch: {} vs expected {}",
+                    self.height_map.len(),
+                    dim_z
+                );
+                return;
+            }
+            for (z, row) in self.height_map.iter().enumerate() {
+                if row.len() != dim_x {
+                    godot_warn!(
+                        "PixyTerrainChunk: sync_to_packed height_map[{}] col count mismatch: {} vs expected {}",
+                        z,
+                        row.len(),
+                        dim_x
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Validate color map lengths before packing
+        if !self.color_map_0.is_empty() && self.color_map_0.len() != expected_total {
+            godot_warn!(
+                "PixyTerrainChunk: sync_to_packed color_map_0 size mismatch: {} vs expected {}",
+                self.color_map_0.len(),
+                expected_total
+            );
+            return;
+        }
 
         // Height map: flatten 2D → 1D (row-major: z * dim_x + x)
         if !self.height_map.is_empty() {
@@ -502,12 +574,31 @@ impl PixyTerrainChunk {
             }
         }
 
-        // Create grass planter child if it doesn't exist
+        // Reuse existing grass planter from scene save, or create new one
         if self.grass_planter.is_none() {
+            let name = GString::from("GrassPlanter");
+            if let Some(child) = self
+                .base()
+                .find_child_ex(&name)
+                .recursive(false)
+                .owned(false)
+                .done()
+            {
+                if let Ok(mut planter) = child.try_cast::<PixyGrassPlanter>() {
+                    let chunk_id = self.base().instance_id();
+                    planter
+                        .bind_mut()
+                        .setup_with_config(chunk_id, grass_config.clone(), true);
+                    self.grass_planter = Some(planter);
+                }
+            }
+        }
+
+        if self.grass_planter.is_none() {
+            // Create new planter (for genuinely new chunks)
             let mut planter = PixyGrassPlanter::new_alloc();
             planter.set_name("GrassPlanter");
 
-            // Pass config directly instead of instance IDs (avoids borrow issues)
             let chunk_id = self.base().instance_id();
             planter
                 .bind_mut()
@@ -613,6 +704,18 @@ impl PixyTerrainChunk {
                     .surface_set_material(0, mat);
             }
             self.base_mut().set_mesh(&mesh);
+        }
+
+        // Remove old collision body before creating a new one (prevents leaking StaticBody3D children)
+        let children = self.base().get_children();
+        for i in (0..children.len()).rev() {
+            if let Some(child) = children.get(i) {
+                if child.is_class("StaticBody3D") {
+                    let mut child = child;
+                    self.base_mut().remove_child(&child);
+                    child.queue_free();
+                }
+            }
         }
 
         // Create trimesh collision

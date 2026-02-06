@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use godot::classes::{Engine, Image, Node3D, ResourceLoader, Shader, ShaderMaterial, Texture2D};
+use godot::classes::{
+    Engine, Image, Node3D, QuadMesh, ResourceLoader, Shader, ShaderMaterial, Texture2D,
+};
 use godot::prelude::*;
 
 use crate::chunk::{PixyTerrainChunk, TerrainConfig};
@@ -299,6 +301,21 @@ pub struct PixyTerrain {
     #[init(val = true)]
     pub tex6_has_grass: bool,
 
+    /// Wind direction for grass animation.
+    #[export]
+    #[init(val = Vector2::new(1.0, 1.0))]
+    pub wind_direction: Vector2,
+
+    /// Wind noise scale for grass animation.
+    #[export]
+    #[init(val = 0.02)]
+    pub wind_scale: f32,
+
+    /// Wind speed for grass animation.
+    #[export]
+    #[init(val = 0.14)]
+    pub wind_speed: f32,
+
     /// Default wall texture slot (0-15).
     #[export]
     #[init(val = 5)]
@@ -316,6 +333,12 @@ pub struct PixyTerrain {
     // Internal State (not exported)
     // ═══════════════════════════════════════════
     pub terrain_material: Option<Gd<ShaderMaterial>>,
+
+    /// Shared grass ShaderMaterial — one instance used by all chunk planters.
+    pub grass_material: Option<Gd<ShaderMaterial>>,
+
+    /// Shared grass QuadMesh — carries the grass_material, used as MultiMesh mesh by all planters.
+    pub grass_quad_mesh: Option<Gd<QuadMesh>>,
 
     pub is_batch_updating: bool,
 
@@ -344,9 +367,11 @@ impl PixyTerrain {
             return;
         }
 
-        // Create/load terrain material
+        // Create/load terrain material and shared grass material
         self.ensure_terrain_material();
+        self.ensure_grass_material();
         self.force_batch_update();
+        self.force_grass_material_update();
 
         // Discover existing chunk children
         self.chunks.clear();
@@ -391,7 +416,9 @@ impl PixyTerrain {
     pub fn regenerate(&mut self) {
         godot_print!("PixyTerrain: regenerate()");
         self.ensure_terrain_material();
+        self.ensure_grass_material();
         self.force_batch_update();
+        self.force_grass_material_update();
         self.clear();
         self.add_new_chunk(0, 0);
     }
@@ -585,17 +612,73 @@ impl PixyTerrain {
     /// Save current terrain texture settings to the current_texture_preset.
     #[func]
     pub fn save_to_preset(&mut self) {
-        // Get terrain Gd before borrowing preset
-        let terrain_gd = self.to_gd();
-
         if self.current_texture_preset.is_none() {
-            // Create a new preset if none exists
             let preset = Gd::<crate::texture_preset::PixyTexturePreset>::default();
             self.current_texture_preset = Some(preset);
         }
 
         if let Some(ref mut preset) = self.current_texture_preset {
-            preset.bind_mut().save_from_terrain(terrain_gd);
+            let mut list_gd = {
+                let p = preset.bind();
+                if let Some(ref existing) = p.textures {
+                    existing.clone()
+                } else {
+                    Gd::<crate::texture_preset::PixyTextureList>::default()
+                }
+            };
+
+            {
+                let mut l = list_gd.bind_mut();
+                l.texture_1 = self.ground_texture.clone();
+                l.texture_2 = self.texture_2.clone();
+                l.texture_3 = self.texture_3.clone();
+                l.texture_4 = self.texture_4.clone();
+                l.texture_5 = self.texture_5.clone();
+                l.texture_6 = self.texture_6.clone();
+                l.texture_7 = self.texture_7.clone();
+                l.texture_8 = self.texture_8.clone();
+                l.texture_9 = self.texture_9.clone();
+                l.texture_10 = self.texture_10.clone();
+                l.texture_11 = self.texture_11.clone();
+                l.texture_12 = self.texture_12.clone();
+                l.texture_13 = self.texture_13.clone();
+                l.texture_14 = self.texture_14.clone();
+                l.texture_15 = self.texture_15.clone();
+                l.scale_1 = self.texture_scale_1;
+                l.scale_2 = self.texture_scale_2;
+                l.scale_3 = self.texture_scale_3;
+                l.scale_4 = self.texture_scale_4;
+                l.scale_5 = self.texture_scale_5;
+                l.scale_6 = self.texture_scale_6;
+                l.scale_7 = self.texture_scale_7;
+                l.scale_8 = self.texture_scale_8;
+                l.scale_9 = self.texture_scale_9;
+                l.scale_10 = self.texture_scale_10;
+                l.scale_11 = self.texture_scale_11;
+                l.scale_12 = self.texture_scale_12;
+                l.scale_13 = self.texture_scale_13;
+                l.scale_14 = self.texture_scale_14;
+                l.scale_15 = self.texture_scale_15;
+                l.grass_sprite_1 = self.grass_sprite.clone();
+                l.grass_sprite_2 = self.grass_sprite_tex_2.clone();
+                l.grass_sprite_3 = self.grass_sprite_tex_3.clone();
+                l.grass_sprite_4 = self.grass_sprite_tex_4.clone();
+                l.grass_sprite_5 = self.grass_sprite_tex_5.clone();
+                l.grass_sprite_6 = self.grass_sprite_tex_6.clone();
+                l.grass_color_1 = self.ground_color;
+                l.grass_color_2 = self.ground_color_2;
+                l.grass_color_3 = self.ground_color_3;
+                l.grass_color_4 = self.ground_color_4;
+                l.grass_color_5 = self.ground_color_5;
+                l.grass_color_6 = self.ground_color_6;
+                l.has_grass_2 = self.tex2_has_grass;
+                l.has_grass_3 = self.tex3_has_grass;
+                l.has_grass_4 = self.tex4_has_grass;
+                l.has_grass_5 = self.tex5_has_grass;
+                l.has_grass_6 = self.tex6_has_grass;
+            }
+
+            preset.bind_mut().textures = Some(list_gd);
             godot_print!("PixyTerrain: Saved texture settings to preset");
         }
     }
@@ -603,13 +686,73 @@ impl PixyTerrain {
     /// Load texture settings from the current_texture_preset.
     #[func]
     pub fn load_from_preset(&mut self) {
-        if let Some(ref preset) = self.current_texture_preset {
-            let terrain_gd = self.to_gd();
-            preset.bind().load_into_terrain(terrain_gd);
-            godot_print!("PixyTerrain: Loaded texture settings from preset");
-        } else {
+        let Some(ref preset) = self.current_texture_preset else {
             godot_warn!("PixyTerrain: No preset assigned to load from");
-        }
+            return;
+        };
+
+        let p = preset.bind();
+        let Some(ref list_gd) = p.textures else {
+            godot_warn!("PixyTerrain: Preset has no texture list to load");
+            return;
+        };
+        let l = list_gd.bind();
+
+        self.ground_texture = l.texture_1.clone();
+        self.texture_2 = l.texture_2.clone();
+        self.texture_3 = l.texture_3.clone();
+        self.texture_4 = l.texture_4.clone();
+        self.texture_5 = l.texture_5.clone();
+        self.texture_6 = l.texture_6.clone();
+        self.texture_7 = l.texture_7.clone();
+        self.texture_8 = l.texture_8.clone();
+        self.texture_9 = l.texture_9.clone();
+        self.texture_10 = l.texture_10.clone();
+        self.texture_11 = l.texture_11.clone();
+        self.texture_12 = l.texture_12.clone();
+        self.texture_13 = l.texture_13.clone();
+        self.texture_14 = l.texture_14.clone();
+        self.texture_15 = l.texture_15.clone();
+        self.texture_scale_1 = l.scale_1;
+        self.texture_scale_2 = l.scale_2;
+        self.texture_scale_3 = l.scale_3;
+        self.texture_scale_4 = l.scale_4;
+        self.texture_scale_5 = l.scale_5;
+        self.texture_scale_6 = l.scale_6;
+        self.texture_scale_7 = l.scale_7;
+        self.texture_scale_8 = l.scale_8;
+        self.texture_scale_9 = l.scale_9;
+        self.texture_scale_10 = l.scale_10;
+        self.texture_scale_11 = l.scale_11;
+        self.texture_scale_12 = l.scale_12;
+        self.texture_scale_13 = l.scale_13;
+        self.texture_scale_14 = l.scale_14;
+        self.texture_scale_15 = l.scale_15;
+        self.grass_sprite = l.grass_sprite_1.clone();
+        self.grass_sprite_tex_2 = l.grass_sprite_2.clone();
+        self.grass_sprite_tex_3 = l.grass_sprite_3.clone();
+        self.grass_sprite_tex_4 = l.grass_sprite_4.clone();
+        self.grass_sprite_tex_5 = l.grass_sprite_5.clone();
+        self.grass_sprite_tex_6 = l.grass_sprite_6.clone();
+        self.ground_color = l.grass_color_1;
+        self.ground_color_2 = l.grass_color_2;
+        self.ground_color_3 = l.grass_color_3;
+        self.ground_color_4 = l.grass_color_4;
+        self.ground_color_5 = l.grass_color_5;
+        self.ground_color_6 = l.grass_color_6;
+        self.tex2_has_grass = l.has_grass_2;
+        self.tex3_has_grass = l.has_grass_3;
+        self.tex4_has_grass = l.has_grass_4;
+        self.tex5_has_grass = l.has_grass_5;
+        self.tex6_has_grass = l.has_grass_6;
+
+        // Drop borrows before calling methods on self
+        drop(l);
+        drop(p);
+
+        self.force_batch_update();
+        self.force_grass_material_update();
+        godot_print!("PixyTerrain: Loaded texture settings from preset");
     }
 
     /// Ensure all texture slots have sensible defaults.
@@ -745,6 +888,187 @@ impl PixyTerrain {
         }
 
         godot_warn!("PixyTerrain: Could not load terrain shader at {TERRAIN_SHADER_PATH}");
+    }
+
+    /// Ensure shared grass material and QuadMesh exist.
+    /// Creates ONE ShaderMaterial + ONE QuadMesh that all chunk planters share.
+    pub fn ensure_grass_material(&mut self) {
+        if self.grass_material.is_some() {
+            return;
+        }
+
+        let mut loader = ResourceLoader::singleton();
+
+        let shader_path = "res://resources/shaders/mst_grass.gdshader";
+        if !loader.exists(shader_path) {
+            godot_warn!("PixyTerrain: Grass shader not found at {}", shader_path);
+            return;
+        }
+
+        let Some(res) = loader.load(shader_path) else {
+            godot_warn!("PixyTerrain: Failed to load grass shader");
+            return;
+        };
+
+        let Ok(shader) = res.try_cast::<Shader>() else {
+            godot_warn!("PixyTerrain: Resource is not a Shader");
+            return;
+        };
+
+        let mut mat = ShaderMaterial::new_gd();
+        mat.set_shader(&shader);
+        self.grass_material = Some(mat.clone());
+
+        // Create shared QuadMesh with the material applied.
+        // Use set_material() (PrimitiveMesh property) to match Yugen's mst_grass_mesh.tres,
+        // plus surface_set_material(0) as belt-and-suspenders.
+        let mut quad = QuadMesh::new_gd();
+        quad.set_size(self.grass_size);
+        quad.set_center_offset(Vector3::new(0.0, self.grass_size.y / 2.0, 0.0));
+        quad.set_material(&mat);
+        quad.surface_set_material(0, &mat);
+        self.grass_quad_mesh = Some(quad);
+
+        godot_print!("PixyTerrain: Created shared grass material and mesh");
+    }
+
+    /// Sync all grass shader parameters from terrain fields to the shared grass material.
+    /// Mirrors Yugen's force_batch_update() grass section (lines 612-641).
+    pub fn force_grass_material_update(&mut self) {
+        if self.grass_material.is_none() {
+            return;
+        }
+
+        // Collect ALL values BEFORE borrowing grass_material mutably
+        let is_merge_round = matches!(
+            MergeMode::from_index(self.merge_mode),
+            MergeMode::RoundedPolyhedron | MergeMode::SemiRound | MergeMode::Spherical
+        );
+        let wall_threshold = self.wall_threshold;
+        let animation_fps = self.animation_fps as f32;
+
+        // Use get_grass_sprite_or_default() to load grass_leaf_sprite.png as fallback
+        // when no custom sprite is assigned. Without this, the shader samples an unbound
+        // sampler2D → returns white (alpha=1.0) → full quad is visible as a square.
+        let sprites = [
+            self.get_grass_sprite_or_default(0),
+            self.get_grass_sprite_or_default(1),
+            self.get_grass_sprite_or_default(2),
+            self.get_grass_sprite_or_default(3),
+            self.get_grass_sprite_or_default(4),
+            self.get_grass_sprite_or_default(5),
+        ];
+
+        let ground_colors = [
+            self.ground_color,
+            self.ground_color_2,
+            self.ground_color_3,
+            self.ground_color_4,
+            self.ground_color_5,
+            self.ground_color_6,
+        ];
+
+        let use_base_color = [
+            self.ground_texture.is_none(),
+            self.texture_2.is_none(),
+            self.texture_3.is_none(),
+            self.texture_4.is_none(),
+            self.texture_5.is_none(),
+            self.texture_6.is_none(),
+        ];
+
+        let tex_has_grass = [
+            self.tex2_has_grass,
+            self.tex3_has_grass,
+            self.tex4_has_grass,
+            self.tex5_has_grass,
+            self.tex6_has_grass,
+        ];
+
+        let shadow_color = self.shadow_color;
+        let shadow_bands = self.shadow_bands;
+        let shadow_intensity = self.shadow_intensity;
+        let grass_size = self.grass_size;
+        let wind_direction = self.wind_direction;
+        let wind_scale = self.wind_scale;
+        let wind_speed = self.wind_speed;
+
+        // Now borrow grass_material mutably
+        let mat = self.grass_material.as_mut().unwrap();
+
+        // Core parameters
+        mat.set_shader_parameter("is_merge_round", &is_merge_round.to_variant());
+        mat.set_shader_parameter("wall_threshold", &wall_threshold.to_variant());
+        mat.set_shader_parameter("fps", &animation_fps.to_variant());
+
+        // Grass textures — always set (fallback provides blade-shaped alpha cutout)
+        let texture_names = [
+            "grass_texture",
+            "grass_texture_2",
+            "grass_texture_3",
+            "grass_texture_4",
+            "grass_texture_5",
+            "grass_texture_6",
+        ];
+        for (i, name) in texture_names.iter().enumerate() {
+            if let Some(ref tex) = sprites[i] {
+                mat.set_shader_parameter(*name, &tex.to_variant());
+            }
+        }
+
+        // Grass base colors
+        mat.set_shader_parameter("grass_base_color", &ground_colors[0].to_variant());
+        let color_names = [
+            "grass_color_2",
+            "grass_color_3",
+            "grass_color_4",
+            "grass_color_5",
+            "grass_color_6",
+        ];
+        for (i, name) in color_names.iter().enumerate() {
+            mat.set_shader_parameter(*name, &ground_colors[i + 1].to_variant());
+        }
+
+        // use_base_color flags — driven by ground TEXTURE (not grass sprite), matching Yugen
+        mat.set_shader_parameter("use_base_color", &use_base_color[0].to_variant());
+        mat.set_shader_parameter("use_base_color_2", &use_base_color[1].to_variant());
+        mat.set_shader_parameter("use_base_color_3", &use_base_color[2].to_variant());
+        mat.set_shader_parameter("use_base_color_4", &use_base_color[3].to_variant());
+        mat.set_shader_parameter("use_base_color_5", &use_base_color[4].to_variant());
+        mat.set_shader_parameter("use_base_color_6", &use_base_color[5].to_variant());
+
+        // use_grass_tex_* flags (tex2-6 has_grass toggles)
+        mat.set_shader_parameter("use_grass_tex_2", &tex_has_grass[0].to_variant());
+        mat.set_shader_parameter("use_grass_tex_3", &tex_has_grass[1].to_variant());
+        mat.set_shader_parameter("use_grass_tex_4", &tex_has_grass[2].to_variant());
+        mat.set_shader_parameter("use_grass_tex_5", &tex_has_grass[3].to_variant());
+        mat.set_shader_parameter("use_grass_tex_6", &tex_has_grass[4].to_variant());
+
+        // Wind animation parameters
+        mat.set_shader_parameter("wind_direction", &wind_direction.to_variant());
+        mat.set_shader_parameter("wind_scale", &wind_scale.to_variant());
+        mat.set_shader_parameter("wind_speed", &wind_speed.to_variant());
+        mat.set_shader_parameter("animate_active", &true.to_variant());
+
+        // Load wind noise texture
+        let mut loader = ResourceLoader::singleton();
+        let wind_path = "res://resources/textures/wind_noise_texture.tres";
+        if loader.exists(wind_path) {
+            if let Some(wind_tex) = loader.load(wind_path) {
+                mat.set_shader_parameter("wind_texture", &wind_tex.to_variant());
+            }
+        }
+
+        // Shading parameters
+        mat.set_shader_parameter("shadow_color", &shadow_color.to_variant());
+        mat.set_shader_parameter("bands", &shadow_bands.to_variant());
+        mat.set_shader_parameter("shadow_intensity", &shadow_intensity.to_variant());
+
+        // Update quad mesh size if it changed
+        if let Some(ref mut quad) = self.grass_quad_mesh {
+            quad.set_size(grass_size);
+            quad.set_center_offset(Vector3::new(0.0, grass_size.y / 2.0, 0.0));
+        }
     }
 
     /// Collect ground colors into an array for batch update.
@@ -972,6 +1296,8 @@ impl PixyTerrain {
                 self.tex6_has_grass,
             ],
             grass_mesh: self.grass_mesh.clone(),
+            grass_material: self.grass_material.clone(),
+            grass_quad_mesh: self.grass_quad_mesh.as_ref().map(|q| q.clone().upcast::<godot::classes::Mesh>()),
             ground_images: [
                 self.extract_ground_image(0),
                 self.extract_ground_image(1),

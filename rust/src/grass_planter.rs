@@ -27,6 +27,11 @@ pub struct GrassConfig {
     pub ground_colors: [Color; 6],
     pub tex_has_grass: [bool; 5],
     pub grass_mesh: Option<Gd<Mesh>>,
+    /// Shared grass ShaderMaterial from terrain (one instance for all planters).
+    pub grass_material: Option<Gd<ShaderMaterial>>,
+    /// Shared QuadMesh with grass ShaderMaterial already applied (from terrain).
+    /// When set, planters use this mesh directly instead of creating their own material.
+    pub grass_quad_mesh: Option<Gd<Mesh>>,
     pub ground_images: [Option<Gd<Image>>; 6],
     pub texture_scales: [f32; 6],
 }
@@ -54,6 +59,8 @@ impl Default for GrassConfig {
             ],
             tex_has_grass: [true, true, true, true, true],
             grass_mesh: None,
+            grass_material: None,
+            grass_quad_mesh: None,
             ground_images: [None, None, None, None, None, None],
             texture_scales: [1.0; 6],
         }
@@ -108,13 +115,16 @@ impl PixyGrassPlanter {
             mm.set_use_custom_data(true);
             mm.set_instance_count(instance_count);
 
-            // Use custom grass mesh if provided, otherwise default to QuadMesh
             if let Some(ref mesh) = config.grass_mesh {
+                // User-provided custom grass mesh takes top priority
                 mm.set_mesh(mesh);
+            } else if let Some(ref shared) = config.grass_quad_mesh {
+                // Shared QuadMesh from terrain (carries the shared ShaderMaterial)
+                mm.set_mesh(shared);
             } else {
+                // Fallback: create a plain QuadMesh (no material)
                 let mut quad = QuadMesh::new_gd();
                 quad.set_size(grass_size);
-                // Set center_offset.y to half height so grass stands upright from ground
                 quad.set_center_offset(Vector3::new(0.0, grass_size.y / 2.0, 0.0));
                 mm.set_mesh(&quad);
             }
@@ -126,15 +136,30 @@ impl PixyGrassPlanter {
             godot::classes::geometry_instance_3d::ShadowCastingSetting::OFF,
         );
 
-        // Set up grass material using cached config
-        self.setup_grass_material(
-            config.wall_threshold,
-            config.merge_mode,
-            config.animation_fps,
-            &config.grass_sprites,
-            &config.ground_colors,
-            &config.tex_has_grass,
-        );
+        // Apply material: prefer shared material as material_override (most reliable path),
+        // fall back to per-planter material creation if no shared material exists.
+        let using_custom_mesh = config.grass_mesh.is_some();
+
+        if using_custom_mesh {
+            // Custom mesh provides its own material; clear any override
+            self.base_mut().set_material_override(Gd::null_arg());
+        } else if let Some(ref mat) = config.grass_material {
+            // Apply shared material as material_override on each planter.
+            // This is more reliable than relying on mesh surface material propagation
+            // through MultiMesh, and updates propagate instantly since all planters
+            // reference the same Godot ShaderMaterial object.
+            self.base_mut().set_material_override(mat);
+        } else {
+            // Fallback: per-planter material (legacy path)
+            self.setup_grass_material(
+                config.wall_threshold,
+                config.merge_mode,
+                config.animation_fps,
+                &config.grass_sprites,
+                &config.ground_colors,
+                &config.tex_has_grass,
+            );
+        }
     }
 
     /// Initialize the MultiMesh with proper instance count and mesh (legacy method).
@@ -149,6 +174,7 @@ impl PixyGrassPlanter {
 
     /// Regenerate grass for all cells in the chunk.
     /// Takes cell_geometry as parameter to avoid needing to bind the chunk.
+    /// Forces MultiMesh rebuild to clear stale instances from previous geometry.
     pub fn regenerate_all_cells_with_geometry(
         &mut self,
         cell_geometry: &HashMap<[i32; 2], CellGeometry>,
@@ -160,11 +186,10 @@ impl PixyGrassPlanter {
 
         let dim = config.dimensions;
 
-        if self.base().get_multimesh().is_none() {
-            // Re-setup with current config
-            if let (Some(c_id), Some(cfg)) = (self.chunk_instance_id, self.grass_config.clone()) {
-                self.setup_with_config(c_id, cfg, true);
-            }
+        // Always force-recreate the MultiMesh to clear stale instances from
+        // previous geometry (e.g. after height changes via leveling).
+        if let (Some(c_id), Some(cfg)) = (self.chunk_instance_id, self.grass_config.clone()) {
+            self.setup_with_config(c_id, cfg, true);
         }
 
         for z in 0..(dim.z - 1) {
@@ -462,14 +487,12 @@ impl PixyGrassPlanter {
                     points.remove(pt_idx);
 
                     // Interpolate 3D position using barycentric weights
-                    // GDScript: p = a*(1-u-v) + b*u + c*v  =>  a*w + b*u + c*v
-                    // where w = 1-u-v, but vertex order in GDScript is [i]*u + [i+1]*v + [i+2]*w
-                    // So: a*u + b*v + c*w
+                    // GDScript (line 137): p = a*(1-u-v) + b*u + c*v  =>  a*w + b*u + c*v
                     let w = 1.0 - u - v;
                     let p = Vector3::new(
-                        a.x * u + b.x * v + c.x * w,
-                        a.y * u + b.y * v + c.y * w,
-                        a.z * u + b.z * v + c.z * w,
+                        a.x * w + b.x * u + c.x * v,
+                        a.y * w + b.y * u + c.y * v,
+                        a.z * w + b.z * u + c.z * v,
                     );
 
                     // Ledge/ridge avoidance (same barycentric order)

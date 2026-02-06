@@ -1139,10 +1139,9 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
             && !ctx.bd()
             && ctx.is_lower(dy, by)
         {
-            add_outer_corner(ctx, geo, false, true, true, by);
-            ctx.rotate_cell(1);
-            add_edge(ctx, geo, true, false, 0.0, 1.0);
-            add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+            add_outer_corner(ctx, geo, false, true, true, by); // 9 verts: A floor + wall A→mid
+            ctx.rotate_cell(2); // 180° so D is at position A
+            add_inner_corner(ctx, geo, true, true, true, false, false); // 18 verts: D floor + wall D→mid + L-floor
             case_found = true;
         }
         // Case 18: All edges connected except AC, A higher than C

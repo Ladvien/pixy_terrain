@@ -70,7 +70,7 @@ fn godot_ease(x: f32, curve: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerrainToolMode {
     #[default]
-    Brush = 0,
+    Height = 0,
     Level = 1,
     Smooth = 2,
     Bridge = 3,
@@ -118,7 +118,7 @@ pub struct PixyTerrainPlugin {
     is_modifying: bool,
 
     // Tool mode
-    #[init(val = TerrainToolMode::Brush)]
+    #[init(val = TerrainToolMode::Height)]
     mode: TerrainToolMode,
     #[init(val = BrushType::Round)]
     brush_type: BrushType,
@@ -252,7 +252,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
 
         let button_group = ButtonGroup::new_gd();
         let tool_labels = [
-            "Brush",
+            "Height",
             "Level",
             "Smooth",
             "Bridge",
@@ -263,7 +263,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "Settings",
         ];
         let tool_tooltips = [
-            "Brush Tool\n\nElevate or lower terrain height.\n\n[Shortcuts]\n• Click+Drag: Set height by dragging up/down\n• Shift+Click+Drag: Paint selection continuously\n• Shift+Scroll: Adjust brush size\n• Alt: Clear current selection",
+            "Height Tool\n\nElevate or lower terrain height.\n\n[Shortcuts]\n• Click+Drag: Set height by dragging up/down\n• Shift+Click+Drag: Paint selection continuously\n• Shift+Scroll: Adjust brush size\n• Alt: Clear current selection",
             "Level Tool\n\nSet terrain to a specific height.\n\n[Shortcuts]\n• Ctrl+Click: Sample height from terrain\n• Shift+Click+Drag: Paint at set height",
             "Smooth Tool\n\nSmooth out rough terrain areas.\n\n[Shortcuts]\n• Shift+Click+Drag: Smooth terrain",
             "Bridge Tool\n\nCreate slopes between two points.\n\n[Shortcuts]\n• Click start, drag to end\n• Ease controls slope curve",
@@ -525,7 +525,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // ── Brush/drawing tool modes ──
         let is_draw_mode = matches!(
             self.mode,
-            TerrainToolMode::Brush
+            TerrainToolMode::Height
                 | TerrainToolMode::Level
                 | TerrainToolMode::Smooth
                 | TerrainToolMode::Bridge
@@ -556,6 +556,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
                 // Flatten mode: horizontal plane at draw_height
                 let chunk_plane = Plane::new(Vector3::UP, self.draw_height);
                 if let Some(world_pos) = chunk_plane.intersect_ray(ray_origin, ray_dir) {
+                    draw_position = Some(terrain_gd.to_local(world_pos));
+                }
+            } else if self.is_drawing && self.mode == TerrainToolMode::Level {
+                // Level drawing mode: trace horizontal plane at target height
+                let level_plane = Plane::new(Vector3::UP, self.height);
+                if let Some(world_pos) = level_plane.intersect_ray(ray_origin, ray_dir) {
                     draw_position = Some(terrain_gd.to_local(world_pos));
                 }
             } else {
@@ -645,8 +651,17 @@ impl IEditorPlugin for PixyTerrainPlugin {
                         } else if shift_held {
                             // Shift+click: enter drawing mode
                             self.is_drawing = true;
+                        } else if matches!(
+                            self.mode,
+                            TerrainToolMode::Level
+                                | TerrainToolMode::Smooth
+                                | TerrainToolMode::GrassMask
+                                | TerrainToolMode::VertexPaint
+                        ) {
+                            // Level/Smooth/GrassMask/VertexPaint: simple click-drag-release
+                            self.is_drawing = true;
                         } else {
-                            // Normal click: enter setting mode
+                            // Normal click: enter setting mode (two-click workflow)
                             self.is_setting = true;
                             if !self.flatten {
                                 self.draw_height = self.brush_position.y;
@@ -707,10 +722,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
                     if button_idx == godot::global::MouseButton::WHEEL_UP {
                         self.brush_size =
                             (self.brush_size + BRUSH_SIZE_STEP * factor).min(MAX_BRUSH_SIZE);
+                        self.sync_brush_size_slider();
                         return AfterGuiInput::STOP.ord();
                     } else if button_idx == godot::global::MouseButton::WHEEL_DOWN {
                         self.brush_size =
                             (self.brush_size - BRUSH_SIZE_STEP * factor).max(MIN_BRUSH_SIZE);
+                        self.sync_brush_size_slider();
                         return AfterGuiInput::STOP.ord();
                     }
                 }
@@ -864,7 +881,7 @@ impl PixyTerrainPlugin {
             return;
         }
         self.mode = match tool_index {
-            0 => TerrainToolMode::Brush,
+            0 => TerrainToolMode::Height,
             1 => TerrainToolMode::Level,
             2 => TerrainToolMode::Smooth,
             3 => TerrainToolMode::Bridge,
@@ -873,7 +890,7 @@ impl PixyTerrainPlugin {
             6 => TerrainToolMode::DebugBrush,
             7 => TerrainToolMode::ChunkManagement,
             8 => TerrainToolMode::TerrainSettings,
-            _ => TerrainToolMode::Brush,
+            _ => TerrainToolMode::Height,
         };
         // Use call_deferred to avoid borrow conflict from signal dispatch
         self.base_mut()
@@ -894,13 +911,25 @@ impl PixyTerrainPlugin {
                 };
             }
             "size" => {
-                self.brush_size = value.to::<f64>() as f32;
+                let v = value.to::<f64>();
+                self.brush_size = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "size", "Size", v);
+                }
             }
             "strength" => {
-                self.strength = value.to::<f64>() as f32;
+                let v = value.to::<f64>();
+                self.strength = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "strength", "Strength", v);
+                }
             }
             "height" => {
-                self.height = value.to::<f64>() as f32;
+                let v = value.to::<f64>();
+                self.height = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "height", "Height", v);
+                }
             }
             "flatten" => {
                 self.flatten = value.to();
@@ -909,7 +938,11 @@ impl PixyTerrainPlugin {
                 self.falloff = value.to();
             }
             "ease_value" => {
-                self.ease_value = value.to::<f64>() as f32;
+                let v = value.to::<f64>();
+                self.ease_value = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "ease_value", "Ease", v);
+                }
             }
             "mask_mode" => {
                 self.should_mask_grass = value.to();
@@ -985,12 +1018,33 @@ impl PixyTerrainPlugin {
             | "use_ridge_texture"
             | "extra_collision_layer" => {
                 self.apply_terrain_setting(setting_name.to_string().as_str(), &value);
+                let label_text = match setting_name.to_string().as_str() {
+                    "cell_size_x" => Some("Cell X"),
+                    "cell_size_z" => Some("Cell Z"),
+                    "wall_threshold" => Some("Wall Thresh"),
+                    "ridge_threshold" => Some("Ridge Thresh"),
+                    "ledge_threshold" => Some("Ledge Thresh"),
+                    "grass_size_x" => Some("Grass W"),
+                    "grass_size_y" => Some("Grass H"),
+                    "blend_sharpness" => Some("Blend Sharp"),
+                    "blend_noise_scale" => Some("Noise Scale"),
+                    "blend_noise_strength" => Some("Noise Str"),
+                    _ => None,
+                };
+                if let (Some(label), Some(ref hbox)) = (label_text, &self.attributes_hbox) {
+                    Self::update_slider_label(hbox, setting_name.to_string().as_str(), label, value.to::<f64>());
+                }
             }
             // ── Texture Panel Settings ──
             name if name.starts_with("tex_scale_")
                 || name.starts_with("tex_has_grass_")
                 || name.starts_with("ground_color_") =>
             {
+                if name.starts_with("tex_scale_") {
+                    if let Some(ref panel) = self.texture_panel {
+                        Self::update_slider_label(panel, name, "Scale", value.to::<f64>());
+                    }
+                }
                 self.apply_terrain_setting(name, &value);
             }
             _ => {}
@@ -1130,7 +1184,7 @@ impl PixyTerrainPlugin {
         }
 
         match self.mode {
-            TerrainToolMode::Brush => {
+            TerrainToolMode::Height => {
                 self.add_option_attribute(
                     "brush_type",
                     "Brush",
@@ -1688,6 +1742,7 @@ impl PixyTerrainPlugin {
         label.set_name(&format!("{name}_label"));
 
         let mut slider = HSlider::new_alloc();
+        slider.set_name(&format!("{name}_slider"));
         slider.set_min(min);
         slider.set_max(max);
         slider.set_step(step);
@@ -1702,6 +1757,28 @@ impl PixyTerrainPlugin {
         vbox.add_child(&slider);
         center.add_child(&vbox);
         hbox.add_child(&center);
+    }
+
+    /// Sync the "size" slider widget + label to match `self.brush_size` (e.g. after scroll wheel).
+    fn sync_brush_size_slider(&self) {
+        if let Some(ref hbox) = self.attributes_hbox {
+            let slider_name = GString::from("size_slider" as &str);
+            if let Some(node) = hbox.upcast_ref::<Node>().find_child_ex(&slider_name).recursive(true).owned(false).done() {
+                let mut slider: Gd<HSlider> = node.cast();
+                // set_value triggers value_changed signal → on_attribute_changed → label update
+                slider.set_value(self.brush_size as f64);
+            }
+        }
+    }
+
+    /// Update a slider label's displayed value. Searches `container` for a child named `{name}_label`.
+    fn update_slider_label(container: &Gd<impl Inherits<Node>>, name: &str, label_text: &str, value: f64) {
+        let label_name_str = format!("{name}_label");
+        let label_name = GString::from(label_name_str.as_str());
+        if let Some(node) = container.upcast_ref::<Node>().find_child_ex(&label_name).recursive(true).owned(false).done() {
+            let mut label: Gd<Label> = node.cast();
+            label.set_text(&format!("{label_text}: {value:.1}"));
+        }
     }
 
     /// Add a CheckBox attribute control to the bottom attributes panel.
@@ -2459,6 +2536,24 @@ impl PixyTerrainPlugin {
 
         let mut first_chunk: Option<[i32; 2]> = None;
 
+        // Compute global average for smooth mode (across ALL chunks in brush)
+        let global_avg_height = if self.mode == TerrainToolMode::Smooth {
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for (chunk_key, cells) in &pattern_snapshot {
+                if let Some(chunk) = terrain.bind().get_chunk(chunk_key[0], chunk_key[1]) {
+                    let c = chunk.bind();
+                    for &(cell_key, _) in cells {
+                        sum += c.get_height(Vector2i::new(cell_key[0], cell_key[1]));
+                        count += 1;
+                    }
+                }
+            }
+            sum / count.max(1) as f32
+        } else {
+            0.0
+        };
+
         for (chunk_key, cells) in &pattern_snapshot {
             if first_chunk.is_none() {
                 first_chunk = Some(*chunk_key);
@@ -2470,16 +2565,6 @@ impl PixyTerrainPlugin {
 
             match self.mode {
                 TerrainToolMode::Smooth => {
-                    // Compute average height across cells in this chunk
-                    let avg_height = {
-                        let c = chunk.bind();
-                        let sum: f32 = cells
-                            .iter()
-                            .map(|(ck, _)| c.get_height(Vector2i::new(ck[0], ck[1])))
-                            .sum();
-                        sum / cells.len().max(1) as f32
-                    };
-
                     let mut do_chunk = VarDictionary::new();
                     let mut undo_chunk = VarDictionary::new();
 
@@ -2488,7 +2573,7 @@ impl PixyTerrainPlugin {
                         let cell_coords = Vector2i::new(cell_key[0], cell_key[1]);
                         let old_h = chunk.bind().get_height(cell_coords);
                         let f = sample * self.strength;
-                        let new_h = lerp_f32(old_h, avg_height, f);
+                        let new_h = lerp_f32(old_h, global_avg_height, f);
                         do_chunk.set(cell_coords, new_h);
                         undo_chunk.set(cell_coords, old_h);
                     }
@@ -2515,7 +2600,7 @@ impl PixyTerrainPlugin {
                             col1
                         );
                     }
-                    return; // Debug mode doesn't apply changes
+                    continue; // Debug mode doesn't apply changes, skip to next chunk
                 }
 
                 _ => {
@@ -2841,7 +2926,7 @@ impl PixyTerrainPlugin {
         if self.current_quick_paint.is_none()
             && matches!(
                 self.mode,
-                TerrainToolMode::Brush
+                TerrainToolMode::Height
                     | TerrainToolMode::Level
                     | TerrainToolMode::Smooth
                     | TerrainToolMode::Bridge
@@ -2892,7 +2977,7 @@ impl PixyTerrainPlugin {
         }
 
         let action_name = match self.mode {
-            TerrainToolMode::Brush => "terrain brush",
+            TerrainToolMode::Height => "terrain height",
             TerrainToolMode::Level => "terrain level",
             TerrainToolMode::Smooth => "terrain smooth",
             TerrainToolMode::Bridge => "terrain bridge",
@@ -2907,7 +2992,7 @@ impl PixyTerrainPlugin {
             _ => "terrain draw",
         };
 
-        let terrain_node = self.current_terrain.as_ref().unwrap().clone();
+        let terrain_node: Gd<Node> = terrain.clone().upcast();
         self.register_undo_redo(action_name, &terrain_node, do_patterns, undo_patterns);
     }
 
@@ -2938,6 +3023,7 @@ impl PixyTerrainPlugin {
             src_cell: Vector2i,
             adj_chunk: Vector2i,
             adj_cell: Vector2i,
+            blend: f32, // 1.0 = exact copy (edge), 0.5 = 50/50 blend (inner)
         }
 
         let mut edges: Vec<EdgeEntry> = Vec::new();
@@ -3002,7 +3088,43 @@ impl PixyTerrainPlugin {
                             src_cell: Vector2i::new(cell_key[0], cell_key[1]),
                             adj_chunk: Vector2i::new(adj_chunk[0], adj_chunk[1]),
                             adj_cell: Vector2i::new(x, z),
+                            blend: 1.0,
                         });
+
+                        // Push inner-cell blend for height modes (2-cell transition zone)
+                        if matches!(
+                            self.mode,
+                            TerrainToolMode::Height
+                                | TerrainToolMode::Level
+                                | TerrainToolMode::Smooth
+                                | TerrainToolMode::Bridge
+                        ) {
+                            let inner_x =
+                                if cx == -1 { x - 1 } else if cx == 1 { x + 1 } else { x };
+                            let inner_z =
+                                if cz == -1 { z - 1 } else if cz == 1 { z + 1 } else { z };
+
+                            if inner_x >= 0
+                                && inner_x < dim.x
+                                && inner_z >= 0
+                                && inner_z < dim.z
+                            {
+                                let already_in_pattern = self
+                                    .current_draw_pattern
+                                    .get(&[adj_chunk[0], adj_chunk[1]])
+                                    .and_then(|cells| cells.get(&[inner_x, inner_z]))
+                                    .is_some();
+                                if !already_in_pattern {
+                                    edges.push(EdgeEntry {
+                                        src_chunk: Vector2i::new(chunk_key[0], chunk_key[1]),
+                                        src_cell: Vector2i::new(cell_key[0], cell_key[1]),
+                                        adj_chunk: Vector2i::new(adj_chunk[0], adj_chunk[1]),
+                                        adj_cell: Vector2i::new(inner_x, inner_z),
+                                        blend: 0.5,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3102,14 +3224,34 @@ impl PixyTerrainPlugin {
                     }
                 }
                 _ => {
-                    // Height modes
-                    Self::copy_dict_entry(
-                        do_height,
-                        edge.src_chunk,
-                        edge.src_cell,
-                        edge.adj_chunk,
-                        edge.adj_cell,
-                    );
+                    // Height modes — use blend factor for smooth transition
+                    if edge.blend >= 1.0 {
+                        // Exact copy (edge cell — existing behavior)
+                        Self::copy_dict_entry(
+                            do_height,
+                            edge.src_chunk,
+                            edge.src_cell,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                        );
+                    } else if let Some(src_outer) = do_height.get(edge.src_chunk) {
+                        // Blended inner cell — lerp between existing and source
+                        let src_dict: VarDictionary = src_outer.to();
+                        if let Some(val) = src_dict.get(edge.src_cell) {
+                            let src_h: f32 = val.to();
+                            if let Some(adj) = &adj_chunk_gd {
+                                let existing_h = adj.bind().get_height(edge.adj_cell);
+                                let blended = lerp_f32(existing_h, src_h, edge.blend);
+                                Self::set_nested_dict(
+                                    do_height,
+                                    edge.adj_chunk,
+                                    edge.adj_cell,
+                                    blended.to_variant(),
+                                );
+                            }
+                        }
+                    }
+                    // Always store undo for the cell
                     if let Some(adj) = &adj_chunk_gd {
                         let restore = adj.bind().get_height(edge.adj_cell);
                         Self::set_nested_dict(
@@ -3170,12 +3312,9 @@ impl PixyTerrainPlugin {
         do_wall_1: &mut VarDictionary,
         undo_wall_1: &mut VarDictionary,
     ) {
-        // Set vertex colors from terrain's default wall texture
+        // Compute wall colors locally without overwriting the user's vertex paint selection
         let default_wall_tex = terrain.bind().default_wall_texture;
-        self.set_vertex_colors(default_wall_tex);
-
-        let vc0 = self.vertex_color_0;
-        let vc1 = self.vertex_color_1;
+        let (vc0, vc1) = marching_squares::texture_index_to_colors(default_wall_tex);
 
         // Collect all cells in the height pattern, then expand ±1
         let mut cells_to_process: Vec<(Vector2i, Vector2i)> = Vec::new(); // (chunk, cell)

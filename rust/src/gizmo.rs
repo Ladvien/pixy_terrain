@@ -129,11 +129,12 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
                     let world_x = (chunk_key[0] * (dim.x - 1) + cell_key[0]) as f32 * cell_size.x;
                     let world_z = (chunk_key[1] * (dim.z - 1) + cell_key[1]) as f32 * cell_size.y;
 
-                    // Get base height from terrain
+                    // Get base height from terrain (safe access avoids OOB crash)
                     let base_y = if let Some(chunk) = t.get_chunk(chunk_key[0], chunk_key[1]) {
                         chunk
                             .bind()
-                            .get_height(Vector2i::new(cell_key[0], cell_key[1]))
+                            .get_height_at(cell_key[0], cell_key[1])
+                            .unwrap_or(0.0)
                     } else {
                         0.0
                     };
@@ -187,34 +188,49 @@ impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
             let half = state.brush_size / 2.0;
             let mut brush_lines = PackedVector3Array::new();
 
+            let gizmo_offset = 0.3;
+
             match state.brush_type {
                 BrushType::Round => {
                     let segments = 32;
                     for i in 0..segments {
                         let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
                         let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-                        brush_lines.push(Vector3::new(
-                            pos.x + half * a0.cos(),
-                            pos.y + 0.3,
-                            pos.z + half * a0.sin(),
-                        ));
-                        brush_lines.push(Vector3::new(
-                            pos.x + half * a1.cos(),
-                            pos.y + 0.3,
-                            pos.z + half * a1.sin(),
-                        ));
+                        let x0 = pos.x + half * a0.cos();
+                        let z0 = pos.z + half * a0.sin();
+                        let x1 = pos.x + half * a1.cos();
+                        let z1 = pos.z + half * a1.sin();
+                        let y0 = sample_terrain_height(&t, x0, z0, dim, cell_size, pos.y, gizmo_offset);
+                        let y1 = sample_terrain_height(&t, x1, z1, dim, cell_size, pos.y, gizmo_offset);
+                        brush_lines.push(Vector3::new(x0, y0, z0));
+                        brush_lines.push(Vector3::new(x1, y1, z1));
                     }
                 }
                 BrushType::Square => {
-                    let y = pos.y + 0.3;
-                    brush_lines.push(Vector3::new(pos.x - half, y, pos.z - half));
-                    brush_lines.push(Vector3::new(pos.x + half, y, pos.z - half));
-                    brush_lines.push(Vector3::new(pos.x + half, y, pos.z - half));
-                    brush_lines.push(Vector3::new(pos.x + half, y, pos.z + half));
-                    brush_lines.push(Vector3::new(pos.x + half, y, pos.z + half));
-                    brush_lines.push(Vector3::new(pos.x - half, y, pos.z + half));
-                    brush_lines.push(Vector3::new(pos.x - half, y, pos.z + half));
-                    brush_lines.push(Vector3::new(pos.x - half, y, pos.z - half));
+                    // Subdivide each side into segments so the square conforms to terrain
+                    let subdivisions = 8;
+                    let corners = [
+                        Vector2::new(pos.x - half, pos.z - half),
+                        Vector2::new(pos.x + half, pos.z - half),
+                        Vector2::new(pos.x + half, pos.z + half),
+                        Vector2::new(pos.x - half, pos.z + half),
+                    ];
+                    for side in 0..4 {
+                        let c0 = corners[side];
+                        let c1 = corners[(side + 1) % 4];
+                        for s in 0..subdivisions {
+                            let t0 = s as f32 / subdivisions as f32;
+                            let t1 = (s + 1) as f32 / subdivisions as f32;
+                            let x0 = c0.x + (c1.x - c0.x) * t0;
+                            let z0 = c0.y + (c1.y - c0.y) * t0;
+                            let x1 = c0.x + (c1.x - c0.x) * t1;
+                            let z1 = c0.y + (c1.y - c0.y) * t1;
+                            let y0 = sample_terrain_height(&t, x0, z0, dim, cell_size, pos.y, gizmo_offset);
+                            let y1 = sample_terrain_height(&t, x1, z1, dim, cell_size, pos.y, gizmo_offset);
+                            brush_lines.push(Vector3::new(x0, y0, z0));
+                            brush_lines.push(Vector3::new(x1, y1, z1));
+                        }
+                    }
                 }
             }
 
@@ -261,6 +277,34 @@ impl PixyTerrainGizmoPlugin {
             .create_material("addchunk", Color::from_rgba(0.0, 1.0, 0.0, 0.5));
         self.base_mut().create_handle_material("handles");
     }
+}
+
+/// Sample terrain height at a world XZ position by looking up the chunk and cell.
+/// Returns the height + offset, or fallback_y + offset if out of bounds.
+fn sample_terrain_height(
+    terrain: &PixyTerrain,
+    world_x: f32,
+    world_z: f32,
+    dim: Vector3i,
+    cell_size: Vector2,
+    fallback_y: f32,
+    offset: f32,
+) -> f32 {
+    let chunk_width = (dim.x - 1) as f32 * cell_size.x;
+    let chunk_depth = (dim.z - 1) as f32 * cell_size.y;
+
+    let chunk_x = (world_x / chunk_width).floor() as i32;
+    let chunk_z = (world_z / chunk_depth).floor() as i32;
+
+    let local_x = ((world_x - chunk_x as f32 * chunk_width) / cell_size.x).round() as i32;
+    let local_z = ((world_z - chunk_z as f32 * chunk_depth) / cell_size.y).round() as i32;
+
+    if let Some(chunk) = terrain.get_chunk(chunk_x, chunk_z) {
+        if let Some(h) = chunk.bind().get_height_at(local_x, local_z) {
+            return h + offset;
+        }
+    }
+    fallback_y + offset
 }
 
 /// Draw chunk border lines (free function to avoid borrow issues with self).
