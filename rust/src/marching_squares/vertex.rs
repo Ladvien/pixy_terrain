@@ -130,6 +130,7 @@ fn compute_vertex_color(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_vertex(
     geometry: &mut CellGeometry,
     vertex: Vector3,
