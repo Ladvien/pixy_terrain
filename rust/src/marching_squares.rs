@@ -3,6 +3,16 @@
 use godot::prelude::*;
 
 pub const BLEND_EDGE_SENSITIVITY: f32 = 1.25;
+const DEFAULT_TEXTURE_COLOR: Color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+const DOMINANT_CHANNEL_THRESHOLD: f32 = 0.99;
+const MIN_WEIGHT_THRESHOLD: f32 = 0.001;
+const MIN_HEIGHT_RANGE: f32 = 0.001;
+const MATERIAL_PACK_SCALE: f32 = 16.0;
+const MATERIAL_PACK_NORMALIZE: f32 = 255.0;
+const MATERIAL_INDEX_SCALE: f32 = 15.0;
+const COLOR_1_LOWER_THRESHOLD: f32 = 0.3;
+const COLOR_1_UPPER_THRESHOLD: f32 = 0.7;
+const WALL_BLEND_SENTINEL: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeMode {
@@ -44,6 +54,89 @@ impl MergeMode {
     }
     pub fn is_round(self) -> bool {
         matches!(self, MergeMode::SemiRound | MergeMode::Spherical)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Interpolated, // 0 - bilinear interpolation across corners
+    Direct, // 1 - use corner A's color directly
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorChannel {
+    Red = 0,
+    Green = 1,
+    Blue = 2,
+    Alpha = 3,
+}
+
+impl ColorChannel {
+    #[must_use]
+    pub fn dominant(c: Color) -> Self {
+        let mut max_val = c.r;
+        let mut channel = ColorChannel::Red;
+        if c.g > max_val {
+            max_val = c.g;
+            channel = ColorChannel::Green;
+        }
+        if c.b > max_val {
+            max_val = c.b;
+            channel = ColorChannel::Blue;
+        }
+        if c.a > max_val {
+            channel = ColorChannel::Alpha
+        }
+        channel
+    }
+
+    #[must_use]
+    pub fn dominant_index(c: Color) -> u8 {
+        Self::dominant(c) as u8
+    }
+
+    #[must_use]
+    pub fn from_index(idx: u8) -> Self {
+        match idx {
+            0 => ColorChannel::Red,
+            1 => ColorChannel::Green,
+            2 => ColorChannel::Blue,
+            3 => ColorChannel::Alpha,
+            _ => ColorChannel::Red,
+        }
+    }
+
+    #[must_use]
+    pub fn to_one_hot(self) -> Color {
+        match self {
+            ColorChannel::Red => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
+            ColorChannel::Green => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
+            ColorChannel::Blue => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
+            ColorChannel::Alpha => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct TextureIndex(pub u8); // 0-15
+
+impl TextureIndex {
+    #[must_use]
+    pub fn from_color_pair(c0: Color, c1: Color) -> Self {
+        Self(ColorChannel::dominant_index(c0) * 4 + ColorChannel::dominant_index(c1))
+    }
+
+    #[must_use]
+    pub fn to_color_pair(self) -> (Color, Color) {
+        let c0 = ColorChannel::from_index(self.0 / 4).to_one_hot();
+        let c1 = ColorChannel::from_index(self.0 % 4).to_one_hot();
+        (c0, c1)
+    }
+
+    #[must_use]
+    pub fn as_f32(self) -> f32 {
+        self.0 as f32
     }
 }
 
@@ -95,12 +188,12 @@ pub struct CellContext {
     pub cell_wall_upper_color_1: Color,
 
     // Precell dominant materials (3 texture system)
-    pub cell_material_a: i32,
-    pub cell_material_b: i32,
-    pub cell_material_c: i32,
+    pub cell_material_a: TextureIndex,
+    pub cell_material_b: TextureIndex,
+    pub cell_material_c: TextureIndex,
 
     // Blend mode from terrain system
-    pub blend_mode: i32,
+    pub blend_mode: BlendMode,
     pub use_ridge_texture: bool,
     pub ridge_threshold: f32,
 
@@ -156,13 +249,173 @@ impl CellContext {
         (a - b).abs() < self.merge_threshold
     }
     pub fn start_floor(&mut self) {
-        self.floor_mode = true
+        self.floor_mode = true;
     }
     pub fn start_wall(&mut self) {
         self.floor_mode = false;
     }
     pub fn color_index(&self, x: i32, z: i32) -> usize {
         (z * self.dimensions.x + x) as usize
+    }
+    fn corner_indices(&self) -> [usize; 4] {
+        let cc = self.cell_coords;
+        let dim_x = self.dimensions.x;
+        [
+            (cc.y * dim_x + cc.x) as usize,           // A
+            (cc.y * dim_x + cc.x + 1) as usize,       // B
+            ((cc.y + 1) * dim_x + cc.x) as usize,     // C
+            ((cc.y + 1) * dim_x + cc.x + 1) as usize, // D
+        ]
+    }
+    fn calculate_boundary_colors(&mut self) {
+        let corners = self.corner_indices();
+        let corner_heights = [
+            self.heights[0], // A
+            self.heights[1], // B
+            self.heights[3], // C
+            self.heights[2], // D
+        ];
+
+        let mut min_idx = 0;
+        let mut max_idx = 0;
+        for i in 1..4 {
+            if corner_heights[i] < corner_heights[min_idx] {
+                min_idx = i;
+            }
+            if corner_heights[i] > corner_heights[max_idx] {
+                max_idx = i;
+            }
+        }
+
+        // Floor boundary colors
+        self.cell_floor_lower_color_0 = self.color_map_0[corners[min_idx]];
+        self.cell_floor_upper_color_0 = self.color_map_0[corners[max_idx]];
+        self.cell_floor_lower_color_1 = self.color_map_1[corners[min_idx]];
+        self.cell_floor_upper_color_1 = self.color_map_1[corners[max_idx]];
+
+        // Wall boundary colors
+        self.cell_wall_lower_color_0 = self.wall_color_map_0[corners[min_idx]];
+        self.cell_wall_upper_color_0 = self.wall_color_map_0[corners[max_idx]];
+
+        self.cell_wall_lower_color_1 = self.wall_color_map_1[corners[min_idx]];
+        self.cell_wall_upper_color_1 = self.wall_color_map_1[corners[max_idx]];
+    }
+
+    fn calculate_cell_material_pair(&mut self) {
+        let corners = self.corner_indices();
+        let texture_a = TextureIndex::from_color_pair(
+            self.color_map_0[corners[0]],
+            self.color_map_1[corners[0]],
+        );
+
+        let texture_b = TextureIndex::from_color_pair(
+            self.color_map_0[corners[1]],
+            self.color_map_1[corners[1]],
+        );
+
+        let texture_c = TextureIndex::from_color_pair(
+            self.color_map_0[corners[2]],
+            self.color_map_1[corners[2]],
+        );
+
+        let texture_d = TextureIndex::from_color_pair(
+            self.color_map_0[corners[3]],
+            self.color_map_1[corners[3]],
+        );
+
+        let mut counts = [0u8; 16];
+        for t in [texture_a, texture_b, texture_c, texture_d] {
+            counts[t.0 as usize] += 1;
+        }
+
+        // Find top 3 by linear scan
+        let mut first = (0u8, 0u8); // (index, count)
+        let mut second = (0u8, 0u8);
+        let mut third = (0u8, 0u8);
+        for (i, &count) in counts.iter().enumerate() {
+            if count > first.1 {
+                third = second;
+                second = first;
+                first = (i as u8, count);
+            } else if count > second.1 {
+                third = second;
+                second = (i as u8, count);
+            } else if count > third.1 {
+                third = (i as u8, count);
+            }
+        }
+
+        self.cell_material_a = TextureIndex(first.0);
+        self.cell_material_b = if second.1 > 0 {
+            TextureIndex(second.0)
+        } else {
+            self.cell_material_a
+        };
+        self.cell_material_c = if third.1 > 0 {
+            TextureIndex(third.0)
+        } else {
+            self.cell_material_b
+        };
+    }
+
+    fn calculate_material_blend_data(
+        &self,
+        vertex_x: f32,
+        vertex_z: f32,
+        source_map_0: &[Color],
+        source_map_1: &[Color],
+    ) -> Color {
+        let corners = self.corner_indices();
+        let texture_a =
+            TextureIndex::from_color_pair(source_map_0[corners[0]], source_map_1[corners[0]]);
+        let texture_b =
+            TextureIndex::from_color_pair(source_map_0[corners[1]], source_map_1[corners[1]]);
+        let texture_c =
+            TextureIndex::from_color_pair(source_map_0[corners[2]], source_map_1[corners[2]]);
+        let texture_d =
+            TextureIndex::from_color_pair(source_map_0[corners[3]], source_map_1[corners[3]]);
+
+        // Bilinear interpolation weights
+        let weight_a = (1.0 - vertex_x) * (1.0 - vertex_z);
+        let weight_b = vertex_x * (1.0 - vertex_z);
+        let weight_c = (1.0 - vertex_x) * vertex_z;
+        let weight_d = vertex_x * vertex_z;
+
+        let mut weight_material_a = 0.0f32;
+        let mut weight_material_b = 0.0f32;
+        let mut weight_material_c = 0.0f32;
+
+        for (texture, weight) in [
+            (texture_a, weight_a),
+            (texture_b, weight_b),
+            (texture_c, weight_c),
+            (texture_d, weight_d),
+        ] {
+            if texture == self.cell_material_a {
+                weight_material_a += weight;
+            } else if texture == self.cell_material_b {
+                weight_material_b += weight;
+            } else if texture == self.cell_material_c {
+                weight_material_c += weight;
+            }
+        }
+
+        let total_weight = weight_material_a + weight_material_b + weight_material_c;
+        if total_weight > MIN_WEIGHT_THRESHOLD {
+            weight_material_a /= total_weight;
+            weight_material_b /= total_weight;
+        };
+
+        let packed_materials = (self.cell_material_a.as_f32()
+            + self.cell_material_b.as_f32() * MATERIAL_PACK_SCALE)
+            / MATERIAL_PACK_NORMALIZE;
+
+        Color::from_rgba(
+            packed_materials,
+            self.cell_material_c.as_f32() / MATERIAL_INDEX_SCALE,
+            weight_material_a,
+            weight_material_b,
+        )
     }
 }
 
@@ -176,245 +429,7 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 }
 
 pub fn get_dominant_color(c: Color) -> Color {
-    let mut max_val = c.r;
-    let mut idx = 0;
-
-    if c.g > max_val {
-        max_val = c.g;
-        idx = 1;
-    }
-    if c.b > max_val {
-        max_val = c.b;
-        idx = 2;
-    }
-    if c.a > max_val {
-        idx = 3;
-    }
-
-    match idx {
-        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
-        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
-        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
-        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-    }
-}
-
-pub fn get_texture_index_from_colors(c0: Color, c1: Color) -> i32 {
-    let c0_idx = {
-        let mut idx = 0;
-        let mut max = c0.r;
-        if c0.g > max {
-            max = c0.g;
-            idx = 1;
-        }
-        if c0.b > max {
-            max = c0.b;
-            idx = 2;
-        }
-        if c0.a > max {
-            idx = 3;
-        }
-        idx
-    };
-
-    let c1_idx = {
-        let mut idx = 0;
-        let mut max = c1.r;
-        if c1.g > max {
-            max = c1.g;
-            idx = 1;
-        }
-        if c1.b > max {
-            max = c1.b;
-            idx = 2;
-        }
-        if c1.a > max {
-            idx = 3;
-        }
-        idx
-    };
-
-    c0_idx * 4 + c1_idx
-}
-
-pub fn texture_index_to_colors(idx: i32) -> (Color, Color) {
-    let c0_channel = idx / 4;
-    let c1_channel = idx % 4;
-
-    let c0 = match c0_channel {
-        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
-        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
-        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
-        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-    };
-    let c1 = match c1_channel {
-        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
-        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
-        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
-        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-    };
-    (c0, c1)
-}
-
-fn calculate_cell_material_pair(ctx: &mut CellContext) {
-    let cc = ctx.cell_coords;
-    let dim_x = ctx.dimensions.x;
-
-    let texture_a = get_texture_index_from_colors(
-        ctx.color_map_0[(cc.y * dim_x + cc.x) as usize],
-        ctx.color_map_1[(cc.y * dim_x + cc.x) as usize],
-    );
-
-    let texture_b = get_texture_index_from_colors(
-        ctx.color_map_0[(cc.y * dim_x + cc.x + 1) as usize],
-        ctx.color_map_1[(cc.y * dim_x + cc.x + 1) as usize],
-    );
-
-    let texture_c = get_texture_index_from_colors(
-        ctx.color_map_0[((cc.y + 1) * dim_x + cc.x) as usize],
-        ctx.color_map_1[((cc.y + 1) * dim_x + cc.x) as usize],
-    );
-
-    let texture_d = get_texture_index_from_colors(
-        ctx.color_map_0[((cc.y + 1) * dim_x + cc.x + 1) as usize],
-        ctx.color_map_1[((cc.y + 1) * dim_x + cc.x + 1) as usize],
-    );
-
-    let mut counts = std::collections::HashMap::new();
-    for texture in [texture_a, texture_b, texture_c, texture_d] {
-        *counts.entry(texture).or_insert(0) += 1;
-    }
-
-    let mut sorted: Vec<_> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-
-    ctx.cell_material_a = sorted[0].0;
-    ctx.cell_material_b = if sorted.len() > 1 {
-        sorted[1].0
-    } else {
-        sorted[0].0
-    };
-    ctx.cell_material_c = if sorted.len() > 2 {
-        sorted[2].0
-    } else {
-        ctx.cell_material_b
-    };
-}
-
-fn calculate_material_blend_data(
-    ctx: &CellContext,
-    vertex_x: f32,
-    vertex_z: f32,
-    source_map_0: &[Color],
-    source_map_1: &[Color],
-) -> Color {
-    let cc = ctx.cell_coords;
-    let dim_x = ctx.dimensions.x;
-
-    let texture_a = get_texture_index_from_colors(
-        ctx.color_map_0[(cc.y * dim_x + cc.x) as usize],
-        ctx.color_map_1[(cc.y * dim_x + cc.x) as usize],
-    );
-
-    let texture_b = get_texture_index_from_colors(
-        ctx.color_map_0[(cc.y * dim_x + cc.x + 1) as usize],
-        ctx.color_map_1[(cc.y * dim_x + cc.x + 1) as usize],
-    );
-
-    let texture_c = get_texture_index_from_colors(
-        ctx.color_map_0[((cc.y + 1) * dim_x + cc.x) as usize],
-        ctx.color_map_1[((cc.y + 1) * dim_x + cc.x) as usize],
-    );
-
-    let texture_d = get_texture_index_from_colors(
-        ctx.color_map_0[((cc.y + 1) * dim_x + cc.x + 1) as usize],
-        ctx.color_map_1[((cc.y + 1) * dim_x + cc.x + 1) as usize],
-    );
-
-    // Bilinear interpolation weights
-    let weight_a = (1.0 - vertex_x) * (1.0 - vertex_z);
-    let weight_b = vertex_x * (1.0 - vertex_z);
-    let weight_c = (1.0 - vertex_x) * vertex_z;
-    let weight_d = vertex_x * vertex_z;
-
-    let mut weight_material_a = 0.0f32;
-    let mut weight_material_b = 0.0f32;
-    let mut weight_material_c = 0.0f32;
-
-    for (texture, weight) in [
-        (texture_a, weight_a),
-        (texture_b, weight_b),
-        (texture_c, weight_c),
-        (texture_d, weight_d),
-    ] {
-        if texture == ctx.cell_material_a {
-            weight_material_a += weight;
-        } else if texture == ctx.cell_material_b {
-            weight_material_b += weight;
-        } else if texture == ctx.cell_material_c {
-            weight_material_c += weight;
-        }
-    }
-
-    let total_weight = weight_material_a + weight_material_b + weight_material_c;
-    if total_weight > 0.001 {
-        weight_material_a /= total_weight;
-        weight_material_b /= total_weight;
-    };
-
-    let packed_materials = (ctx.cell_material_a as f32 + ctx.cell_material_b as f32 * 16.0) / 255.0;
-
-    Color::from_rgba(
-        packed_materials,
-        ctx.cell_material_c as f32 / 15.0,
-        weight_material_a,
-        weight_material_b,
-    )
-}
-
-fn calculate_boundary_colors(ctx: &mut CellContext) {
-    let cc = ctx.cell_coords;
-    let dim_x = ctx.dimensions.x;
-
-    let corner_indices = [
-        (cc.y * dim_x + cc.x) as usize,           // A
-        (cc.y * dim_x + cc.x + 1) as usize,       // B
-        ((cc.y + 1) * dim_x + cc.x) as usize,     // C
-        ((cc.y + 1) * dim_x + cc.x + 1) as usize, // D
-    ];
-    let corner_heights = [
-        ctx.heights[0], // A
-        ctx.heights[1], // B
-        ctx.heights[3], // C
-        ctx.heights[2], // D
-    ];
-
-    let mut min_idx = 0;
-    let mut max_idx = 0;
-    for i in 1..4 {
-        if corner_heights[i] < corner_heights[min_idx] {
-            min_idx = i;
-        }
-        if corner_heights[i] > corner_heights[max_idx] {
-            max_idx = i;
-        }
-    }
-
-    // Floor boundary colors
-    ctx.cell_floor_lower_color_0 = ctx.color_map_0[corner_indices[min_idx]];
-    ctx.cell_floor_upper_color_0 = ctx.color_map_0[corner_indices[max_idx]];
-    ctx.cell_floor_lower_color_1 = ctx.color_map_1[corner_indices[min_idx]];
-    ctx.cell_floor_upper_color_1 = ctx.color_map_1[corner_indices[max_idx]];
-
-    // Wall boundary colors
-    ctx.cell_wall_lower_color_0 = ctx.wall_color_map_0[corner_indices[min_idx]];
-    ctx.cell_wall_upper_color_0 = ctx.wall_color_map_0[corner_indices[max_idx]];
-
-    ctx.cell_wall_lower_color_1 = ctx.wall_color_map_1[corner_indices[min_idx]];
-    ctx.cell_wall_upper_color_1 = ctx.wall_color_map_1[corner_indices[max_idx]];
+    ColorChannel::dominant(c).to_one_hot()
 }
 
 fn sanitize_float(value: f32, fallback: f32, label: &str, cell: Vector2i) -> f32 {
@@ -432,15 +447,6 @@ fn sanitize_float(value: f32, fallback: f32, label: &str, cell: Vector2i) -> f32
     }
 }
 
-fn corner_indices(cc: Vector2i, dim_x: i32) -> [usize; 4] {
-    [
-        (cc.y * dim_x + cc.x) as usize,           // A
-        (cc.y * dim_x + cc.x + 1) as usize,       // B
-        ((cc.y + 1) * dim_x + cc.x) as usize,     // C
-        ((cc.y + 1) * dim_x + cc.x + 1) as usize, // D
-    ]
-}
-
 fn compute_vertex_color(
     params: &ColorSampleParams,
     corners: &[usize; 4],
@@ -451,11 +457,11 @@ fn compute_vertex_color(
     diagonal_midpoint: bool,
 ) -> Color {
     if ctx.is_new_chunk {
-        return Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+        return DEFAULT_TEXTURE_COLOR;
     }
 
     if diagonal_midpoint {
-        if ctx.blend_mode == 1 {
+        if ctx.blend_mode == BlendMode::Direct {
             return params.source_map[corners[0]];
         }
         let ad_color = lerp_color(
@@ -469,39 +475,30 @@ fn compute_vertex_color(
             0.5,
         );
 
-        let mut c = Color::from_rgba(
+        let c = Color::from_rgba(
             ad_color.r.min(bc_color.r),
             ad_color.g.min(bc_color.g),
             ad_color.b.min(bc_color.b),
             ad_color.a.min(bc_color.a),
         );
-        if ad_color.r > 0.99 || bc_color.r > 0.99 {
-            c.r = 1.0;
-        }
-        if ad_color.g > 0.99 || bc_color.g > 0.99 {
-            c.g = 1.0;
-        }
-        if ad_color.b > 0.99 || bc_color.b > 0.99 {
-            c.b = 1.0;
-        }
-        if ad_color.a > 0.99 || bc_color.a > 0.99 {
-            c.a = 1.0;
-        }
-
-        return c;
+        let color = preserve_high_channels(c, ad_color, bc_color);
+        return color;
     }
 
     if ctx.cell_is_boundary {
-        if ctx.blend_mode == 1 {
+        if ctx.blend_mode == BlendMode::Direct {
             return params.source_map[corners[0]];
         }
         let height_range = ctx.cell_max_height - ctx.cell_min_height;
 
-        let height_factor = if height_range > 0.001 {
-            ((y - ctx.cell_min_height) / height_range).clamp(0.0, 1.0)
+        let has_meaningful_height_range = height_range > MIN_HEIGHT_RANGE;
+        let height_factor = if has_meaningful_height_range {
+            let normalized_height = (y - ctx.cell_min_height) / height_range;
+            normalized_height.clamp(0.0, 1.0)
         } else {
             0.5
         };
+
         let c = if height_factor < params.lower_threshold {
             params.lower_color
         } else if height_factor > params.upper_threshold {
@@ -526,7 +523,7 @@ fn compute_vertex_color(
         params.source_map[corners[3]],
         x,
     );
-    if ctx.blend_mode != 1 {
+    if ctx.blend_mode != BlendMode::Direct {
         get_dominant_color(lerp_color(ab_color, cd_color, z))
     } else {
         params.source_map[corners[0]]
@@ -567,7 +564,7 @@ pub fn add_point(
     ctx: &mut CellContext,
     geometry: &mut CellGeometry,
     mut x: f32,
-    y: f32,
+    height: f32,
     mut z: f32,
     uv_x: f32,
     uv_y: f32,
@@ -575,7 +572,7 @@ pub fn add_point(
 ) {
     let cell = ctx.cell_coords;
     x = sanitize_float(x, 0.5, "x", cell);
-    let safe_y = sanitize_float(y, 0.0, "y", cell);
+    let safe_height = sanitize_float(height, 0.0, "y", cell);
     z = sanitize_float(z, 0.5, "z", cell);
 
     // Rotate
@@ -599,16 +596,17 @@ pub fn add_point(
     } else {
         Vector2::new(1.0, 1.0)
     };
-    let is_ridge = ctx.floor_mode && ctx.use_ridge_texture && (uv.y > 1.0 - ctx.ridge_threshold);
-    let use_wall_colors = !ctx.floor_mode || is_ridge;
+    let near_cliff_top = uv.y > 1.0 - ctx.ridge_threshold;
+    let is_ridge = ctx.floor_mode && ctx.use_ridge_texture && near_cliff_top;
+    let is_wall_geometry = !ctx.floor_mode;
+    let use_wall_colors = is_wall_geometry || is_ridge;
 
     let cc = ctx.cell_coords;
     let dim_x = ctx.dimensions.x;
-    let corners = corner_indices(cc, dim_x);
+    let corners = ctx.corner_indices();
 
-    // New chunk write-back
     if ctx.is_new_chunk {
-        let new_color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+        let new_color = DEFAULT_TEXTURE_COLOR;
         ctx.color_map_0[corners[0]] = new_color;
         ctx.color_map_1[corners[0]] = new_color;
         ctx.wall_color_map_0[corners[0]] = new_color;
@@ -622,56 +620,77 @@ pub fn add_point(
     };
 
     let (lower_0, upper_0) = if use_wall_colors {
-        (&ctx.cell_wall_lower_color_0, &ctx.cell_wall_upper_color_0)
+        (ctx.cell_wall_lower_color_0, ctx.cell_wall_upper_color_0)
     } else {
-        (&ctx.cell_floor_lower_color_0, &ctx.cell_floor_upper_color_0)
+        (ctx.cell_floor_lower_color_0, ctx.cell_floor_upper_color_0)
     };
 
     let (lower_1, upper_1) = if use_wall_colors {
-        (&ctx.cell_wall_lower_color_1, &ctx.cell_wall_upper_color_1)
+        (ctx.cell_wall_lower_color_1, ctx.cell_wall_upper_color_1)
     } else {
-        (&ctx.cell_floor_lower_color_1, &ctx.cell_floor_upper_color_1)
+        (ctx.cell_floor_lower_color_1, ctx.cell_floor_upper_color_1)
     };
 
     let params_0 = ColorSampleParams {
         source_map: source_map_0,
-        lower_color: *lower_0,
-        upper_color: *upper_0,
+        lower_color: lower_0,
+        upper_color: upper_0,
         lower_threshold: ctx.lower_threshold,
         upper_threshold: ctx.upper_threshold,
     };
 
     let params_1 = ColorSampleParams {
         source_map: source_map_1,
-        lower_color: *lower_1,
-        upper_color: *upper_1,
-        lower_threshold: 0.3,
-        upper_threshold: 0.7,
+        lower_color: lower_1,
+        upper_color: upper_1,
+        lower_threshold: COLOR_1_LOWER_THRESHOLD,
+        upper_threshold: COLOR_1_UPPER_THRESHOLD,
     };
 
-    let color_0 = compute_vertex_color(&params_0, &corners, ctx, x, safe_y, z, diagonal_midpoint);
+    let color_0 = compute_vertex_color(
+        &params_0,
+        &corners,
+        ctx,
+        x,
+        safe_height,
+        z,
+        diagonal_midpoint,
+    );
 
-    let color_1 = compute_vertex_color(&params_1, &corners, ctx, x, safe_y, z, diagonal_midpoint);
+    let color_1 = compute_vertex_color(
+        &params_1,
+        &corners,
+        ctx,
+        x,
+        safe_height,
+        z,
+        diagonal_midpoint,
+    );
 
     // Grass mask
     let mut grass_mask = ctx.grass_mask_map[(cc.y * dim_x + cc.x) as usize];
     grass_mask.g = if is_ridge { 1.0 } else { 0.0 };
 
     // Material blend
-    let mut material_blend = calculate_material_blend_data(ctx, x, y, source_map_0, source_map_1);
+    let mut material_blend =
+        ctx.calculate_material_blend_data(x, height, source_map_0, source_map_1);
     let blend_threshold = ctx.merge_threshold * BLEND_EDGE_SENSITIVITY;
-    let blend_ab = (ctx.ay() - ctx.by()).abs() < blend_threshold;
-    let blend_ac = (ctx.ay() - ctx.cy()).abs() < blend_threshold;
-    let blend_bd = (ctx.by() - ctx.dy()).abs() < blend_threshold;
-    let blend_cd = (ctx.cy() - ctx.dy()).abs() < blend_threshold;
-    if !(blend_ab && blend_ac && blend_bd && blend_cd) && ctx.floor_mode {
-        material_blend.a = 2.0;
+    let all_edges_merge = {
+        let ab_merged = (ctx.ay() - ctx.by()).abs() < blend_threshold;
+        let ac_merged = (ctx.ay() - ctx.cy()).abs() < blend_threshold;
+        let bd_merged = (ctx.by() - ctx.dy()).abs() < blend_threshold;
+        let cd_merged = (ctx.cy() - ctx.dy()).abs() < blend_threshold;
+        ab_merged && ac_merged && bd_merged && cd_merged
+    };
+    let floor_has_nearby_walls = !all_edges_merge && ctx.floor_mode;
+    if floor_has_nearby_walls {
+        material_blend.a = WALL_BLEND_SENTINEL;
     }
 
     // Vertex position
     let vertex = Vector3::new(
         (cc.x as f32 + x) * ctx.cell_size.x,
-        safe_y,
+        safe_height,
         (cc.y as f32 + z) * ctx.cell_size.y,
     );
 
@@ -684,7 +703,7 @@ pub fn add_point(
         );
         let fallback = Vector3::new(
             (cc.x as f32 + 0.5) * ctx.cell_size.x,
-            safe_y,
+            safe_height,
             (cc.y as f32 + 0.5) * ctx.cell_size.y,
         );
         let uv2 = Vector2::new(fallback.x, fallback.z) / ctx.cell_size;
@@ -722,4 +741,22 @@ pub fn add_point(
         material_blend,
         ctx.floor_mode,
     );
+}
+
+#[inline]
+fn preserve_high_channels(mut color: Color, a: Color, b: Color) -> Color {
+    if a.r > DOMINANT_CHANNEL_THRESHOLD || b.r > DOMINANT_CHANNEL_THRESHOLD {
+        color.r = 1.0;
+    }
+    if a.g > DOMINANT_CHANNEL_THRESHOLD || b.g > DOMINANT_CHANNEL_THRESHOLD {
+        color.g = 1.0;
+    }
+    if a.b > DOMINANT_CHANNEL_THRESHOLD || b.b > DOMINANT_CHANNEL_THRESHOLD {
+        color.b = 1.0;
+    }
+    if a.a > DOMINANT_CHANNEL_THRESHOLD || b.a > DOMINANT_CHANNEL_THRESHOLD {
+        color.a = 1.0;
+    }
+
+    color
 }
