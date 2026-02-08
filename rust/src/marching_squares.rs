@@ -502,13 +502,13 @@ fn compute_vertex_color(
         } else {
             0.5
         };
-        let c = if height_factor < ctx.lower_threshold {
+        let c = if height_factor < params.lower_threshold {
             params.lower_color
-        } else if height_factor > ctx.upper_threshold {
+        } else if height_factor > params.upper_threshold {
             params.upper_color
         } else {
-            let blend_zone = ctx.upper_threshold - ctx.lower_threshold;
-            let blend_factor = (height_factor - ctx.lower_threshold) / blend_zone;
+            let blend_zone = params.upper_threshold - params.lower_threshold;
+            let blend_factor = (height_factor - params.lower_threshold) / blend_zone;
             lerp_color(params.lower_color, params.upper_color, blend_factor)
         };
 
@@ -645,8 +645,8 @@ pub fn add_point(
         source_map: source_map_1,
         lower_color: *lower_1,
         upper_color: *upper_1,
-        lower_threshold: ctx.lower_threshold,
-        upper_threshold: ctx.upper_threshold,
+        lower_threshold: 0.3,
+        upper_threshold: 0.7,
     };
 
     let color_0 = compute_vertex_color(&params_0, &corners, ctx, x, safe_y, z, diagonal_midpoint);
@@ -672,11 +672,11 @@ pub fn add_point(
     let vertex = Vector3::new(
         (cc.x as f32 + x) * ctx.cell_size.x,
         safe_y,
-        (cc.y as f32 + y) * ctx.cell_size.y,
+        (cc.y as f32 + z) * ctx.cell_size.y,
     );
 
     // Final NaN check
-    if !vertex.x.is_finite() || vertex.y.is_finite() || !vertex.z.is_finite() {
+    if !vertex.x.is_finite() || !vertex.y.is_finite() || !vertex.z.is_finite() {
         godot_error!(
             "NaN in final vertex at cell ({}, {}). Using origin fallback.",
             cc.x,
@@ -699,6 +699,7 @@ pub fn add_point(
             material_blend,
             ctx.floor_mode,
         );
+        return;
     }
 
     // UV2
