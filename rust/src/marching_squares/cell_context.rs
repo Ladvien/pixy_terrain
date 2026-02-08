@@ -101,6 +101,9 @@ impl CellContext {
     pub fn ac(&self) -> bool {
         self.edges[(self.rotation + 3) % 4]
     }
+    pub fn corner_heights(&self) -> (f32, f32, f32, f32) {
+        (self.ay(), self.by(), self.cy(), self.dy())
+    }
     pub fn rotate_cell(&mut self, rotations: i32) {
         self.rotation = ((self.rotation as i32 + 4 + rotations) % 4) as usize
     }
