@@ -1,6 +1,9 @@
 // Marching squares terrain algorithm — implemented in Parts 02-05
 
 use godot::prelude::*;
+// =====================
+// ===== Constants =====
+// =====================
 
 pub const BLEND_EDGE_SENSITIVITY: f32 = 1.25;
 const DEFAULT_TEXTURE_COLOR: Color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
@@ -13,6 +16,10 @@ const MATERIAL_INDEX_SCALE: f32 = 15.0;
 const COLOR_1_LOWER_THRESHOLD: f32 = 0.3;
 const COLOR_1_UPPER_THRESHOLD: f32 = 0.7;
 const WALL_BLEND_SENTINEL: f32 = 2.0;
+
+// =====================
+// ===== Types  ========
+// =====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeMode {
@@ -152,6 +159,14 @@ pub struct CellGeometry {
     pub is_floor: Vec<bool>,
 }
 
+struct ColorSampleParams<'a> {
+    source_map: &'a [Color],
+    lower_color: Color,
+    upper_color: Color,
+    lower_threshold: f32,
+    upper_threshold: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CellContext {
     // Grid
@@ -210,6 +225,10 @@ pub struct CellContext {
     // Chunk world position for wall UV2 offset
     pub chunk_position: Vector3,
 }
+
+// ================================
+// ===== CellContext Impl  ========
+// ================================
 
 impl CellContext {
     pub fn ay(&self) -> f32 {
@@ -419,6 +438,11 @@ impl CellContext {
     }
 }
 
+// ================================
+// ===== Color Helpers ============
+// ================================
+#[must_use]
+#[inline]
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     Color::from_rgba(
         a.r + (b.r - a.r) * t,
@@ -432,6 +456,7 @@ pub fn get_dominant_color(c: Color) -> Color {
     ColorChannel::dominant(c).to_one_hot()
 }
 
+#[inline]
 fn sanitize_float(value: f32, fallback: f32, label: &str, cell: Vector2i) -> f32 {
     if value.is_finite() {
         value
@@ -447,6 +472,9 @@ fn sanitize_float(value: f32, fallback: f32, label: &str, cell: Vector2i) -> f32
     }
 }
 
+// ================================
+// ===== Vertex Generation ========
+// ================================
 fn compute_vertex_color(
     params: &ColorSampleParams,
     corners: &[usize; 4],
@@ -549,14 +577,6 @@ fn push_vertex(
     geometry.grass_mask.push(grass_mask);
     geometry.material_blend.push(material_blend);
     geometry.is_floor.push(is_floor);
-}
-
-struct ColorSampleParams<'a> {
-    source_map: &'a [Color],
-    lower_color: Color,
-    upper_color: Color,
-    lower_threshold: f32,
-    upper_threshold: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
