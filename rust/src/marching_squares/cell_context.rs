@@ -169,7 +169,7 @@ impl CellContext {
         self.color_state.wall_upper_color_1 = self.wall_color_map_1[corners[max_idx]];
     }
 
-    fn calculate_cell_material_pair(&mut self) {
+    pub(super) fn calculate_cell_material_pair(&mut self) {
         let corners = self.corner_indices();
         let texture_a = TextureIndex::from_color_pair(
             self.color_map_0[corners[0]],
