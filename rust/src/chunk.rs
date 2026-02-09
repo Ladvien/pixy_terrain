@@ -597,11 +597,170 @@ impl PixyTerrainChunk {
     }
 
     pub fn regenerate_mesh_with_material(&mut self, _terrain_material: Option<Gd<ShaderMaterial>>) {
-        godot_print!(
-            "PixyTerrainChunk: regenerate_mesh stub for chunk ({},
-  {})",
-            self.chunk_coords.x,
-            self.chunk_coords.y
-        );
+        self.cell_geometry.clear();
+
+        let (dim_x, dim_z) = self.get_dimensions_xz();
+        for z in 0..(dim_z - 1) {
+            for x in 0..(dim_x - 1) {
+                self.needs_update[z as usize][x as usize] = true
+            }
+        }
+
+        let mut st = SurfaceTool::new_gd();
+        st.begin(PrimitiveType::TRIANGLES);
+        st.set_custom_format(0, CustomFormat::RGBA_FLOAT);
+        st.set_custom_format(1, CustomFormat::RGBA_FLOAT);
+        st.set_custom_format(2, CustomFormat::RGBA_FLOAT);
+
+        // self.generate_terrain_cells(&mut st);
     }
+
+    fn generate_terrain_cells(&mut self, st: &mut Gd<SurfaceTool>) {
+        let dim = self.get_terrain_dimensions();
+        let cell_size = self.get_cell_size();
+        let merge_threshold = MergeMode::from_index(self.merge_mode).threshold();
+        let blend_mode = self.get_blend_mode();
+        let use_ridge_texture = self.get_use_ridge_texture();
+        let ridge_threshold = self.get_ridge_threshold();
+
+        let chunk_position = if self.base().is_inside_tree() {
+            self.base().get_global_position()
+        } else {
+            self.base().get_position()
+        };
+
+        let mut ctx = CellContext {
+            heights: [0.0; 4],
+            edges: [true; 4],
+            rotation: 0,
+            cell_coords: Vector2i::ZERO,
+            dimensions: dim,
+            cell_size,
+            merge_threshold,
+            higher_poly_floors: self.higher_poly_floors,
+            color_map_0: std::mem::take(&mut self.color_map_0),
+            color_map_1: std::mem::take(&mut self.color_map_1),
+            wall_color_map_0: std::mem::take(&mut self.wall_color_map_0),
+            wall_color_map_1: std::mem::take(&mut self.wall_color_map_1),
+            grass_mask_map: std::mem::take(&mut self.grass_mask_map),
+            color_state: marching_squares::CellColorState::default(),
+            blend_mode,
+            use_ridge_texture,
+            ridge_threshold,
+            is_new_chunk: self.is_new_chunk,
+            floor_mode: true,
+            lower_threshold: 0.3,
+            upper_threshold: 0.7,
+            chunk_position,
+        };
+
+        for z in 0..(dim.z - 1) {
+            for x in 0..(dim.x - 1) {
+                let key = [x, z];
+
+                if !self.needs_update[z as usize][x as usize] {
+                    if let Some(geo) = self.cell_geometry.get(&key) {
+                        let _ = replay_geometry(st, geo);
+                        continue;
+                    }
+                }
+
+                self.needs_update[z as usize][x as usize] = false;
+                let ay = self.height_map[z as usize][x as usize];
+                let by = self.height_map[z as usize][(x + 1) as usize];
+                let cy = self.height_map[(z + 1) as usize][x as usize];
+                let dy = self.height_map[(z + 1) as usize][(x + 1) as usize];
+
+                ctx.heights = [ay, by, dy, cy];
+                ctx.edges = [true; 4];
+                ctx.rotation = 0;
+                ctx.cell_coords = Vector2i::new(x, z);
+                ctx.color_state = marching_squares::CellColorState::default();
+                ctx.floor_mode = true;
+
+                let mut geo = CellGeometry::default();
+                marching_squares::generate_cell(&mut ctx, &mut geo);
+
+                if geo.verts.len() % 3 != 0 {
+                    godot_error!(
+                        "Cell ({}, {}) invalid geometry: {} verts.
+  Replacing with flat floor.",
+                        x,
+                        z,
+                        geo.verts.len()
+                    );
+                    geo = CellGeometry::default();
+                    ctx.rotation = 0;
+                    marching_squares::add_full_floor(&mut ctx, &mut geo);
+                }
+
+                let _ = replay_geometry(st, &geo);
+                self.cell_geometry.insert(key, geo);
+            }
+        }
+
+        // Move color maps back
+        self.color_map_0 = ctx.color_map_0;
+        self.color_map_1 = ctx.color_map_1;
+        self.wall_color_map_0 = ctx.wall_color_map_0;
+        self.wall_color_map_1 = ctx.wall_color_map_1;
+        self.grass_mask_map = ctx.grass_mask_map;
+
+        if self.is_new_chunk {
+            self.is_new_chunk = false;
+        }
+    }
+
+    fn configure_collision_layer(&mut self) {
+        let children = self.base().get_children();
+        for i in 0..children.len() {
+            let Some(child) = children.get(i) else {
+                continue;
+            };
+            if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
+                body.set_collision_layer(1 << 16);
+
+                let extra = self.terrain_config.extra_collision_layer;
+                if (1..=32).contains(&extra) {
+                    body.set_collision_layer_value(extra, true);
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn replay_geometry(st: &mut Gd<SurfaceTool>, geo: &CellGeometry) -> bool {
+    if geo.verts.len() % 3 != 0 {
+        godot_warn!(
+            "Skipping cell with invalid vertex count: {} (not
+  divisible by 3)",
+            geo.verts.len()
+        );
+        return false;
+    }
+
+    for i in 0..geo.verts.len() {
+        let vert = geo.verts[i];
+        if !vert.is_finite() || !vert.y.is_finite() {
+            godot_warn!(
+                "Skipping vertex with NaN/Inf: ({}, {}, {})",
+                vert.x,
+                vert.y,
+                vert.z
+            );
+            return false;
+        }
+        let smooth_group = if geo.is_floor[i] { 0 } else { u32::MAX };
+
+        st.set_smooth_group(smooth_group);
+        st.set_uv(geo.uvs[i]);
+        st.set_uv2(geo.uv2s[i]);
+        st.set_color(geo.colors_0[i]);
+        st.set_custom(0, geo.colors_1[i]);
+        st.set_custom(1, geo.grass_mask[i]);
+        st.set_custom(2, geo.material_blend[i]);
+        st.add_vertex(vert);
+    }
+    true
 }
