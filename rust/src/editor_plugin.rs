@@ -995,19 +995,983 @@ impl PixyTerrainPlugin {
     }
 
     fn sync_brush_size_slider(&self) {
-        // Stub — will sync UI slider in Part 17
+        if let Some(ref hbox) = self.attributes_hbox {
+            let slider_name = GString::from("size_slider" as &str);
+            if let Some(node) = hbox
+                .upcast_ref::<Node>()
+                .find_child_ex(&slider_name)
+                .recursive(true)
+                .owned(false)
+                .done()
+            {
+                let mut slider: Gd<HSlider> = node.cast();
+                slider.set_value(self.brush_size as f64);
+            }
+        }
+    }
+
+    fn update_slider_label(
+        container: &Gd<impl Inherits<Node>>,
+        name: &str,
+        label_text: &str,
+        value: f64,
+    ) {
+        let label_name_str = format!("{name}_label");
+        let label_name = GString::from(label_name_str.as_str());
+        if let Some(node) = container
+            .upcast_ref::<Node>()
+            .find_child_ex(&label_name)
+            .recursive(true)
+            .owned(false)
+            .done()
+        {
+            let mut label: Gd<Label> = node.cast();
+            label.set_text(&format!("{label_text}: {value:.1}"));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_slider_attribute(
+        &mut self,
+        name: &str,
+        label_text: &str,
+        min: f64,
+        max: f64,
+        step: f64,
+        current: f64,
+        plugin_ref: &Gd<PixyTerrainPlugin>,
+    ) {
+        let Some(ref mut hbox) = self.attributes_hbox else {
+            return;
+        };
+
+        let mut center = CenterContainer::new_alloc();
+        center.set_custom_minimum_size(Vector2::new(160.0, 36.0));
+
+        let mut vbox = VBoxContainer::new_alloc();
+        vbox.add_theme_constant_override("separation", 0);
+
+        let mut label = Label::new_alloc();
+        label.set_text(&format!("{label_text}: {current:.1}"));
+        label.set_name(&format!("{name}_label"));
+
+        let mut slider = HSlider::new_alloc();
+        slider.set_name(&format!("{name}_slider"));
+        slider.set_min(min);
+        slider.set_max(max);
+        slider.set_step(step);
+        slider.set_value(current);
+        slider.set_custom_minimum_size(Vector2::new(140.0, 0.0));
+
+        let callable = Callable::from_object_method(plugin_ref, "on_attribute_changed")
+            .bindv(&varray![name.to_variant()]);
+        slider.connect("value_changed", &callable);
+
+        vbox.add_child(&label);
+        vbox.add_child(&slider);
+        center.add_child(&vbox);
+        hbox.add_child(&center);
+    }
+
+    fn add_checkbox_attribute(
+        &mut self,
+        name: &str,
+        label_text: &str,
+        current: bool,
+        plugin_ref: &Gd<PixyTerrainPlugin>,
+    ) {
+        let Some(ref mut hbox) = self.attributes_hbox else {
+            return;
+        };
+
+        let mut center = CenterContainer::new_alloc();
+        center.set_custom_minimum_size(Vector2::new(100.0, 36.0));
+
+        let mut checkbox = CheckBox::new_alloc();
+        checkbox.set_text(label_text);
+        checkbox.set_pressed(current);
+
+        let callable = Callable::from_object_method(plugin_ref, "on_attribute_changed")
+            .bindv(&varray![name.to_variant()]);
+        checkbox.connect("toggled", &callable);
+
+        center.add_child(&checkbox);
+        hbox.add_child(&center);
+    }
+
+    fn add_option_attribute(
+        &mut self,
+        name: &str,
+        label_text: &str,
+        options: &[&str],
+        current_index: i64,
+        plugin_ref: &Gd<PixyTerrainPlugin>,
+    ) {
+        let Some(ref mut hbox) = self.attributes_hbox else {
+            return;
+        };
+
+        let mut center = CenterContainer::new_alloc();
+        center.set_custom_minimum_size(Vector2::new(120.0, 36.0));
+
+        let mut vbox = VBoxContainer::new_alloc();
+        vbox.add_theme_constant_override("separation", 0);
+
+        let mut label = Label::new_alloc();
+        label.set_text(label_text);
+
+        let mut option_btn = OptionButton::new_alloc();
+        for opt in options {
+            option_btn.add_item(*opt);
+        }
+        option_btn.select(current_index as i32);
+
+        let callable = Callable::from_object_method(plugin_ref, "on_attribute_changed")
+            .bindv(&varray![name.to_variant()]);
+        option_btn.connect("item_selected", &callable);
+
+        vbox.add_child(&label);
+        vbox.add_child(&option_btn);
+        center.add_child(&vbox);
+        hbox.add_child(&center);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_spinbox_attribute(
+        &mut self,
+        name: &str,
+        label_text: &str,
+        min: f64,
+        max: f64,
+        step: f64,
+        current: f64,
+        plugin_ref: &Gd<PixyTerrainPlugin>,
+    ) {
+        let Some(ref mut hbox) = self.attributes_hbox else {
+            return;
+        };
+
+        let mut center = CenterContainer::new_alloc();
+        center.set_custom_minimum_size(Vector2::new(120.0, 36.0));
+
+        let mut vbox = VBoxContainer::new_alloc();
+        vbox.add_theme_constant_override("separation", 0);
+
+        let mut label = Label::new_alloc();
+        label.set_text(label_text);
+
+        let mut spin = SpinBox::new_alloc();
+        spin.set_min(min);
+        spin.set_max(max);
+        spin.set_step(step);
+        spin.set_value(current);
+        spin.set_custom_minimum_size(Vector2::new(80.0, 0.0));
+
+        let callable = Callable::from_object_method(plugin_ref, "on_attribute_changed")
+            .bindv(&varray![name.to_variant()]);
+        spin.connect("value_changed", &callable);
+
+        vbox.add_child(&label);
+        vbox.add_child(&spin);
+        center.add_child(&vbox);
+        hbox.add_child(&center);
+    }
+
+    fn add_quick_paint_dropdown(&mut self, plugin_ref: &Gd<PixyTerrainPlugin>) {
+        let mut options: Vec<&str> = vec!["None"];
+        let preset_names: Vec<String> = self
+            .quick_paint_presets
+            .iter()
+            .map(|p| p.bind().paint_name.to_string())
+            .collect();
+        let preset_refs: Vec<&str> = preset_names.iter().map(|s| s.as_str()).collect();
+        options.extend(preset_refs);
+
+        let current_idx = if let Some(ref active) = self.current_quick_paint {
+            self.quick_paint_presets
+                .iter()
+                .position(|p| p.instance_id() == active.instance_id())
+                .map(|i| (i + 1) as i64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        self.add_option_attribute(
+            "quick_paint",
+            "QuickPaint",
+            &options,
+            current_idx,
+            plugin_ref,
+        );
     }
 
     fn apply_collision_visibility_to_all_chunks(&self) {
-        // Stub — will iterate chunk StaticBody3D children in Part 16
+        let Some(ref terrain_node) = self.current_terrain else {
+            return;
+        };
+        if !terrain_node.is_instance_valid() {
+            return;
+        }
+        let terrain: Gd<PixyTerrain> = terrain_node.clone().cast();
+        let t = terrain.bind();
+        let keys = t.get_chunk_keys();
+        for i in 0..keys.len() {
+            let k = keys[i];
+            if let Some(chunk) = t.get_chunk(k.x as i32, k.y as i32) {
+                Self::set_chunk_collision_visible(
+                    &chunk.upcast::<Node>(),
+                    self.show_collision_wireframes,
+                );
+            }
+        }
     }
 
-    fn rebuild_attributes_impl(&mut self, _plugin_ref: Gd<PixyTerrainPlugin>) {
-        // Stub — will build per-mode attribute controls in Part 17
+    fn set_chunk_collision_visible(chunk_node: &Gd<Node>, visible: bool) {
+        let children = chunk_node.get_children();
+        for i in 0..children.len() {
+            if let Some(child) = children.get(i) {
+                if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
+                    body.set_visible(visible);
+                }
+            }
+        }
     }
 
-    fn rebuild_texture_panel_impl(&mut self, _plugin_ref: Gd<PixyTerrainPlugin>) {
-        // Stub — will build right-side texture panel in Part 17
+    fn rebuild_attributes_impl(&mut self, plugin_ref: Gd<PixyTerrainPlugin>) {
+        // Clear existing children
+        if let Some(ref mut hbox) = self.attributes_hbox {
+            let count = hbox.get_child_count();
+            for i in (0..count).rev() {
+                if let Some(mut child) = hbox.get_child(i) {
+                    hbox.remove_child(&child);
+                    child.queue_free();
+                }
+            }
+        }
+
+        match self.mode {
+            TerrainToolMode::Height => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute("flatten", "Flatten", self.flatten, &plugin_ref);
+                self.add_checkbox_attribute("falloff", "Falloff", self.falloff, &plugin_ref);
+                self.add_quick_paint_dropdown(&plugin_ref);
+            }
+            TerrainToolMode::Level => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "height",
+                    "Height",
+                    -50.0,
+                    50.0,
+                    0.1,
+                    self.height as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute("falloff", "Falloff", self.falloff, &plugin_ref);
+                self.add_quick_paint_dropdown(&plugin_ref);
+            }
+            TerrainToolMode::Smooth => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "strength",
+                    "Strength",
+                    0.1,
+                    10.0,
+                    0.1,
+                    self.strength as f64,
+                    &plugin_ref,
+                );
+                self.add_quick_paint_dropdown(&plugin_ref);
+            }
+            TerrainToolMode::Bridge => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "ease_value",
+                    "Ease",
+                    -5.0,
+                    5.0,
+                    0.1,
+                    self.ease_value as f64,
+                    &plugin_ref,
+                );
+                self.add_quick_paint_dropdown(&plugin_ref);
+            }
+            TerrainToolMode::GrassMask => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "mask_mode",
+                    "Mask",
+                    self.should_mask_grass,
+                    &plugin_ref,
+                );
+            }
+            TerrainToolMode::VertexPaint => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+                let mat_options: Vec<&str> = (0..15)
+                    .map(|i| match i {
+                        0 => "Tex 0",
+                        1 => "Tex 1",
+                        2 => "Tex 2",
+                        3 => "Tex 3",
+                        4 => "Tex 4",
+                        5 => "Tex 5",
+                        6 => "Tex 6",
+                        7 => "Tex 7",
+                        8 => "Tex 8",
+                        9 => "Tex 9",
+                        10 => "Tex 10",
+                        11 => "Tex 11",
+                        12 => "Tex 12",
+                        13 => "Tex 13",
+                        14 => "Tex 14",
+                        _ => "Wall",
+                    })
+                    .collect();
+                self.add_option_attribute(
+                    "material",
+                    "Material",
+                    &mat_options,
+                    self.vertex_color_idx as i64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "paint_walls",
+                    "Paint Walls",
+                    self.paint_walls_mode,
+                    &plugin_ref,
+                );
+            }
+            TerrainToolMode::DebugBrush => {
+                self.add_option_attribute(
+                    "brush_type",
+                    "Brush",
+                    &["Round", "Square"],
+                    self.brush_type as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "size",
+                    "Size",
+                    MIN_BRUSH_SIZE as f64,
+                    MAX_BRUSH_SIZE as f64,
+                    BRUSH_SIZE_STEP as f64,
+                    self.brush_size as f64,
+                    &plugin_ref,
+                );
+            }
+            TerrainToolMode::ChunkManagement => {
+                if let Some(ref terrain) = self.current_terrain {
+                    if terrain.is_instance_valid() {
+                        let t: Gd<PixyTerrain> = terrain.clone().cast();
+                        let keys = t.bind().get_chunk_keys();
+
+                        if !keys.is_empty() {
+                            let mut chunk_options: Vec<String> = Vec::new();
+                            for i in 0..keys.len() {
+                                let k = keys[i];
+                                chunk_options
+                                    .push(format!("Chunk ({}, {})", k.x as i32, k.y as i32));
+                            }
+                            let chunk_refs: Vec<&str> =
+                                chunk_options.iter().map(|s| s.as_str()).collect();
+
+                            let current_idx = if let Some(sel) = self.selected_chunk_coords {
+                                (0..keys.len())
+                                    .find(|&i| {
+                                        let k = keys[i];
+                                        k.x as i32 == sel.x && k.y as i32 == sel.y
+                                    })
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+
+                            self.add_option_attribute(
+                                "chunk_select",
+                                "Chunk",
+                                &chunk_refs,
+                                current_idx as i64,
+                                &plugin_ref,
+                            );
+
+                            let sel_coords = if let Some(sel) = self.selected_chunk_coords {
+                                sel
+                            } else if !keys.is_empty() {
+                                let k = keys[0];
+                                Vector2i::new(k.x as i32, k.y as i32)
+                            } else {
+                                Vector2i::ZERO
+                            };
+
+                            let merge_mode = if let Some(chunk) =
+                                t.bind().get_chunk(sel_coords.x, sel_coords.y)
+                            {
+                                chunk.bind().merge_mode
+                            } else {
+                                1
+                            };
+
+                            self.add_option_attribute(
+                                "chunk_merge_mode",
+                                "Merge",
+                                &[
+                                    "Cubic",
+                                    "Polyhedron",
+                                    "RoundedPoly",
+                                    "SemiRound",
+                                    "Spherical",
+                                ],
+                                merge_mode as i64,
+                                &plugin_ref,
+                            );
+                        }
+                    }
+                }
+            }
+            TerrainToolMode::TerrainSettings => {
+                let (
+                    dims,
+                    cell_sz,
+                    blend,
+                    wall_th,
+                    ridge_th,
+                    ledge_th,
+                    merge,
+                    grass_sub,
+                    grass_sz,
+                    def_wall,
+                    blend_sharp,
+                    blend_ns,
+                    blend_nstr,
+                    anim_fps,
+                    use_ridge_tex,
+                    extra_coll,
+                ) = if let Some(ref terrain) = self.current_terrain {
+                    if terrain.is_instance_valid() {
+                        let t: Gd<PixyTerrain> = terrain.clone().cast();
+                        let tb = t.bind();
+                        (
+                            tb.dimensions,
+                            tb.cell_size,
+                            tb.blend_mode,
+                            tb.wall_threshold,
+                            tb.ridge_threshold,
+                            tb.ledge_threshold,
+                            tb.merge_mode,
+                            tb.grass_subdivisions,
+                            tb.grass_size,
+                            tb.default_wall_texture,
+                            tb.blend_sharpness,
+                            tb.blend_noise_scale,
+                            tb.blend_noise_strength,
+                            tb.animation_fps,
+                            tb.use_ridge_texture,
+                            tb.extra_collision_layer,
+                        )
+                    } else {
+                        return;
+                    }
+                } else {
+                    return;
+                };
+
+                self.add_spinbox_attribute(
+                    "dim_x",
+                    "Dim X",
+                    3.0,
+                    129.0,
+                    1.0,
+                    dims.x as f64,
+                    &plugin_ref,
+                );
+                self.add_spinbox_attribute(
+                    "dim_z",
+                    "Dim Z",
+                    3.0,
+                    129.0,
+                    1.0,
+                    dims.z as f64,
+                    &plugin_ref,
+                );
+                self.add_spinbox_attribute(
+                    "dim_y",
+                    "Height",
+                    1.0,
+                    256.0,
+                    1.0,
+                    dims.y as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cell_size_x",
+                    "Cell X",
+                    0.1,
+                    10.0,
+                    0.1,
+                    cell_sz.x as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cell_size_z",
+                    "Cell Z",
+                    0.1,
+                    10.0,
+                    0.1,
+                    cell_sz.y as f64,
+                    &plugin_ref,
+                );
+                self.add_option_attribute(
+                    "blend_mode",
+                    "Blend",
+                    &["Smooth", "Hard", "Hard Blend"],
+                    blend as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wall_threshold",
+                    "Wall Thresh",
+                    0.0,
+                    0.5,
+                    0.01,
+                    wall_th as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "ridge_threshold",
+                    "Ridge Thresh",
+                    0.0,
+                    1.0,
+                    0.01,
+                    ridge_th as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "ledge_threshold",
+                    "Ledge Thresh",
+                    0.0,
+                    1.0,
+                    0.01,
+                    ledge_th as f64,
+                    &plugin_ref,
+                );
+                self.add_option_attribute(
+                    "merge_mode",
+                    "Merge",
+                    &[
+                        "Cubic",
+                        "Polyhedron",
+                        "RoundedPoly",
+                        "SemiRound",
+                        "Spherical",
+                    ],
+                    merge as i64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "use_ridge_texture",
+                    "Ridge Tex",
+                    use_ridge_tex,
+                    &plugin_ref,
+                );
+                self.add_spinbox_attribute(
+                    "grass_subdivisions",
+                    "Grass Subs",
+                    1.0,
+                    10.0,
+                    1.0,
+                    grass_sub as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "grass_size_x",
+                    "Grass W",
+                    0.1,
+                    5.0,
+                    0.1,
+                    grass_sz.x as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "grass_size_y",
+                    "Grass H",
+                    0.1,
+                    5.0,
+                    0.1,
+                    grass_sz.y as f64,
+                    &plugin_ref,
+                );
+                self.add_spinbox_attribute(
+                    "animation_fps",
+                    "Anim FPS",
+                    0.0,
+                    60.0,
+                    1.0,
+                    anim_fps as f64,
+                    &plugin_ref,
+                );
+                self.add_spinbox_attribute(
+                    "default_wall_texture",
+                    "Wall Tex",
+                    0.0,
+                    15.0,
+                    1.0,
+                    def_wall as f64,
+                    &plugin_ref,
+                );
+                let coll_options: Vec<&str> = (9..=32)
+                    .map(|i| match i {
+                        9 => "Layer 9",
+                        10 => "Layer 10",
+                        11 => "Layer 11",
+                        12 => "Layer 12",
+                        13 => "Layer 13",
+                        14 => "Layer 14",
+                        15 => "Layer 15",
+                        16 => "Layer 16",
+                        17 => "Layer 17",
+                        18 => "Layer 18",
+                        19 => "Layer 19",
+                        20 => "Layer 20",
+                        21 => "Layer 21",
+                        22 => "Layer 22",
+                        23 => "Layer 23",
+                        24 => "Layer 24",
+                        25 => "Layer 25",
+                        26 => "Layer 26",
+                        27 => "Layer 27",
+                        28 => "Layer 28",
+                        29 => "Layer 29",
+                        30 => "Layer 30",
+                        31 => "Layer 31",
+                        32 => "Layer 32",
+                        _ => "Layer 9",
+                    })
+                    .collect();
+                self.add_option_attribute(
+                    "extra_collision_layer",
+                    "Coll Layer",
+                    &coll_options,
+                    (extra_coll - 9).max(0) as i64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "blend_sharpness",
+                    "Blend Sharp",
+                    0.0,
+                    20.0,
+                    0.1,
+                    blend_sharp as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "blend_noise_scale",
+                    "Noise Scale",
+                    0.0,
+                    50.0,
+                    0.1,
+                    blend_ns as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "blend_noise_strength",
+                    "Noise Str",
+                    0.0,
+                    5.0,
+                    0.01,
+                    blend_nstr as f64,
+                    &plugin_ref,
+                );
+            }
+        }
+    }
+
+    fn rebuild_texture_panel_impl(&mut self, plugin_ref: Gd<PixyTerrainPlugin>) {
+        // Clear existing children (borrow scroll, then release)
+        if let Some(ref mut scroll) = self.texture_panel {
+            let count = scroll.get_child_count();
+            for i in (0..count).rev() {
+                if let Some(mut child) = scroll.get_child(i) {
+                    scroll.remove_child(&child);
+                    child.queue_free();
+                }
+            }
+        } else {
+            return;
+        }
+
+        // Only populate when a terrain is selected
+        let terrain_node = match self.current_terrain {
+            Some(ref t) if t.is_instance_valid() => t.clone(),
+            _ => return,
+        };
+
+        let terrain: Gd<PixyTerrain> = terrain_node.cast();
+        let t = terrain.bind();
+
+        // Read current values
+        let scales = [
+            t.texture_scale_1,
+            t.texture_scale_2,
+            t.texture_scale_3,
+            t.texture_scale_4,
+            t.texture_scale_5,
+            t.texture_scale_6,
+            t.texture_scale_7,
+            t.texture_scale_8,
+            t.texture_scale_9,
+            t.texture_scale_10,
+            t.texture_scale_11,
+            t.texture_scale_12,
+            t.texture_scale_13,
+            t.texture_scale_14,
+            t.texture_scale_15,
+        ];
+        let has_grass = [
+            true, // tex1 always has grass
+            t.tex2_has_grass,
+            t.tex3_has_grass,
+            t.tex4_has_grass,
+            t.tex5_has_grass,
+            t.tex6_has_grass,
+        ];
+        let ground_colors = [
+            t.ground_color,
+            t.ground_color_2,
+            t.ground_color_3,
+            t.ground_color_4,
+            t.ground_color_5,
+            t.ground_color_6,
+        ];
+        let ground_textures: [Option<Gd<godot::classes::Texture2D>>; 15] = [
+            t.ground_texture.clone(),
+            t.texture_2.clone(),
+            t.texture_3.clone(),
+            t.texture_4.clone(),
+            t.texture_5.clone(),
+            t.texture_6.clone(),
+            t.texture_7.clone(),
+            t.texture_8.clone(),
+            t.texture_9.clone(),
+            t.texture_10.clone(),
+            t.texture_11.clone(),
+            t.texture_12.clone(),
+            t.texture_13.clone(),
+            t.texture_14.clone(),
+            t.texture_15.clone(),
+        ];
+        let grass_sprites: [Option<Gd<godot::classes::Texture2D>>; 6] = [
+            t.grass_sprite.clone(),
+            t.grass_sprite_tex_2.clone(),
+            t.grass_sprite_tex_3.clone(),
+            t.grass_sprite_tex_4.clone(),
+            t.grass_sprite_tex_5.clone(),
+            t.grass_sprite_tex_6.clone(),
+        ];
+        drop(t);
+
+        let mut vbox = VBoxContainer::new_alloc();
+        vbox.set_name("TextureSettingsVBox");
+        vbox.add_theme_constant_override("separation", 6);
+
+        let mut header = Label::new_alloc();
+        header.set_text("Texture Settings");
+        vbox.add_child(&header);
+
+        for slot in 1..=15i32 {
+            let sep = HSeparator::new_alloc();
+            vbox.add_child(&sep);
+
+            let mut slot_label = Label::new_alloc();
+            slot_label.set_text(&format!("Texture {slot}"));
+            vbox.add_child(&slot_label);
+
+            // Ground texture picker
+            let tex_name = format!("ground_tex_{slot}");
+            let mut tex_label = Label::new_alloc();
+            tex_label.set_text("Ground Texture");
+
+            let mut tex_picker = EditorResourcePicker::new_alloc();
+            tex_picker.set_base_type("Texture2D");
+            if let Some(ref tex) = ground_textures[(slot - 1) as usize] {
+                tex_picker.set_edited_resource(tex);
+            }
+            tex_picker.set_custom_minimum_size(Vector2::new(180.0, 28.0));
+
+            let callable = Callable::from_object_method(&plugin_ref, "on_texture_resource_changed")
+                .bindv(&varray![tex_name.to_variant()]);
+            tex_picker.connect("resource_changed", &callable);
+
+            vbox.add_child(&tex_label);
+            vbox.add_child(&tex_picker);
+
+            // UV scale slider
+            let scale_name = format!("tex_scale_{slot}");
+            let mut scale_label = Label::new_alloc();
+            scale_label.set_text(&format!("Scale: {:.1}", scales[(slot - 1) as usize]));
+            scale_label.set_name(&format!("{scale_name}_label"));
+
+            let mut scale_slider = HSlider::new_alloc();
+            scale_slider.set_min(0.1);
+            scale_slider.set_max(40.0);
+            scale_slider.set_step(0.1);
+            scale_slider.set_value(scales[(slot - 1) as usize] as f64);
+            scale_slider.set_custom_minimum_size(Vector2::new(180.0, 0.0));
+
+            let callable = Callable::from_object_method(&plugin_ref, "on_attribute_changed")
+                .bindv(&varray![scale_name.to_variant()]);
+            scale_slider.connect("value_changed", &callable);
+
+            vbox.add_child(&scale_label);
+            vbox.add_child(&scale_slider);
+
+            // Ground color picker (slots 1-6 only)
+            if slot <= 6 {
+                let color_name = format!("ground_color_{slot}");
+                let mut color_label = Label::new_alloc();
+                color_label.set_text("Ground Color");
+
+                let mut color_picker = ColorPickerButton::new_alloc();
+                color_picker.set_pick_color(ground_colors[(slot - 1) as usize]);
+                color_picker.set_custom_minimum_size(Vector2::new(180.0, 28.0));
+
+                let callable = Callable::from_object_method(&plugin_ref, "on_attribute_changed")
+                    .bindv(&varray![color_name.to_variant()]);
+                color_picker.connect("color_changed", &callable);
+
+                vbox.add_child(&color_label);
+                vbox.add_child(&color_picker);
+
+                // Grass sprite picker
+                let sprite_name = format!("grass_sprite_{slot}");
+                let mut sprite_label = Label::new_alloc();
+                sprite_label.set_text("Grass Sprite");
+
+                let mut sprite_picker = EditorResourcePicker::new_alloc();
+                sprite_picker.set_base_type("Texture2D");
+                if let Some(ref tex) = grass_sprites[(slot - 1) as usize] {
+                    sprite_picker.set_edited_resource(tex);
+                }
+                sprite_picker.set_custom_minimum_size(Vector2::new(180.0, 28.0));
+
+                let callable =
+                    Callable::from_object_method(&plugin_ref, "on_texture_resource_changed")
+                        .bindv(&varray![sprite_name.to_variant()]);
+                sprite_picker.connect("resource_changed", &callable);
+
+                vbox.add_child(&sprite_label);
+                vbox.add_child(&sprite_picker);
+            }
+
+            // Has grass checkbox (slots 2-6 only, slot 1 always has grass)
+            if (2..=6).contains(&slot) {
+                let grass_name = format!("tex_has_grass_{slot}");
+                let mut grass_cb = CheckBox::new_alloc();
+                grass_cb.set_text("Has Grass");
+                grass_cb.set_pressed(has_grass[(slot - 1) as usize]);
+
+                let callable = Callable::from_object_method(&plugin_ref, "on_attribute_changed")
+                    .bindv(&varray![grass_name.to_variant()]);
+                grass_cb.connect("toggled", &callable);
+
+                vbox.add_child(&grass_cb);
+            }
+        }
+
+        // Re-borrow scroll to add the completed vbox
+        if let Some(ref mut scroll) = self.texture_panel {
+            scroll.add_child(&vbox);
+        }
     }
 
     fn initialize_draw_state(
@@ -2025,5 +2989,138 @@ impl PixyTerrainPlugin {
         }
         self.base_mut()
             .call_deferred("apply_collision_visibility_deferred", &[]);
+    }
+
+    fn apply_terrain_setting(&mut self, name: &str, value: &Variant) {
+        let Some(ref terrain_node) = self.current_terrain else {
+            return;
+        };
+        if !terrain_node.is_instance_valid() {
+            return;
+        }
+        let mut terrain: Gd<PixyTerrain> = terrain_node.clone().cast();
+
+        {
+            let mut t = terrain.bind_mut();
+            match name {
+                "dim_x" => {
+                    let v = value.to::<f64>() as i32;
+                    t.dimensions = Vector3i::new(v, t.dimensions.y, t.dimensions.z);
+                }
+                "dim_z" => {
+                    let v = value.to::<f64>() as i32;
+                    t.dimensions = Vector3i::new(t.dimensions.x, t.dimensions.y, v);
+                }
+                "dim_y" => {
+                    let v = value.to::<f64>() as i32;
+                    t.dimensions = Vector3i::new(t.dimensions.x, v, t.dimensions.z);
+                }
+                "cell_size_x" => {
+                    let v = value.to::<f64>() as f32;
+                    t.cell_size = Vector2::new(v, t.cell_size.y);
+                }
+                "cell_size_z" => {
+                    let v = value.to::<f64>() as f32;
+                    t.cell_size = Vector2::new(t.cell_size.x, v);
+                }
+                "blend_mode" => {
+                    t.blend_mode = value.to::<i64>() as i32;
+                }
+                "wall_threshold" => {
+                    t.wall_threshold = value.to::<f64>() as f32;
+                }
+                "ridge_threshold" => {
+                    t.ridge_threshold = value.to::<f64>() as f32;
+                }
+                "ledge_threshold" => {
+                    t.ledge_threshold = value.to::<f64>() as f32;
+                }
+                "merge_mode" => {
+                    t.merge_mode = value.to::<i64>() as i32;
+                }
+                "grass_subdivisions" => {
+                    t.grass_subdivisions = value.to::<f64>() as i32;
+                }
+                "grass_size_x" => {
+                    let v = value.to::<f64>() as f32;
+                    t.grass_size = Vector2::new(v, t.grass_size.y);
+                }
+                "grass_size_y" => {
+                    let v = value.to::<f64>() as f32;
+                    t.grass_size = Vector2::new(t.grass_size.x, v);
+                }
+                "default_wall_texture" => {
+                    t.default_wall_texture = value.to::<f64>() as i32;
+                }
+                "blend_sharpness" => {
+                    t.blend_sharpness = value.to::<f64>() as f32;
+                }
+                "blend_noise_scale" => {
+                    t.blend_noise_scale = value.to::<f64>() as f32;
+                }
+                "blend_noise_strength" => {
+                    t.blend_noise_strength = value.to::<f64>() as f32;
+                }
+                "animation_fps" => {
+                    t.animation_fps = value.to::<f64>() as i32;
+                }
+                "use_ridge_texture" => {
+                    t.use_ridge_texture = value.to();
+                }
+                "extra_collision_layer" => {
+                    t.extra_collision_layer = value.to::<i64>() as i32 + 9;
+                }
+                _ if name.starts_with("tex_scale_") => {
+                    let slot: usize = name["tex_scale_".len()..].parse().unwrap_or(1);
+                    let v = value.to::<f64>() as f32;
+                    match slot {
+                        1 => t.texture_scale_1 = v,
+                        2 => t.texture_scale_2 = v,
+                        3 => t.texture_scale_3 = v,
+                        4 => t.texture_scale_4 = v,
+                        5 => t.texture_scale_5 = v,
+                        6 => t.texture_scale_6 = v,
+                        7 => t.texture_scale_7 = v,
+                        8 => t.texture_scale_8 = v,
+                        9 => t.texture_scale_9 = v,
+                        10 => t.texture_scale_10 = v,
+                        11 => t.texture_scale_11 = v,
+                        12 => t.texture_scale_12 = v,
+                        13 => t.texture_scale_13 = v,
+                        14 => t.texture_scale_14 = v,
+                        15 => t.texture_scale_15 = v,
+                        _ => {}
+                    }
+                }
+                _ if name.starts_with("tex_has_grass_") => {
+                    let slot: usize = name["tex_has_grass_".len()..].parse().unwrap_or(2);
+                    let v: bool = value.to();
+                    match slot {
+                        2 => t.tex2_has_grass = v,
+                        3 => t.tex3_has_grass = v,
+                        4 => t.tex4_has_grass = v,
+                        5 => t.tex5_has_grass = v,
+                        6 => t.tex6_has_grass = v,
+                        _ => {}
+                    }
+                }
+                _ if name.starts_with("ground_color_") => {
+                    let slot: usize = name["ground_color_".len()..].parse().unwrap_or(1);
+                    let v: Color = value.to();
+                    match slot {
+                        1 => t.ground_color = v,
+                        2 => t.ground_color_2 = v,
+                        3 => t.ground_color_3 = v,
+                        4 => t.ground_color_4 = v,
+                        5 => t.ground_color_5 = v,
+                        6 => t.ground_color_6 = v,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        terrain.bind_mut().force_batch_update();
     }
 }
