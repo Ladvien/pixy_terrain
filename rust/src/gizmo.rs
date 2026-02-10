@@ -1,1 +1,393 @@
 // Gizmo visualization — implemented in Part 14
+use std::collections::HashMap;
+
+use godot::classes::base_material_3d::{DepthDrawMode, ShadingMode, Transparency};
+use godot::classes::{
+    EditorNode3DGizmo, EditorNode3DGizmoPlugin, IEditorNode3DGizmoPlugin, StandardMaterial3D,
+};
+use godot::prelude::*;
+
+use crate::editor_plugin::{BrushType, PixyTerrainPlugin, TerrainToolMode};
+use crate::terrain::PixyTerrain;
+
+/// State snapshot passed from editor plugin to gizmo plugin.
+#[allow(dead_code)]
+pub struct GizmoState {
+    pub mode: TerrainToolMode,
+    pub brush_type: BrushType,
+    pub brush_position: Vector3,
+    pub brush_size: f32,
+    pub terrain_hovered: bool,
+    pub flatten: bool,
+    pub draw_height: f32,
+    pub draw_pattern: HashMap<[i32; 2], HashMap<[i32; 2], f32>>,
+    /// Whether the plugin is in setting mode (first click done, waiting for drag/release).
+    pub is_setting: bool,
+    /// Whether draw_height has been captured for this setting session.
+    pub draw_height_set: bool,
+    /// Whether the plugin is in active drawing mode.
+    pub is_drawing: bool,
+}
+
+/// Gizmo plugin for PixyTerrain: brush preview, chunk grid overlay, draw pattern visualization.                                          
+#[derive(GodotClass)]
+#[class(base=EditorNode3DGizmoPlugin, init, tool)]
+pub struct PixyTerrainGizmoPlugin {
+    base: Base<EditorNode3DGizmoPlugin>,
+
+    /// Cached reference to the editor plugin for reading brush state.
+    pub plugin_ref: Option<Gd<PixyTerrainPlugin>>,
+}
+
+#[godot_api]
+impl IEditorNode3DGizmoPlugin for PixyTerrainGizmoPlugin {
+    fn get_gizmo_name(&self) -> GString {
+        "PixyTerrain".into()
+    }
+
+    fn has_gizmo(&self, node: Option<Gd<godot::classes::Node3D>>) -> bool {
+        node.is_some_and(|n| n.is_class("PixyTerrain"))
+    }
+
+    fn redraw(&mut self, gizmo: Option<Gd<EditorNode3DGizmo>>) {
+        let Some(mut gizmo) = gizmo else {
+            return;
+        };
+        gizmo.clear();
+
+        let Some(node) = gizmo.get_node_3d() else {
+            return;
+        };
+
+        let Ok(terrain) = node.clone().try_cast::<PixyTerrain>() else {
+            return;
+        };
+
+        let Some(ref plugin) = self.plugin_ref else {
+            return;
+        };
+
+        if !plugin.is_instance_valid() {
+            return;
+        }
+
+        let plugin_bind = plugin.bind();
+        let state = plugin_bind.get_gizmo_state();
+        drop(plugin_bind);
+
+        let t = terrain.bind();
+        let dim = t.dimensions;
+        let cell_size = t.cell_size;
+        let chunk_keys = t.get_chunk_keys();
+
+        let chunk_width = (dim.x - 1) as f32 * cell_size.x;
+        let chunk_depth = (dim.z - 1) as f32 * cell_size.y;
+
+        // Collect chunk existence for closure use (avoid holding terrain borrow)
+        let mut existing_chunks: Vec<[i32; 2]> = Vec::new();
+        for i in 0..chunk_keys.len() {
+            let ck = chunk_keys[i];
+            existing_chunks.push([ck.x as i32, ck.y as i32]);
+        }
+
+        let has_chunk_fn = |x: i32, z: i32| -> bool { existing_chunks.contains(&[x, z]) };
+
+        // ── Chunk management lines ──
+        let addchunk_mat = self.base_mut().get_material("addchunk");
+        let removechunk_mat = self.base_mut().get_material("removechunk");
+
+        if state.mode == TerrainToolMode::ChunkManagement {
+            for &[cx, cz] in &existing_chunks {
+                draw_chunk_lines(
+                    &mut gizmo,
+                    cx,
+                    cz,
+                    chunk_width,
+                    chunk_depth,
+                    &has_chunk_fn,
+                    &removechunk_mat,
+                    true,
+                );
+
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let ax = cx + dx;
+                    let az = cz + dz;
+                    if !has_chunk_fn(ax, az) {
+                        draw_chunk_lines(
+                            &mut gizmo,
+                            ax,
+                            az,
+                            chunk_width,
+                            chunk_depth,
+                            &has_chunk_fn,
+                            &addchunk_mat,
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Draw pattern visualization with height preview ──
+        let pattern_mat = self.base_mut().get_material("brush_pattern");
+
+        if !state.draw_pattern.is_empty() {
+            let mut lines = PackedVector3Array::new();
+
+            let height_diff = if state.is_setting && state.draw_height_set {
+                state.brush_position.y - state.draw_height
+            } else {
+                0.0
+            };
+
+            for (chunk_key, cells) in &state.draw_pattern {
+                for (cell_key, sample) in cells {
+                    let world_x = (chunk_key[0] * (dim.x - 1) + cell_key[0]) as f32 * cell_size.x;
+                    let world_z = (chunk_key[1] * (dim.z - 1) + cell_key[1]) as f32 * cell_size.y;
+
+                    let base_y = if let Some(chunk) = t.get_chunk(chunk_key[0], chunk_key[1]) {
+                        chunk
+                            .bind()
+                            .get_height_at(cell_key[0], cell_key[1])
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+
+                    let preview_y = if state.is_setting && state.draw_height_set {
+                        if state.flatten {
+                            let t = *sample;
+                            base_y + (state.brush_position.y - base_y) * t
+                        } else {
+                            base_y + height_diff * *sample
+                        }
+                    } else if state.flatten {
+                        state.draw_height
+                    } else {
+                        base_y
+                    };
+
+                    let half = *sample * cell_size.x * 0.4;
+                    let center = Vector3::new(world_x, preview_y + 0.2, world_z);
+
+                    lines.push(center + Vector3::new(-half, 0.0, -half));
+                    lines.push(center + Vector3::new(half, 0.0, -half));
+                    lines.push(center + Vector3::new(half, 0.0, -half));
+                    lines.push(center + Vector3::new(half, 0.0, half));
+                    lines.push(center + Vector3::new(half, 0.0, half));
+                    lines.push(center + Vector3::new(-half, 0.0, half));
+                    lines.push(center + Vector3::new(-half, 0.0, half));
+                    lines.push(center + Vector3::new(-half, 0.0, -half));
+                }
+            }
+
+            if !lines.is_empty() {
+                if let Some(ref mat) = pattern_mat {
+                    gizmo.add_lines(&lines, &mat.clone().upcast::<godot::classes::Material>());
+                }
+            }
+        }
+
+        // ── Brush circle/square visualization ──
+        let brush_mat = self.base_mut().get_material("brush");
+
+        if state.terrain_hovered {
+            let pos = state.brush_position;
+            let half = state.brush_size / 2.0;
+            let mut brush_lines = PackedVector3Array::new();
+
+            let gizmo_offset = 0.3;
+
+            match state.brush_type {
+                BrushType::Round => {
+                    let segments = 32;
+                    for i in 0..segments {
+                        let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                        let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+                        let x0 = pos.x + half * a0.cos();
+                        let z0 = pos.z + half * a0.sin();
+                        let x1 = pos.x + half * a1.cos();
+                        let z1 = pos.z + half * a1.sin();
+                        let y0 =
+                            sample_terrain_height(&t, x0, z0, dim, cell_size, pos.y, gizmo_offset);
+                        let y1 =
+                            sample_terrain_height(&t, x1, z1, dim, cell_size, pos.y, gizmo_offset);
+                        brush_lines.push(Vector3::new(x0, y0, z0));
+                        brush_lines.push(Vector3::new(x1, y1, z1));
+                    }
+                }
+                BrushType::Square => {
+                    let subdivisions = 8;
+                    let corners = [
+                        Vector2::new(pos.x - half, pos.z - half),
+                        Vector2::new(pos.x + half, pos.z - half),
+                        Vector2::new(pos.x + half, pos.z + half),
+                        Vector2::new(pos.x - half, pos.z + half),
+                    ];
+                    for side in 0..4 {
+                        let c0 = corners[side];
+                        let c1 = corners[(side + 1) % 4];
+                        for s in 0..subdivisions {
+                            let t0 = s as f32 / subdivisions as f32;
+                            let t1 = (s + 1) as f32 / subdivisions as f32;
+                            let x0 = c0.x + (c1.x - c0.x) * t0;
+                            let z0 = c0.y + (c1.y - c0.y) * t0;
+                            let x1 = c0.x + (c1.x - c0.x) * t1;
+                            let z1 = c0.y + (c1.y - c0.y) * t1;
+                            let y0 = sample_terrain_height(
+                                &t,
+                                x0,
+                                z0,
+                                dim,
+                                cell_size,
+                                pos.y,
+                                gizmo_offset,
+                            );
+                            let y1 = sample_terrain_height(
+                                &t,
+                                x1,
+                                z1,
+                                dim,
+                                cell_size,
+                                pos.y,
+                                gizmo_offset,
+                            );
+                            brush_lines.push(Vector3::new(x0, y0, z0));
+                            brush_lines.push(Vector3::new(x1, y1, z1));
+                        }
+                    }
+                }
+            }
+
+            if !brush_lines.is_empty() {
+                if let Some(ref mat) = brush_mat {
+                    gizmo.add_lines(
+                        &brush_lines,
+                        &mat.clone().upcast::<godot::classes::Material>(),
+                    );
+                }
+            }
+        }
+
+        drop(t);
+    }
+
+    fn get_priority(&self) -> i32 {
+        -1
+    }
+}
+
+impl PixyTerrainGizmoPlugin {
+    pub fn create_materials(&mut self) {
+        let mut brush_mat = StandardMaterial3D::new_gd();
+        brush_mat.set_depth_draw_mode(DepthDrawMode::DISABLED);
+        brush_mat.set_shading_mode(ShadingMode::UNSHADED);
+        brush_mat.set_transparency(Transparency::ALPHA);
+        brush_mat.set_albedo(Color::from_rgba(1.0, 1.0, 1.0, 0.7));
+        self.base_mut().add_material("brush", &brush_mat);
+
+        let mut pattern_mat = StandardMaterial3D::new_gd();
+        pattern_mat.set_depth_draw_mode(DepthDrawMode::DISABLED);
+        pattern_mat.set_shading_mode(ShadingMode::UNSHADED);
+        pattern_mat.set_transparency(Transparency::ALPHA);
+        pattern_mat.set_albedo(Color::from_rgba(0.7, 0.7, 0.7, 0.6));
+        self.base_mut().add_material("brush_pattern", &pattern_mat);
+
+        self.base_mut()
+            .create_material("removechunk", Color::from_rgba(1.0, 0.0, 0.0, 0.5));
+        self.base_mut()
+            .create_material("addchunk", Color::from_rgba(0.0, 1.0, 0.0, 0.5));
+        self.base_mut().create_handle_material("handles");
+    }
+}
+
+/// Initialize gizmo materials. Must be called after construction.
+pub fn init_gizmo_plugin(plugin: &mut Gd<PixyTerrainGizmoPlugin>) {
+    plugin.bind_mut().create_materials();
+}
+
+/// Sample terrain height at a world XZ position by looking up the chunk and cell.          
+fn sample_terrain_height(
+    terrain: &PixyTerrain,
+    world_x: f32,
+    world_z: f32,
+    dim: Vector3i,
+    cell_size: Vector2,
+    fallback_y: f32,
+    offset: f32,
+) -> f32 {
+    let chunk_width = (dim.x - 1) as f32 * cell_size.x;
+    let chunk_depth = (dim.z - 1) as f32 * cell_size.y;
+
+    let chunk_x = (world_x / chunk_width).floor() as i32;
+    let chunk_z = (world_z / chunk_depth).floor() as i32;
+
+    let local_x = ((world_x - chunk_x as f32 * chunk_width) / cell_size.x).round() as i32;
+    let local_z = ((world_z - chunk_z as f32 * chunk_depth) / cell_size.y).round() as i32;
+
+    if let Some(chunk) = terrain.get_chunk(chunk_x, chunk_z) {
+        if let Some(h) = chunk.bind().get_height_at(local_x, local_z) {
+            return h + offset;
+        }
+    }
+    fallback_y + offset
+}
+
+/// Draw chunk border lines and X/+ symbols.
+#[allow(clippy::too_many_arguments)]
+fn draw_chunk_lines(
+    gizmo: &mut Gd<EditorNode3DGizmo>,
+    chunk_x: i32,
+    chunk_z: i32,
+    chunk_width: f32,
+    chunk_depth: f32,
+    has_chunk: &dyn Fn(i32, i32) -> bool,
+    material: &Option<Gd<StandardMaterial3D>>,
+    is_remove: bool,
+) {
+    let x0 = chunk_x as f32 * chunk_width;
+    let z0 = chunk_z as f32 * chunk_depth;
+    let x1 = x0 + chunk_width;
+    let z1 = z0 + chunk_depth;
+
+    let mut lines = PackedVector3Array::new();
+
+    if !has_chunk(chunk_x, chunk_z - 1) {
+        lines.push(Vector3::new(x0, 0.0, z0));
+        lines.push(Vector3::new(x1, 0.0, z0));
+    }
+    if !has_chunk(chunk_x + 1, chunk_z) {
+        lines.push(Vector3::new(x1, 0.0, z0));
+        lines.push(Vector3::new(x1, 0.0, z1));
+    }
+    if !has_chunk(chunk_x, chunk_z + 1) {
+        lines.push(Vector3::new(x1, 0.0, z1));
+        lines.push(Vector3::new(x0, 0.0, z1));
+    }
+    if !has_chunk(chunk_x - 1, chunk_z) {
+        lines.push(Vector3::new(x0, 0.0, z1));
+        lines.push(Vector3::new(x0, 0.0, z0));
+    }
+
+    if is_remove {
+        lines.push(Vector3::new(x0, 0.0, z0));
+        lines.push(Vector3::new(x1, 0.0, z1));
+        lines.push(Vector3::new(x1, 0.0, z0));
+        lines.push(Vector3::new(x0, 0.0, z1));
+    } else {
+        let mx = (x0 + x1) / 2.0;
+        let mz = (z0 + z1) / 2.0;
+        let qw = chunk_width * 0.25;
+        let qd = chunk_depth * 0.25;
+        lines.push(Vector3::new(mx - qw, 0.0, mz));
+        lines.push(Vector3::new(mx + qw, 0.0, mz));
+        lines.push(Vector3::new(mx, 0.0, mz - qd));
+        lines.push(Vector3::new(mx, 0.0, mz + qd));
+    }
+
+    if !lines.is_empty() {
+        if let Some(ref mat) = material {
+            gizmo.add_lines(&lines, &mat.clone().upcast::<godot::classes::Material>());
+        }
+    }
+}
