@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Walkthrough - https://www.ronja-tutorials.com/post/021-plane-clipping/
   - Godot Code - https://github.com/19PHOBOSS98/Godot-Planar-and-Box-Material-Cutoff-Shader
 - Godot Pixel Art Shaders - https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo/tree/main/Shaders
+- Other Shader Info - https://minionsart.github.io/tutorials/
 
 ## Project Overview
 
