@@ -1,13 +1,55 @@
-[gd_scene load_steps=7 format=3 uid="uid://shader_test_001"]
+[gd_scene load_steps=12 format=3 uid="uid://shader_test_001"]
 
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="1_cam"]
 [ext_resource type="Shader" path="res://resources/shaders/mst_terrain.gdshader" id="3_shader"]
+[ext_resource type="Shader" path="res://resources/shaders/mst_grass.gdshader" id="4_grass_shader"]
+[ext_resource type="Script" path="res://scripts/grass_test.gd" id="5_grass_script"]
+[ext_resource type="Script" path="res://scripts/demo_terrain.gd" id="6_demo_terrain"]
+[ext_resource type="Texture2D" path="res://textures/grass/grass_color.png" id="7_grass_color"]
+[ext_resource type="Texture2D" path="res://textures/ground/Ground048_2K-PNG_Color.png" id="8_ground_color"]
+[ext_resource type="Texture2D" path="res://textures/ground/Ground048.png" id="9_ground_alt"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_terrain"]
 shader = ExtResource("3_shader")
+shader_parameter/wall_threshold = 0.0
+shader_parameter/chunk_size = Vector3i(33, 32, 33)
+shader_parameter/cell_size = Vector2(2, 2)
+shader_parameter/ground_albedo = Color(0.392, 0.471, 0.318, 1)
+shader_parameter/ground_albedo_2 = Color(0.322, 0.482, 0.384, 1)
+shader_parameter/ground_albedo_3 = Color(0.373, 0.424, 0.294, 1)
+shader_parameter/ground_albedo_4 = Color(0.392, 0.475, 0.255, 1)
+shader_parameter/ground_albedo_5 = Color(0.29, 0.494, 0.365, 1)
+shader_parameter/ground_albedo_6 = Color(0.443, 0.447, 0.365, 1)
+shader_parameter/use_hard_textures = false
+shader_parameter/blend_mode = 0
+shader_parameter/blend_sharpness = 5.0
+shader_parameter/blend_noise_scale = 10.0
+shader_parameter/blend_noise_strength = 0.0
+shader_parameter/shadow_color = Color(0.15, 0.1, 0.2, 1)
+shader_parameter/bands = 5
+shader_parameter/shadow_intensity = 0.0
+shader_parameter/vc_tex_rr = ExtResource("7_grass_color")
+shader_parameter/vc_tex_rg = ExtResource("8_ground_color")
+shader_parameter/vc_tex_rb = ExtResource("7_grass_color")
+shader_parameter/vc_tex_ra = ExtResource("8_ground_color")
+shader_parameter/vc_tex_gr = ExtResource("9_ground_alt")
+shader_parameter/vc_tex_gg = ExtResource("7_grass_color")
 
-[sub_resource type="PlaneMesh" id="PlaneMesh_test"]
-size = Vector2(8, 8)
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_grass"]
+shader = ExtResource("4_grass_shader")
+shader_parameter/grass_base_color = Vector3(0.392, 0.471, 0.318)
+shader_parameter/wall_threshold = 0.0
+shader_parameter/use_base_color = false
+shader_parameter/is_merge_round = false
+shader_parameter/wind_direction = Vector2(1, 1)
+shader_parameter/wind_scale = 0.1
+shader_parameter/wind_speed = 1.0
+shader_parameter/animate_active = true
+shader_parameter/fps = 8.0
+shader_parameter/shadow_color = Color(0.15, 0.1, 0.2, 1)
+shader_parameter/bands = 5
+shader_parameter/shadow_intensity = 0.0
+shader_parameter/grass_texture = ExtResource("7_grass_color")
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -22,7 +64,7 @@ sky_material = SubResource("ProceduralSkyMaterial_sky")
 background_mode = 2
 sky = SubResource("Sky_main")
 ambient_light_source = 2
-ambient_light_color = Color(0.5, 0.5, 0.5, 1)
+ambient_light_color = Color(0.4, 0.4, 0.4, 1)
 
 [node name="ShaderTest" type="Node3D"]
 
@@ -34,11 +76,15 @@ transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 
 shadow_enabled = true
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 8, 12)
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866, 0, -0.866, 0.5, 0, 8, 10)
 current = true
 fov = 50.0
 script = ExtResource("1_cam")
 
-[node name="TestPlane" type="MeshInstance3D" parent="."]
-mesh = SubResource("PlaneMesh_test")
+[node name="DemoTerrain" type="MeshInstance3D" parent="."]
 material_override = SubResource("ShaderMaterial_terrain")
+script = ExtResource("6_demo_terrain")
+
+[node name="GrassTest" type="MultiMeshInstance3D" parent="."]
+material_override = SubResource("ShaderMaterial_grass")
+script = ExtResource("5_grass_script")

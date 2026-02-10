@@ -27,7 +27,7 @@ group_uniforms Albedo;
 uniform float wall_threshold : hint_range(0.0, 0.5) = 0.0;
 uniform ivec3 chunk_size = ivec3(33, 32, 33);
 uniform vec2 cell_size = vec2(2.0, 2.0);
-uniform vec4 ground_albedo : source_color = vec4(0.392, 0.471, 0.318, 1.0);
+uniform vec4 ground_albedo   : source_color = vec4(0.392, 0.471, 0.318, 1.0);
 uniform vec4 ground_albedo_2 : source_color = vec4(0.322, 0.482, 0.384, 1.0);
 uniform vec4 ground_albedo_3 : source_color = vec4(0.373, 0.424, 0.294, 1.0);
 uniform vec4 ground_albedo_4 : source_color = vec4(0.392, 0.475, 0.255, 1.0);
@@ -501,7 +501,7 @@ void fragment() {
 
 		ALBEDO = floor_color.rgb;
 		ALPHA = floor_color.a;
-		
+
 	// === Wall rendering: biplanar projection ===
 	// Project textures from X and Z axes, blend by normal direction.
 	// Y axis omitted since walls are always vertical. Prevents stretching on angled walls.
