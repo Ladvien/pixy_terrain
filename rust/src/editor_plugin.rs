@@ -12,7 +12,7 @@ use godot::classes::{
     EditorResourcePicker, HBoxContainer, HSeparator, HSlider, IEditorPlugin, Input, InputEvent,
     InputEventKey, InputEventMouseButton, InputEventMouseMotion, Label, MarginContainer,
     OptionButton, PhysicsRayQueryParameters3D, ScrollContainer, SpinBox, StaticBody3D,
-    VBoxContainer,
+    VBoxContainer, VSeparator,
 };
 use godot::prelude::*;
 
@@ -207,6 +207,12 @@ pub struct PixyTerrainPlugin {
     // Chunk management state
     #[init(val = None)]
     selected_chunk_coords: Option<Vector2i>,
+
+    // Settings overlay toggle
+    #[init(val = false)]
+    settings_toggle_active: bool,
+    #[init(val = None)]
+    settings_toggle_button: Option<Gd<Button>>,
 }
 
 // =======================================
@@ -261,12 +267,11 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "Height",
             "Level",
             "Smooth",
-            "Bridge",
+            "Slope",
             "Grass Mask",
             "Vertex Paint",
             "Debug",
-            "Chunks",
-            "Settings",
+            "Add Area",
         ];
         let tool_tooltips = [
             "Height Tool\n\nElevate or lower terrain
@@ -282,7 +287,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "Smooth Tool\n\nSmooth out rough terrain
   areas.\n\n[Shortcuts]\n\
                \u{2022} Shift+Click+Drag: Smooth terrain",
-            "Bridge Tool\n\nCreate slopes between two
+            "Slope Tool\n\nCreate slopes between two
   points.\n\n[Shortcuts]\n\
                \u{2022} Click start, drag to end\n\u{2022} Ease controls slope
    curve",
@@ -299,18 +304,19 @@ impl IEditorPlugin for PixyTerrainPlugin {
   chunks.\n\n[Shortcuts]\n\
                \u{2022} Click empty area: Add chunk (if adjacent)\n\
                \u{2022} Click existing chunk: Remove chunk",
-            "Terrain Settings\n\nAdjust global terrain parameters.\n\n\
-               Dimensions, cell size, blend mode, etc.",
         ];
 
         let plugin_ref = self.to_gd();
         let mut tool_buttons: Vec<Gd<Button>> = Vec::new();
 
         for (i, label) in tool_labels.iter().enumerate() {
-            // Add separators before visual, utility, and settings groups
-            if i == 4 || i == 6 || i == 7 {
-                let group_sep = HSeparator::new_alloc();
-                toolbar.add_child(&group_sep);
+            // Add labeled group headers before visual, utility, and management groups
+            if i == 4 {
+                Self::add_toolbar_group_label(&mut toolbar, "Visuals");
+            } else if i == 6 {
+                Self::add_toolbar_group_label(&mut toolbar, "Utility");
+            } else if i == 7 {
+                Self::add_toolbar_group_label(&mut toolbar, "Management");
             }
 
             let mut btn = Button::new_alloc();
@@ -329,8 +335,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         }
 
         // -- Debug Options --
-        let debug_sep = HSeparator::new_alloc();
-        toolbar.add_child(&debug_sep);
+        Self::add_toolbar_group_label(&mut toolbar, "Debug");
 
         let mut collision_toggle = CheckBox::new_alloc();
         collision_toggle.set_text("Show Colliders");
@@ -345,6 +350,23 @@ impl IEditorPlugin for PixyTerrainPlugin {
             Callable::from_object_method(&plugin_ref, "on_collision_toggle_changed");
         collision_toggle.connect("toggled", &collision_callable);
         toolbar.add_child(&collision_toggle);
+
+        // -- Settings Toggle (not in ButtonGroup — overlays settings on bottom bar) --
+        Self::add_toolbar_group_label(&mut toolbar, "Settings");
+
+        let mut settings_btn = Button::new_alloc();
+        settings_btn.set_text("Settings");
+        settings_btn.set_tooltip_text(
+            "Terrain Settings\n\nToggle global terrain parameters overlay.\n\n\
+               Dimensions, cell size, blend mode, etc.",
+        );
+        settings_btn.set_toggle_mode(true);
+        settings_btn.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
+        let settings_callable =
+            Callable::from_object_method(&plugin_ref, "on_settings_toggled");
+        settings_btn.connect("toggled", &settings_callable);
+        toolbar.add_child(&settings_btn);
+        self.settings_toggle_button = Some(settings_btn);
 
         // Pre-press Brush button (deferred to avoid triggering signal during enter_tree)
         if let Some(first_btn) = tool_buttons.first_mut() {
@@ -371,11 +393,12 @@ impl IEditorPlugin for PixyTerrainPlugin {
         // -- Bottom Attributes Panel --
         let mut scroll = ScrollContainer::new_alloc();
         scroll.set_name("PixyTerrainAttributes");
-        scroll.set_custom_minimum_size(Vector2::new(0.0, 40.0));
+        scroll.set_custom_minimum_size(Vector2::new(0.0, 48.0));
         scroll.set_vertical_scroll_mode(godot::classes::scroll_container::ScrollMode::DISABLED);
         scroll.set_visible(false);
 
-        let hbox = HBoxContainer::new_alloc();
+        let mut hbox = HBoxContainer::new_alloc();
+        hbox.add_theme_constant_override("separation", 4);
         scroll.add_child(&hbox);
 
         self.base_mut()
@@ -686,10 +709,11 @@ impl IEditorPlugin for PixyTerrainPlugin {
                             self.mode,
                             TerrainToolMode::Level
                                 | TerrainToolMode::Smooth
+                                | TerrainToolMode::Bridge
                                 | TerrainToolMode::GrassMask
                                 | TerrainToolMode::VertexPaint
                         ) {
-                            // Level/Smooth/GrassMask/VertexPaint: simple click-drag-release
+                            // Level/Smooth/Slope/GrassMask/VertexPaint: simple click-drag-release
                             self.is_drawing = true;
                         } else {
                             // Normal click: enter setting mode (two-click workflow)
@@ -911,10 +935,17 @@ impl PixyTerrainPlugin {
             5 => TerrainToolMode::VertexPaint,
             6 => TerrainToolMode::DebugBrush,
             7 => TerrainToolMode::ChunkManagement,
-            8 => TerrainToolMode::TerrainSettings,
             _ => TerrainToolMode::Height,
         };
         // Use call_deferred to avoid borrow conflict from signal dispatch
+        self.base_mut()
+            .call_deferred("_rebuild_attributes_deferred", &[]);
+    }
+
+    /// Called when the standalone Settings toggle button is pressed.
+    #[func]
+    fn on_settings_toggled(&mut self, pressed: bool) {
+        self.settings_toggle_active = pressed;
         self.base_mut()
             .call_deferred("_rebuild_attributes_deferred", &[]);
     }
@@ -1323,7 +1354,7 @@ impl PixyTerrainPlugin {
         };
 
         let mut center = CenterContainer::new_alloc();
-        center.set_custom_minimum_size(Vector2::new(160.0, 36.0));
+        center.set_custom_minimum_size(Vector2::new(160.0, 42.0));
 
         let mut vbox = VBoxContainer::new_alloc();
         vbox.add_theme_constant_override("separation", 0);
@@ -1362,7 +1393,7 @@ impl PixyTerrainPlugin {
         };
 
         let mut center = CenterContainer::new_alloc();
-        center.set_custom_minimum_size(Vector2::new(100.0, 36.0));
+        center.set_custom_minimum_size(Vector2::new(100.0, 42.0));
 
         let mut checkbox = CheckBox::new_alloc();
         checkbox.set_text(label_text);
@@ -1389,7 +1420,7 @@ impl PixyTerrainPlugin {
         };
 
         let mut center = CenterContainer::new_alloc();
-        center.set_custom_minimum_size(Vector2::new(120.0, 36.0));
+        center.set_custom_minimum_size(Vector2::new(120.0, 42.0));
 
         let mut vbox = VBoxContainer::new_alloc();
         vbox.add_theme_constant_override("separation", 0);
@@ -1429,7 +1460,7 @@ impl PixyTerrainPlugin {
         };
 
         let mut center = CenterContainer::new_alloc();
-        center.set_custom_minimum_size(Vector2::new(120.0, 36.0));
+        center.set_custom_minimum_size(Vector2::new(120.0, 42.0));
 
         let mut vbox = VBoxContainer::new_alloc();
         vbox.add_theme_constant_override("separation", 0);
@@ -1452,6 +1483,47 @@ impl PixyTerrainPlugin {
         vbox.add_child(&spin);
         center.add_child(&vbox);
         hbox.add_child(&center);
+    }
+
+    /// Adds a visual group separator (VSeparator + dim label) to the bottom attributes HBox.
+    fn add_group_separator(&mut self, title: &str) {
+        let Some(ref mut hbox) = self.attributes_hbox else {
+            return;
+        };
+
+        // VSeparator inside a MarginContainer for left/right padding
+        let mut sep_margin = MarginContainer::new_alloc();
+        sep_margin.add_theme_constant_override("margin_left", 8);
+        sep_margin.add_theme_constant_override("margin_right", 8);
+        let sep = VSeparator::new_alloc();
+        sep_margin.add_child(&sep);
+        hbox.add_child(&sep_margin);
+
+        // Label inside CenterContainer for vertical centering
+        let mut center = CenterContainer::new_alloc();
+        center.set_custom_minimum_size(Vector2::new(0.0, 42.0));
+        center.add_theme_constant_override("margin_right", 4);
+        let mut label = Label::new_alloc();
+        label.set_text(title);
+        label.add_theme_font_size_override("font_size", 25);
+        label.set_modulate(Color::from_rgba(1.0, 1.0, 1.0, 0.5));
+        center.add_child(&label);
+        hbox.add_child(&center);
+    }
+
+    /// Adds a labeled group header (HSeparator + dim label) to the left toolbar VBox.
+    fn add_toolbar_group_label(toolbar: &mut Gd<VBoxContainer>, title: &str) {
+        let sep = HSeparator::new_alloc();
+        toolbar.add_child(&sep);
+
+        let mut margin = MarginContainer::new_alloc();
+        margin.add_theme_constant_override("margin_top", 4);
+        let mut label = Label::new_alloc();
+        label.set_text(title);
+        label.add_theme_font_size_override("font_size", 25);
+        label.set_modulate(Color::from_rgba(1.0, 1.0, 1.0, 0.5));
+        margin.add_child(&label);
+        toolbar.add_child(&margin);
     }
 
     fn add_quick_paint_dropdown(&mut self, plugin_ref: &Gd<PixyTerrainPlugin>) {
@@ -1527,7 +1599,14 @@ impl PixyTerrainPlugin {
             }
         }
 
-        match self.mode {
+        // When settings toggle is active, show TerrainSettings controls
+        // regardless of the current tool mode (so mouse input keeps working).
+        let display_mode = if self.settings_toggle_active {
+            TerrainToolMode::TerrainSettings
+        } else {
+            self.mode
+        };
+        match display_mode {
             TerrainToolMode::Height => {
                 self.add_option_attribute(
                     "brush_type",
@@ -1547,6 +1626,7 @@ impl PixyTerrainPlugin {
                 );
                 self.add_checkbox_attribute("flatten", "Flatten", self.flatten, &plugin_ref);
                 self.add_checkbox_attribute("falloff", "Falloff", self.falloff, &plugin_ref);
+                self.add_group_separator("Paint");
                 self.add_quick_paint_dropdown(&plugin_ref);
             }
             TerrainToolMode::Level => {
@@ -1576,6 +1656,7 @@ impl PixyTerrainPlugin {
                     &plugin_ref,
                 );
                 self.add_checkbox_attribute("falloff", "Falloff", self.falloff, &plugin_ref);
+                self.add_group_separator("Paint");
                 self.add_quick_paint_dropdown(&plugin_ref);
             }
             TerrainToolMode::Smooth => {
@@ -1604,6 +1685,7 @@ impl PixyTerrainPlugin {
                     self.strength as f64,
                     &plugin_ref,
                 );
+                self.add_group_separator("Paint");
                 self.add_quick_paint_dropdown(&plugin_ref);
             }
             TerrainToolMode::Bridge => {
@@ -1632,6 +1714,7 @@ impl PixyTerrainPlugin {
                     self.ease_value as f64,
                     &plugin_ref,
                 );
+                self.add_group_separator("Paint");
                 self.add_quick_paint_dropdown(&plugin_ref);
             }
             TerrainToolMode::GrassMask => {
@@ -1843,6 +1926,8 @@ impl PixyTerrainPlugin {
                     return;
                 };
 
+                // ── Grid ──
+                self.add_group_separator("Grid");
                 self.add_spinbox_attribute(
                     "dim_x",
                     "Dim X",
@@ -1888,6 +1973,9 @@ impl PixyTerrainPlugin {
                     cell_sz.y as f64,
                     &plugin_ref,
                 );
+
+                // ── Blending ──
+                self.add_group_separator("Blending");
                 self.add_option_attribute(
                     "blend_mode",
                     "Blend",
@@ -1922,6 +2010,36 @@ impl PixyTerrainPlugin {
                     ledge_th as f64,
                     &plugin_ref,
                 );
+                self.add_slider_attribute(
+                    "blend_sharpness",
+                    "Blend Sharp",
+                    0.0,
+                    20.0,
+                    0.1,
+                    blend_sharp as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "blend_noise_scale",
+                    "Noise Scale",
+                    0.0,
+                    50.0,
+                    0.1,
+                    blend_ns as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "blend_noise_strength",
+                    "Noise Str",
+                    0.0,
+                    5.0,
+                    0.01,
+                    blend_nstr as f64,
+                    &plugin_ref,
+                );
+
+                // ── Geometry ──
+                self.add_group_separator("Geometry");
                 self.add_option_attribute(
                     "merge_mode",
                     "Merge",
@@ -1941,6 +2059,9 @@ impl PixyTerrainPlugin {
                     use_ridge_tex,
                     &plugin_ref,
                 );
+
+                // ── Grass ──
+                self.add_group_separator("Grass");
                 self.add_spinbox_attribute(
                     "grass_subdivisions",
                     "Grass Subs",
@@ -1977,6 +2098,9 @@ impl PixyTerrainPlugin {
                     anim_fps as f64,
                     &plugin_ref,
                 );
+
+                // ── Defaults ──
+                self.add_group_separator("Defaults");
                 self.add_spinbox_attribute(
                     "default_wall_texture",
                     "Wall Tex",
@@ -2020,33 +2144,6 @@ impl PixyTerrainPlugin {
                     "Coll Layer",
                     &coll_options,
                     (extra_coll - 9).max(0) as i64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "blend_sharpness",
-                    "Blend Sharp",
-                    0.0,
-                    20.0,
-                    0.1,
-                    blend_sharp as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "blend_noise_scale",
-                    "Noise Scale",
-                    0.0,
-                    50.0,
-                    0.1,
-                    blend_ns as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "blend_noise_strength",
-                    "Noise Str",
-                    0.0,
-                    5.0,
-                    0.01,
-                    blend_nstr as f64,
                     &plugin_ref,
                 );
 
@@ -2123,7 +2220,8 @@ impl PixyTerrainPlugin {
                     return;
                 };
 
-                // Grass Animation
+                // ── Wind ──
+                self.add_group_separator("Wind");
                 self.add_slider_attribute(
                     "grass_framerate",
                     "Framerate",
@@ -2217,6 +2315,8 @@ impl PixyTerrainPlugin {
                     n_div_ang as f64,
                     &plugin_ref,
                 );
+                // ── View Sway ──
+                self.add_group_separator("View Sway");
                 self.add_checkbox_attribute(
                     "view_space_sway",
                     "View Sway",
@@ -2241,6 +2341,8 @@ impl PixyTerrainPlugin {
                     v_sway_ang as f64,
                     &plugin_ref,
                 );
+                // ── Displacement ──
+                self.add_group_separator("Displacement");
                 self.add_checkbox_attribute(
                     "character_displacement_enabled",
                     "Char Displace",
@@ -2275,7 +2377,8 @@ impl PixyTerrainPlugin {
                     &plugin_ref,
                 );
 
-                // Grass Toon Lighting
+                // ── Toon Lighting ──
+                self.add_group_separator("Toon Lighting");
                 self.add_spinbox_attribute(
                     "grass_toon_cuts",
                     "Toon Cuts",
@@ -2313,7 +2416,8 @@ impl PixyTerrainPlugin {
                     &plugin_ref,
                 );
 
-                // Cloud Shadows
+                // ── Cloud Shadows ──
+                self.add_group_separator("Cloud Shadows");
                 self.add_checkbox_attribute(
                     "clouds_enabled",
                     "Clouds",
@@ -2876,13 +2980,19 @@ impl PixyTerrainPlugin {
 
                                 let mut global_x =
                                     (chunk_key[0] * (dim.x - 1) + cell_key[0]) as f32 * cell_size.x;
-                                let global_z =
+                                let mut global_z =
                                     (chunk_key[1] * (dim.z - 1) + cell_key[1]) as f32 * cell_size.y;
 
                                 if chunk_key[0] != self.bridge_start_chunk.x {
                                     global_x += (self.bridge_start_chunk.x - chunk_key[0]) as f32
                                         * 2.0
                                         * cell_size.x;
+                                }
+
+                                if chunk_key[1] != self.bridge_start_chunk.y {
+                                    global_z += (self.bridge_start_chunk.y - chunk_key[1]) as f32
+                                        * 2.0
+                                        * cell_size.y;
                                 }
 
                                 let global_cell = Vector2::new(global_x, global_z);
@@ -3111,7 +3221,7 @@ impl PixyTerrainPlugin {
             TerrainToolMode::Height => "terrain height",
             TerrainToolMode::Level => "terrain level",
             TerrainToolMode::Smooth => "terrain smooth",
-            TerrainToolMode::Bridge => "terrain bridge",
+            TerrainToolMode::Bridge => "terrain slope",
             TerrainToolMode::GrassMask => "terrain grass mask",
             TerrainToolMode::VertexPaint => {
                 if self.paint_walls_mode {

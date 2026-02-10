@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::surface_tool::CustomFormat;
 use godot::classes::{
-    ArrayMesh, Engine, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D,
+    ArrayMesh, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D,
     SurfaceTool,
 };
 use godot::prelude::*;
@@ -495,14 +495,6 @@ impl PixyTerrainChunk {
         terrain_material: Option<Gd<ShaderMaterial>>,
         grass_config: GrassConfig,
     ) {
-        if !Engine::singleton().is_editor_hint() {
-            godot_error!(
-                "PixyTerrainChunk: Trying to initialize terrain
-  during runtime (NOT SUPPORTED)"
-            );
-            return;
-        }
-
         self.terrain_material = terrain_material.clone();
         let dim = self.get_terrain_dimensions();
 
@@ -636,6 +628,24 @@ impl PixyTerrainChunk {
                 self.base_mut()
                     .set_surface_override_material(0, &mat.upcast::<godot::classes::Material>());
             }
+
+            // Remove any existing StaticBody3D children (cleanup for re-generation)
+            let children = self.base().get_children();
+            for i in (0..children.len()).rev() {
+                if let Some(child) = children.get(i) {
+                    if child.is_class("StaticBody3D") {
+                        let mut child = child;
+                        self.base_mut().remove_child(&child);
+                        child.queue_free();
+                    }
+                }
+            }
+
+            // Create trimesh collision from the new mesh
+            self.base_mut().create_trimesh_collision();
+
+            // Set collision layer 17 on the new StaticBody3D
+            self.configure_collision_layer();
         }
 
         // Regenerate grass after mesh geometry is built

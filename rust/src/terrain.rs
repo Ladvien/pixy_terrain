@@ -471,18 +471,10 @@ pub struct PixyTerrain {
 #[godot_api]
 impl INode3D for PixyTerrain {
     fn enter_tree(&mut self) {
-        if !Engine::singleton().is_editor_hint() {
-            return;
-        }
-
         self.base_mut().call_deferred("_deferred_enter_tree", &[]);
     }
 
     fn process(&mut self, _delta: f64) {
-        if !Engine::singleton().is_editor_hint() {
-            return;
-        }
-
         // Character tracking: collect positions from group, push to grass material
         if self.character_displacement_enabled {
             if let Some(mut tree) = self.base().get_tree() {
@@ -525,10 +517,6 @@ impl INode3D for PixyTerrain {
 impl PixyTerrain {
     #[func]
     fn _deferred_enter_tree(&mut self) {
-        if !Engine::singleton().is_editor_hint() {
-            return;
-        }
-
         // Create/load terrain material and shared grass material
         self.ensure_terrain_material();
         self.ensure_grass_material();
@@ -934,7 +922,12 @@ impl PixyTerrain {
                 }
             }
             // Fallback: search scene tree for any DirectionalLight3D
-            if let Some(root) = tree.get_edited_scene_root() {
+            let root = if Engine::singleton().is_editor_hint() {
+                tree.get_edited_scene_root()
+            } else {
+                tree.get_root().map(|w| w.upcast::<Node>())
+            };
+            if let Some(root) = root {
                 if let Some(dir) = Self::find_light_recursive(&root) {
                     return dir;
                 }
@@ -1242,6 +1235,11 @@ impl PixyTerrain {
     /// Create a new chunk at the given chunk coordinates, copying shared edges from neighbors.
     #[func]
     pub fn add_new_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
+        // Ensure material exists (may not yet if called before _deferred_enter_tree)
+        self.ensure_terrain_material();
+        self.ensure_grass_material();
+        self.force_batch_update();
+
         let chunk_coords = Vector2i::new(chunk_x, chunk_z);
         let mut new_chunk = Gd::<PixyTerrainChunk>::from_init_fn(PixyTerrainChunk::new_with_base);
 
