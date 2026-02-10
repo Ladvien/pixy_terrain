@@ -156,3 +156,27 @@ pub struct CellGeometry {
     pub material_blend: Vec<Color>,
     pub is_floor: Vec<bool>,
 }
+
+/// Convert a texture index (0-15) to a pair of vertex colors.
+/// Each color has exactly one non-zero RGBA channel.
+/// The terrain shader uses the combination to encode 4x4 = 16 textures.
+pub fn texture_index_to_colors(idx: i32) -> (Color, Color) {
+    let c0_channel = idx / 4;
+    let c1_channel = idx % 4;
+
+    let c0 = match c0_channel {
+        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
+        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
+        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
+        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
+        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
+    };
+    let c1 = match c1_channel {
+        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
+        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
+        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
+        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
+        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
+    };
+    (c0, c1)
+}

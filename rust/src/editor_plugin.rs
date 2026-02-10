@@ -937,6 +937,45 @@ impl PixyTerrainPlugin {
         }
     }
 
+    fn update_gizmos(&self) {
+        if let Some(ref terrain) = self.current_terrain {
+            if terrain.is_instance_valid() {
+                let mut terrain_3d: Gd<Node3D> = terrain.clone().cast();
+                terrain_3d.update_gizmos();
+            }
+        }
+    }
+
+    fn call_terrain_method(&mut self, method_name: &str) {
+        if let Some(ref terrain) = self.current_terrain {
+            if terrain.is_instance_valid() {
+                let mut terrain_clone = terrain.clone();
+                if terrain_clone.has_method(method_name) {
+                    self.is_modifying = true;
+                    terrain_clone.call(method_name, &[]);
+                    self.is_modifying = false;
+                }
+            }
+        }
+    }
+
+    fn do_generate(&mut self) {
+        self.call_terrain_method("regenerate");
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
+    }
+
+    fn do_clear(&mut self) {
+        self.call_terrain_method("clear");
+    }
+
+    fn set_vertex_colors(&mut self, idx: i32) {
+        let (c0, c1) = marching_squares::texture_index_to_colors(idx);
+        self.vertex_color_0 = c0;
+        self.vertex_color_1 = c1;
+        self.vertex_color_idx = idx;
+    }
+
     fn set_ui_visible(&mut self, visible: bool) {
         if let Some(margin) = self.margin_container.as_mut() {
             margin.set_visible(visible);
@@ -955,73 +994,12 @@ impl PixyTerrainPlugin {
         }
     }
 
-    fn do_generate(&mut self) {
-        if let Some(terrain_node) = self
-            .current_terrain
-            .as_ref()
-            .filter(|t| t.is_instance_valid())
-            .cloned()
-        {
-            self.is_modifying = true;
-            let mut terrain: Gd<PixyTerrain> = terrain_node.cast();
-            terrain.bind_mut().regenerate();
-            self.is_modifying = false;
-        }
-    }
-
-    fn do_clear(&mut self) {
-        if let Some(terrain_node) = self
-            .current_terrain
-            .as_ref()
-            .filter(|t| t.is_instance_valid())
-            .cloned()
-        {
-            self.is_modifying = true;
-            let mut terrain: Gd<PixyTerrain> = terrain_node.cast();
-            terrain.bind_mut().clear();
-            self.is_modifying = false;
-        }
-    }
-
-    fn update_gizmos(&self) {
-        if let Some(terrain_node) = self
-            .current_terrain
-            .as_ref()
-            .filter(|t| t.is_instance_valid())
-        {
-            let mut terrain_3d: Gd<Node3D> = terrain_node.clone().cast();
-            terrain_3d.update_gizmos();
-        }
-    }
-
     fn sync_brush_size_slider(&self) {
         // Stub — will sync UI slider in Part 17
     }
 
     fn apply_collision_visibility_to_all_chunks(&self) {
         // Stub — will iterate chunk StaticBody3D children in Part 16
-    }
-
-    fn initialize_draw_state(
-        &mut self,
-        _terrain: &Gd<PixyTerrain>,
-        _dim: Vector3i,
-        _cell_size: Vector2,
-    ) {
-        // Stub — will handle two-click workflow entry in Part 16
-    }
-
-    fn build_draw_pattern(
-        &mut self,
-        _terrain: &Gd<PixyTerrain>,
-        _dim: Vector3i,
-        _cell_size: Vector2,
-    ) {
-        // Stub — will calculate brush cells with falloff in Part 16
-    }
-
-    fn draw_pattern(&mut self, _terrain: &Gd<PixyTerrain>, _dim: Vector3i, _cell_size: Vector2) {
-        // Stub — will apply pattern to terrain in Part 16
     }
 
     fn rebuild_attributes_impl(&mut self, _plugin_ref: Gd<PixyTerrainPlugin>) {
@@ -1032,15 +1010,1020 @@ impl PixyTerrainPlugin {
         // Stub — will build right-side texture panel in Part 17
     }
 
+    fn initialize_draw_state(
+        &mut self,
+        terrain: &Gd<PixyTerrain>,
+        dim: Vector3i,
+        cell_size: Vector2,
+    ) {
+        if self.is_setting && !self.draw_height_set {
+            let pos = self.brush_position;
+            let chunk_width = (dim.x - 1) as f32 * cell_size.x;
+            let chunk_depth = (dim.z - 1) as f32 * cell_size.y;
+            let cursor_chunk_x = (pos.x / chunk_width).floor() as i32;
+            let cursor_chunk_z = (pos.z / chunk_depth).floor() as i32;
+
+            let cursor_cell_x = ((pos.x + cell_size.x / 2.0) / cell_size.x
+                - cursor_chunk_x as f32 * (dim.x - 1) as f32)
+                .floor() as i32;
+            let cursor_cell_z = ((pos.z + cell_size.y / 2.0) / cell_size.y
+                - cursor_chunk_z as f32 * (dim.z - 1) as f32)
+                .floor() as i32;
+
+            let in_pattern = self
+                .current_draw_pattern
+                .get(&[cursor_chunk_x, cursor_chunk_z])
+                .and_then(|cells| cells.get(&[cursor_cell_x, cursor_cell_z]))
+                .is_some();
+
+            let alt_held = Input::singleton().is_key_pressed(godot::global::Key::ALT);
+
+            if !in_pattern && !alt_held {
+                self.current_draw_pattern.clear();
+                self.draw_height = pos.y;
+                self.setting_start_position = pos;
+                self.base_position = pos;
+                self.build_draw_pattern(terrain, dim, cell_size);
+            } else {
+                self.draw_height_set = true;
+                if alt_held {
+                    let chunk_key = [cursor_chunk_x, cursor_chunk_z];
+                    let cell_key = [cursor_cell_x, cursor_cell_z];
+                    self.current_draw_pattern.clear();
+
+                    if let Some(chunk) = terrain.bind().get_chunk(cursor_chunk_x, cursor_chunk_z) {
+                        let h = chunk
+                            .bind()
+                            .get_height(Vector2i::new(cursor_cell_x, cursor_cell_z));
+                        let mut cells = HashMap::new();
+                        cells.insert(cell_key, h as f64 as f32);
+                        self.current_draw_pattern.insert(chunk_key, cells);
+                    }
+                    self.draw_height = pos.y;
+                }
+                self.setting_start_position = pos;
+                self.base_position = pos;
+            }
+        }
+
+        if self.is_drawing && !self.draw_height_set {
+            self.draw_height_set = true;
+            self.draw_height = self.brush_position.y;
+        }
+    }
+
+    fn build_draw_pattern(&mut self, terrain: &Gd<PixyTerrain>, dim: Vector3i, cell_size: Vector2) {
+        let pos = self.brush_position;
+
+        let pos_tl = Vector2::new(
+            pos.x + cell_size.x - self.brush_size / 2.0,
+            pos.z + cell_size.y - self.brush_size / 2.0,
+        );
+        let pos_br = Vector2::new(
+            pos.x + cell_size.x + self.brush_size / 2.0,
+            pos.z + cell_size.y + self.brush_size / 2.0,
+        );
+
+        let chunk_width = (dim.x - 1) as f32 * cell_size.x;
+        let chunk_depth = (dim.z - 1) as f32 * cell_size.y;
+
+        let chunk_tl_x = (pos_tl.x / chunk_width).floor() as i32;
+        let chunk_tl_z = (pos_tl.y / chunk_depth).floor() as i32;
+        let chunk_br_x = (pos_br.x / chunk_width).floor() as i32;
+        let chunk_br_z = (pos_br.y / chunk_depth).floor() as i32;
+
+        let x_tl = (pos_tl.x / cell_size.x - chunk_tl_x as f32 * (dim.x - 1) as f32).floor() as i32;
+        let z_tl = (pos_tl.y / cell_size.y - chunk_tl_z as f32 * (dim.z - 1) as f32).floor() as i32;
+        let x_br = (pos_br.x / cell_size.x - chunk_br_x as f32 * (dim.x - 1) as f32).floor() as i32;
+        let z_br = (pos_br.y / cell_size.y - chunk_br_z as f32 * (dim.z - 1) as f32).floor() as i32;
+
+        let half = self.brush_size / 2.0;
+        let max_distance = match self.brush_type {
+            BrushType::Round => half * half,
+            BrushType::Square => half * half * 2.0,
+        };
+
+        for chunk_z in chunk_tl_z..=chunk_br_z {
+            for chunk_x in chunk_tl_x..=chunk_br_x {
+                if !terrain.bind().has_chunk(chunk_x, chunk_z) {
+                    continue;
+                }
+
+                let x_min = if chunk_x == chunk_tl_x { x_tl } else { 0 };
+                let x_max = if chunk_x == chunk_br_x { x_br } else { dim.x };
+                let z_min = if chunk_z == chunk_tl_z { z_tl } else { 0 };
+                let z_max = if chunk_z == chunk_br_z { z_br } else { dim.z };
+
+                for z in z_min..z_max {
+                    for x in x_min..x_max {
+                        let world_x = (chunk_x * (dim.x - 1) + x) as f32 * cell_size.x;
+                        let world_z = (chunk_z * (dim.z - 1) + z) as f32 * cell_size.y;
+
+                        let dist_sq = (pos.x - world_x) * (pos.x - world_x)
+                            + (pos.z - world_z) * (pos.z - world_z);
+
+                        if dist_sq > max_distance {
+                            continue;
+                        }
+
+                        let sample = if self.falloff {
+                            let t = match self.brush_type {
+                                BrushType::Round => {
+                                    ((max_distance - dist_sq) / max_distance).clamp(0.0, 1.0)
+                                }
+                                BrushType::Square => {
+                                    let local_x = world_x - pos.x;
+                                    let local_z = world_z - pos.z;
+                                    let uv_x = local_x / (self.brush_size * 0.5);
+                                    let uv_z = local_z / (self.brush_size * 0.5);
+                                    let d = uv_x.abs().max(uv_z.abs());
+                                    1.0 - d.clamp(0.2, 1.0)
+                                }
+                            };
+                            let t = t.clamp(0.001, 0.999);
+                            t * t * (3.0 - 2.0 * t)
+                        } else {
+                            1.0
+                        };
+
+                        let chunk_key = [chunk_x, chunk_z];
+                        let cell_key = [x, z];
+                        let cell_entry = self
+                            .current_draw_pattern
+                            .entry(chunk_key)
+                            .or_default()
+                            .entry(cell_key)
+                            .or_insert(0.0);
+                        if sample > *cell_entry {
+                            *cell_entry = sample;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn draw_pattern(&mut self, terrain: &Gd<PixyTerrain>, dim: Vector3i, cell_size: Vector2) {
+        if self.current_draw_pattern.is_empty() {
+            return;
+        }
+
+        // Snapshot the pattern (avoid borrow issues)
+        let pattern_snapshot: Vec<([i32; 2], Vec<([i32; 2], f32)>)> = self
+            .current_draw_pattern
+            .iter()
+            .map(|(k, v)| (*k, v.iter().map(|(ck, cv)| (*ck, *cv)).collect()))
+            .collect();
+
+        // Phase 1: Compute do/undo values per cell
+        let mut do_height = VarDictionary::new();
+        let mut undo_height = VarDictionary::new();
+        let mut do_color_0 = VarDictionary::new();
+        let mut undo_color_0 = VarDictionary::new();
+        let mut do_color_1 = VarDictionary::new();
+        let mut undo_color_1 = VarDictionary::new();
+        let mut do_wall_color_0 = VarDictionary::new();
+        let mut undo_wall_color_0 = VarDictionary::new();
+        let mut do_wall_color_1 = VarDictionary::new();
+        let mut undo_wall_color_1 = VarDictionary::new();
+        let mut do_grass_mask = VarDictionary::new();
+        let mut undo_grass_mask = VarDictionary::new();
+
+        let mut first_chunk: Option<[i32; 2]> = None;
+
+        // Compute global average for smooth mode
+        let global_avg_height = if self.mode == TerrainToolMode::Smooth {
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for (chunk_key, cells) in &pattern_snapshot {
+                if let Some(chunk) = terrain.bind().get_chunk(chunk_key[0], chunk_key[1]) {
+                    let c = chunk.bind();
+                    for &(cell_key, _) in cells {
+                        sum += c.get_height(Vector2i::new(cell_key[0], cell_key[1]));
+                        count += 1;
+                    }
+                }
+            }
+            sum / count.max(1) as f32
+        } else {
+            0.0
+        };
+
+        for (chunk_key, cells) in &pattern_snapshot {
+            if first_chunk.is_none() {
+                first_chunk = Some(*chunk_key);
+            }
+
+            let chunk_coords = Vector2i::new(chunk_key[0], chunk_key[1]);
+            let chunk = terrain.bind().get_chunk(chunk_key[0], chunk_key[1]);
+            let Some(chunk) = chunk else { continue };
+
+            match self.mode {
+                TerrainToolMode::Smooth => {
+                    let mut do_chunk = VarDictionary::new();
+                    let mut undo_chunk = VarDictionary::new();
+
+                    for &(cell_key, sample) in cells {
+                        let sample = sample.clamp(0.001, 0.999);
+                        let cell_coords = Vector2i::new(cell_key[0], cell_key[1]);
+                        let old_h = chunk.bind().get_height(cell_coords);
+                        let f = sample * self.strength;
+                        let new_h = lerp_f32(old_h, global_avg_height, f);
+                        do_chunk.set(cell_coords, new_h);
+                        undo_chunk.set(cell_coords, old_h);
+                    }
+
+                    do_height.set(chunk_coords, do_chunk);
+                    undo_height.set(chunk_coords, undo_chunk);
+                }
+
+                TerrainToolMode::DebugBrush => {
+                    for &(cell_key, _) in cells {
+                        let c = chunk.bind();
+                        let cell_coords = Vector2i::new(cell_key[0], cell_key[1]);
+                        let h = c.get_height(cell_coords);
+                        let col0 = c.get_color_0(cell_key[0], cell_key[1]);
+                        let col1 = c.get_color_1(cell_key[0], cell_key[1]);
+                        godot_print!(
+                            "DEBUG: chunk ({},{}), cell ({},{}), h={:.3}, c0={:?}, c1={:?}",
+                            chunk_key[0],
+                            chunk_key[1],
+                            cell_key[0],
+                            cell_key[1],
+                            h,
+                            col0,
+                            col1
+                        );
+                    }
+                    continue;
+                }
+
+                _ => {
+                    let mut do_chunk = VarDictionary::new();
+                    let mut undo_chunk = VarDictionary::new();
+                    let mut do_chunk_cc = VarDictionary::new();
+                    let mut undo_chunk_cc = VarDictionary::new();
+
+                    for &(cell_key, sample) in cells {
+                        let sample = sample.clamp(0.001, 0.999);
+                        let cell_coords = Vector2i::new(cell_key[0], cell_key[1]);
+
+                        match self.mode {
+                            TerrainToolMode::GrassMask => {
+                                let old = chunk.bind().get_grass_mask_at(cell_key[0], cell_key[1]);
+                                let new_mask = if self.should_mask_grass {
+                                    Color::from_rgba(0.0, 0.0, 0.0, 0.0)
+                                } else {
+                                    Color::from_rgba(1.0, 0.0, 0.0, 0.0)
+                                };
+                                do_chunk.set(cell_coords, new_mask);
+                                undo_chunk.set(cell_coords, old);
+                            }
+
+                            TerrainToolMode::Level => {
+                                let old_h = chunk.bind().get_height(cell_coords);
+                                let new_h = lerp_f32(old_h, self.height, sample);
+                                do_chunk.set(cell_coords, new_h);
+                                undo_chunk.set(cell_coords, old_h);
+                            }
+
+                            TerrainToolMode::Bridge => {
+                                let b_end =
+                                    Vector2::new(self.brush_position.x, self.brush_position.z);
+                                let b_start =
+                                    Vector2::new(self.bridge_start_pos.x, self.bridge_start_pos.z);
+                                let bridge_length = b_end.distance_to(b_start);
+
+                                if bridge_length < 0.5 || cells.len() < 3 {
+                                    continue;
+                                }
+
+                                let mut global_x =
+                                    (chunk_key[0] * (dim.x - 1) + cell_key[0]) as f32 * cell_size.x;
+                                let global_z =
+                                    (chunk_key[1] * (dim.z - 1) + cell_key[1]) as f32 * cell_size.y;
+
+                                if chunk_key[0] != self.bridge_start_chunk.x {
+                                    global_x += (self.bridge_start_chunk.x - chunk_key[0]) as f32
+                                        * 2.0
+                                        * cell_size.x;
+                                }
+
+                                let global_cell = Vector2::new(global_x, global_z);
+                                let bridge_dir = (b_end - b_start) / bridge_length;
+                                let cell_vec = global_cell - b_start;
+                                let linear_offset = cell_vec.dot(bridge_dir);
+                                let mut progress = (linear_offset / bridge_length).clamp(0.0, 1.0);
+
+                                if self.ease_value != -1.0 {
+                                    progress = godot_ease(progress, self.ease_value);
+                                }
+
+                                let bridge_height = lerp_f32(
+                                    self.bridge_start_pos.y,
+                                    self.brush_position.y,
+                                    progress,
+                                );
+
+                                let old_h = chunk.bind().get_height(cell_coords);
+                                do_chunk.set(cell_coords, bridge_height);
+                                undo_chunk.set(cell_coords, old_h);
+                            }
+
+                            TerrainToolMode::VertexPaint => {
+                                if self.paint_walls_mode {
+                                    let old_c0 =
+                                        chunk.bind().get_wall_color_0(cell_key[0], cell_key[1]);
+                                    let old_c1 =
+                                        chunk.bind().get_wall_color_1(cell_key[0], cell_key[1]);
+                                    do_chunk.set(cell_coords, self.vertex_color_0);
+                                    undo_chunk.set(cell_coords, old_c0);
+                                    do_chunk_cc.set(cell_coords, self.vertex_color_1);
+                                    undo_chunk_cc.set(cell_coords, old_c1);
+                                } else {
+                                    let old_c0 = chunk.bind().get_color_0(cell_key[0], cell_key[1]);
+                                    let old_c1 = chunk.bind().get_color_1(cell_key[0], cell_key[1]);
+                                    do_chunk.set(cell_coords, self.vertex_color_0);
+                                    undo_chunk.set(cell_coords, old_c0);
+                                    do_chunk_cc.set(cell_coords, self.vertex_color_1);
+                                    undo_chunk_cc.set(cell_coords, old_c1);
+                                }
+                            }
+
+                            // Height tool (default)
+                            _ => {
+                                let old_h = chunk.bind().get_height(cell_coords);
+                                let new_h = if self.flatten {
+                                    lerp_f32(old_h, self.brush_position.y, sample)
+                                } else {
+                                    let height_diff = self.brush_position.y - self.draw_height;
+                                    old_h + height_diff * sample
+                                };
+                                do_chunk.set(cell_coords, new_h);
+                                undo_chunk.set(cell_coords, old_h);
+                            }
+                        }
+                    }
+
+                    // Store in appropriate dictionaries
+                    match self.mode {
+                        TerrainToolMode::GrassMask => {
+                            do_grass_mask.set(chunk_coords, do_chunk);
+                            undo_grass_mask.set(chunk_coords, undo_chunk);
+                        }
+                        TerrainToolMode::VertexPaint => {
+                            if self.paint_walls_mode {
+                                do_wall_color_0.set(chunk_coords, do_chunk);
+                                undo_wall_color_0.set(chunk_coords, undo_chunk);
+                                do_wall_color_1.set(chunk_coords, do_chunk_cc);
+                                undo_wall_color_1.set(chunk_coords, undo_chunk_cc);
+                            } else {
+                                do_color_0.set(chunk_coords, do_chunk);
+                                undo_color_0.set(chunk_coords, undo_chunk);
+                                do_color_1.set(chunk_coords, do_chunk_cc);
+                                undo_color_1.set(chunk_coords, undo_chunk_cc);
+                            }
+                        }
+                        _ => {
+                            do_height.set(chunk_coords, do_chunk);
+                            undo_height.set(chunk_coords, undo_chunk);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 1.5: QuickPaint -- apply wall, ground, and grass patterns
+        if let Some(ref qp) = self.current_quick_paint {
+            let qp_bind = qp.bind();
+            let wall_slot = qp_bind.wall_texture_slot;
+            let ground_slot = qp_bind.ground_texture_slot;
+            let has_grass = qp_bind.has_grass;
+            drop(qp_bind);
+
+            let (wall_c0, wall_c1) = marching_squares::texture_index_to_colors(wall_slot);
+            let (ground_c0, ground_c1) = marching_squares::texture_index_to_colors(ground_slot);
+
+            for (chunk_key, cells) in &pattern_snapshot {
+                let chunk_coords = Vector2i::new(chunk_key[0], chunk_key[1]);
+                let chunk = terrain.bind().get_chunk(chunk_key[0], chunk_key[1]);
+                let Some(chunk) = chunk else { continue };
+
+                let mut do_wc0_chunk = VarDictionary::new();
+                let mut undo_wc0_chunk = VarDictionary::new();
+                let mut do_wc1_chunk = VarDictionary::new();
+                let mut undo_wc1_chunk = VarDictionary::new();
+                let mut do_gc0_chunk = VarDictionary::new();
+                let mut undo_gc0_chunk = VarDictionary::new();
+                let mut do_gc1_chunk = VarDictionary::new();
+                let mut undo_gc1_chunk = VarDictionary::new();
+                let mut do_gm_chunk = VarDictionary::new();
+                let mut undo_gm_chunk = VarDictionary::new();
+
+                for &(cell_key, _) in cells {
+                    let cell = Vector2i::new(cell_key[0], cell_key[1]);
+                    let c = chunk.bind();
+
+                    // Wall colors
+                    undo_wc0_chunk.set(cell, c.get_wall_color_0(cell_key[0], cell_key[1]));
+                    undo_wc1_chunk.set(cell, c.get_wall_color_1(cell_key[0], cell_key[1]));
+                    do_wc0_chunk.set(cell, wall_c0);
+                    do_wc1_chunk.set(cell, wall_c1);
+
+                    // Ground colors
+                    undo_gc0_chunk.set(cell, c.get_color_0(cell_key[0], cell_key[1]));
+                    undo_gc1_chunk.set(cell, c.get_color_1(cell_key[0], cell_key[1]));
+                    do_gc0_chunk.set(cell, ground_c0);
+                    do_gc1_chunk.set(cell, ground_c1);
+
+                    // Grass mask
+                    undo_gm_chunk.set(cell, c.get_grass_mask_at(cell_key[0], cell_key[1]));
+                    if has_grass {
+                        do_gm_chunk.set(cell, Color::from_rgba(1.0, 1.0, 0.0, 0.0));
+                    } else {
+                        do_gm_chunk.set(cell, Color::from_rgba(0.0, 0.0, 0.0, 0.0));
+                    }
+                }
+
+                do_wall_color_0.set(chunk_coords, do_wc0_chunk);
+                undo_wall_color_0.set(chunk_coords, undo_wc0_chunk);
+                do_wall_color_1.set(chunk_coords, do_wc1_chunk);
+                undo_wall_color_1.set(chunk_coords, undo_wc1_chunk);
+                do_color_0.set(chunk_coords, do_gc0_chunk);
+                undo_color_0.set(chunk_coords, undo_gc0_chunk);
+                do_color_1.set(chunk_coords, do_gc1_chunk);
+                undo_color_1.set(chunk_coords, undo_gc1_chunk);
+                do_grass_mask.set(chunk_coords, do_gm_chunk);
+                undo_grass_mask.set(chunk_coords, undo_gm_chunk);
+            }
+        }
+
+        // Phase 2: Cross-chunk edge propagation
+        self.propagate_cross_chunk_edges(
+            terrain,
+            &pattern_snapshot,
+            dim,
+            &mut do_height,
+            &mut undo_height,
+            &mut do_color_0,
+            &mut undo_color_0,
+            &mut do_color_1,
+            &mut undo_color_1,
+            &mut do_wall_color_0,
+            &mut undo_wall_color_0,
+            &mut do_wall_color_1,
+            &mut undo_wall_color_1,
+            &mut do_grass_mask,
+            &mut undo_grass_mask,
+        );
+
+        // Phase 3: Wall color expansion for height modes
+        if self.current_quick_paint.is_none()
+            && matches!(
+                self.mode,
+                TerrainToolMode::Height
+                    | TerrainToolMode::Level
+                    | TerrainToolMode::Smooth
+                    | TerrainToolMode::Bridge
+            )
+        {
+            self.expand_wall_colors(
+                terrain,
+                dim,
+                &do_height,
+                &mut do_wall_color_0,
+                &mut undo_wall_color_0,
+                &mut do_wall_color_1,
+                &mut undo_wall_color_1,
+            );
+        }
+
+        // Phase 4: Build composite dictionaries and register undo/redo
+        let mut do_patterns = VarDictionary::new();
+        let mut undo_patterns = VarDictionary::new();
+
+        if !do_height.is_empty() {
+            do_patterns.set("height", do_height);
+            undo_patterns.set("height", undo_height);
+        }
+        if !do_wall_color_0.is_empty() {
+            do_patterns.set("wall_color_0", do_wall_color_0);
+            undo_patterns.set("wall_color_0", undo_wall_color_0);
+        }
+        if !do_wall_color_1.is_empty() {
+            do_patterns.set("wall_color_1", do_wall_color_1);
+            undo_patterns.set("wall_color_1", undo_wall_color_1);
+        }
+        if !do_grass_mask.is_empty() {
+            do_patterns.set("grass_mask", do_grass_mask);
+            undo_patterns.set("grass_mask", undo_grass_mask);
+        }
+        if !do_color_0.is_empty() {
+            do_patterns.set("color_0", do_color_0);
+            undo_patterns.set("color_0", undo_color_0);
+        }
+        if !do_color_1.is_empty() {
+            do_patterns.set("color_1", do_color_1);
+            undo_patterns.set("color_1", undo_color_1);
+        }
+
+        if do_patterns.is_empty() {
+            return;
+        }
+
+        let action_name = match self.mode {
+            TerrainToolMode::Height => "terrain height",
+            TerrainToolMode::Level => "terrain level",
+            TerrainToolMode::Smooth => "terrain smooth",
+            TerrainToolMode::Bridge => "terrain bridge",
+            TerrainToolMode::GrassMask => "terrain grass mask",
+            TerrainToolMode::VertexPaint => {
+                if self.paint_walls_mode {
+                    "terrain wall paint"
+                } else {
+                    "terrain vertex paint"
+                }
+            }
+            _ => "terrain draw",
+        };
+
+        let terrain_node: Gd<Node> = terrain.clone().upcast();
+        self.register_undo_redo(action_name, &terrain_node, do_patterns, undo_patterns);
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn propagate_cross_chunk_edges(
+        &self,
+        terrain: &Gd<PixyTerrain>,
+        pattern_snapshot: &[([i32; 2], Vec<([i32; 2], f32)>)],
+        dim: Vector3i,
+        do_height: &mut VarDictionary,
+        undo_height: &mut VarDictionary,
+        do_color_0: &mut VarDictionary,
+        undo_color_0: &mut VarDictionary,
+        do_color_1: &mut VarDictionary,
+        undo_color_1: &mut VarDictionary,
+        do_wall_color_0: &mut VarDictionary,
+        undo_wall_color_0: &mut VarDictionary,
+        do_wall_color_1: &mut VarDictionary,
+        undo_wall_color_1: &mut VarDictionary,
+        do_grass_mask: &mut VarDictionary,
+        undo_grass_mask: &mut VarDictionary,
+    ) {
+        struct EdgeEntry {
+            src_chunk: Vector2i,
+            src_cell: Vector2i,
+            adj_chunk: Vector2i,
+            adj_cell: Vector2i,
+            blend: f32,
+        }
+
+        let mut edges: Vec<EdgeEntry> = Vec::new();
+
+        // Pass 1: Collect edge entries
+        for (chunk_key, cells) in pattern_snapshot {
+            for &(cell_key, sample) in cells {
+                let sample = sample.clamp(0.001, 0.999);
+
+                for cx in -1i32..=1 {
+                    for cz in -1i32..=1 {
+                        if cx == 0 && cz == 0 {
+                            continue;
+                        }
+
+                        let adj_chunk = [chunk_key[0] + cx, chunk_key[1] + cz];
+                        if !terrain.bind().has_chunk(adj_chunk[0], adj_chunk[1]) {
+                            continue;
+                        }
+
+                        let mut x = cell_key[0];
+                        let mut z = cell_key[1];
+
+                        if cx == -1 {
+                            if x == 0 {
+                                x = dim.x - 1;
+                            } else {
+                                continue;
+                            }
+                        } else if cx == 1 {
+                            if x == dim.x - 1 {
+                                x = 0;
+                            } else {
+                                continue;
+                            }
+                        }
+                        if cz == -1 {
+                            if z == 0 {
+                                z = dim.z - 1;
+                            } else {
+                                continue;
+                            }
+                        } else if cz == 1 {
+                            if z == dim.z - 1 {
+                                z = 0;
+                            } else {
+                                continue;
+                            }
+                        }
+
+                        let existing_higher = self
+                            .current_draw_pattern
+                            .get(&adj_chunk)
+                            .and_then(|cells| cells.get(&[x, z]))
+                            .is_some_and(|&s| s > sample);
+
+                        if existing_higher {
+                            continue;
+                        }
+
+                        edges.push(EdgeEntry {
+                            src_chunk: Vector2i::new(chunk_key[0], chunk_key[1]),
+                            src_cell: Vector2i::new(cell_key[0], cell_key[1]),
+                            adj_chunk: Vector2i::new(adj_chunk[0], adj_chunk[1]),
+                            adj_cell: Vector2i::new(x, z),
+                            blend: 1.0,
+                        });
+
+                        // Inner-cell blend for height modes
+                        if matches!(
+                            self.mode,
+                            TerrainToolMode::Height
+                                | TerrainToolMode::Level
+                                | TerrainToolMode::Smooth
+                                | TerrainToolMode::Bridge
+                        ) {
+                            let inner_x = if cx == -1 {
+                                x - 1
+                            } else if cx == 1 {
+                                x + 1
+                            } else {
+                                x
+                            };
+                            let inner_z = if cz == -1 {
+                                z - 1
+                            } else if cz == 1 {
+                                z + 1
+                            } else {
+                                z
+                            };
+
+                            if inner_x >= 0 && inner_x < dim.x && inner_z >= 0 && inner_z < dim.z {
+                                let already_in_pattern = self
+                                    .current_draw_pattern
+                                    .get(&[adj_chunk[0], adj_chunk[1]])
+                                    .and_then(|cells| cells.get(&[inner_x, inner_z]))
+                                    .is_some();
+                                if !already_in_pattern {
+                                    edges.push(EdgeEntry {
+                                        src_chunk: Vector2i::new(chunk_key[0], chunk_key[1]),
+                                        src_cell: Vector2i::new(cell_key[0], cell_key[1]),
+                                        adj_chunk: Vector2i::new(adj_chunk[0], adj_chunk[1]),
+                                        adj_cell: Vector2i::new(inner_x, inner_z),
+                                        blend: 0.5,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Apply collected edges
+        for edge in &edges {
+            let adj_chunk_gd = terrain.bind().get_chunk(edge.adj_chunk.x, edge.adj_chunk.y);
+
+            match self.mode {
+                TerrainToolMode::GrassMask => {
+                    Self::copy_dict_entry(
+                        do_grass_mask,
+                        edge.src_chunk,
+                        edge.src_cell,
+                        edge.adj_chunk,
+                        edge.adj_cell,
+                    );
+                    if let Some(adj) = &adj_chunk_gd {
+                        let restore = adj
+                            .bind()
+                            .get_grass_mask_at(edge.adj_cell.x, edge.adj_cell.y);
+                        Self::set_nested_dict(
+                            undo_grass_mask,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            restore.to_variant(),
+                        );
+                    }
+                }
+                TerrainToolMode::VertexPaint if self.paint_walls_mode => {
+                    Self::copy_dict_entry(
+                        do_wall_color_0,
+                        edge.src_chunk,
+                        edge.src_cell,
+                        edge.adj_chunk,
+                        edge.adj_cell,
+                    );
+                    Self::copy_dict_entry(
+                        do_wall_color_1,
+                        edge.src_chunk,
+                        edge.src_cell,
+                        edge.adj_chunk,
+                        edge.adj_cell,
+                    );
+                    if let Some(adj) = &adj_chunk_gd {
+                        Self::set_nested_dict(
+                            undo_wall_color_0,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            adj.bind()
+                                .get_wall_color_0(edge.adj_cell.x, edge.adj_cell.y)
+                                .to_variant(),
+                        );
+                        Self::set_nested_dict(
+                            undo_wall_color_1,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            adj.bind()
+                                .get_wall_color_1(edge.adj_cell.x, edge.adj_cell.y)
+                                .to_variant(),
+                        );
+                    }
+                }
+                TerrainToolMode::VertexPaint => {
+                    Self::copy_dict_entry(
+                        do_color_0,
+                        edge.src_chunk,
+                        edge.src_cell,
+                        edge.adj_chunk,
+                        edge.adj_cell,
+                    );
+                    Self::copy_dict_entry(
+                        do_color_1,
+                        edge.src_chunk,
+                        edge.src_cell,
+                        edge.adj_chunk,
+                        edge.adj_cell,
+                    );
+                    if let Some(adj) = &adj_chunk_gd {
+                        Self::set_nested_dict(
+                            undo_color_0,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            adj.bind()
+                                .get_color_0(edge.adj_cell.x, edge.adj_cell.y)
+                                .to_variant(),
+                        );
+                        Self::set_nested_dict(
+                            undo_color_1,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            adj.bind()
+                                .get_color_1(edge.adj_cell.x, edge.adj_cell.y)
+                                .to_variant(),
+                        );
+                    }
+                }
+                _ => {
+                    // Height modes with blend factor
+                    if edge.blend >= 1.0 {
+                        Self::copy_dict_entry(
+                            do_height,
+                            edge.src_chunk,
+                            edge.src_cell,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                        );
+                    } else if let Some(src_outer) = do_height.get(edge.src_chunk) {
+                        let src_dict: VarDictionary = src_outer.to();
+                        if let Some(val) = src_dict.get(edge.src_cell) {
+                            let src_h: f32 = val.to();
+                            if let Some(adj) = &adj_chunk_gd {
+                                let existing_h = adj.bind().get_height(edge.adj_cell);
+                                let blended = lerp_f32(existing_h, src_h, edge.blend);
+                                Self::set_nested_dict(
+                                    do_height,
+                                    edge.adj_chunk,
+                                    edge.adj_cell,
+                                    blended.to_variant(),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(adj) = &adj_chunk_gd {
+                        let restore = adj.bind().get_height(edge.adj_cell);
+                        Self::set_nested_dict(
+                            undo_height,
+                            edge.adj_chunk,
+                            edge.adj_cell,
+                            restore.to_variant(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expand_wall_colors(
+        &mut self,
+        terrain: &Gd<PixyTerrain>,
+        dim: Vector3i,
+        height_pattern: &VarDictionary,
+        do_wall_0: &mut VarDictionary,
+        undo_wall_0: &mut VarDictionary,
+        do_wall_1: &mut VarDictionary,
+        undo_wall_1: &mut VarDictionary,
+    ) {
+        let default_wall_tex = terrain.bind().default_wall_texture;
+        let (vc0, vc1) = marching_squares::texture_index_to_colors(default_wall_tex);
+
+        let mut cells_to_process: Vec<(Vector2i, Vector2i)> = Vec::new();
+
+        for (chunk_key, chunk_value) in height_pattern.iter_shared() {
+            let chunk_coords: Vector2i = chunk_key.to();
+            let cell_dict: VarDictionary = chunk_value.to();
+            for (cell_key, _) in cell_dict.iter_shared() {
+                let cell_coords: Vector2i = cell_key.to();
+                cells_to_process.push((chunk_coords, cell_coords));
+            }
+        }
+
+        for (chunk_coords, cell_coords) in &cells_to_process {
+            for dx in -1i32..=1 {
+                for dz in -1i32..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+
+                    let mut adj_x = cell_coords.x + dx;
+                    let mut adj_z = cell_coords.y + dz;
+                    let mut adj_chunk = *chunk_coords;
+
+                    if adj_x < 0 {
+                        adj_chunk.x -= 1;
+                        adj_x = dim.x - 1;
+                    } else if adj_x >= dim.x {
+                        adj_chunk.x += 1;
+                        adj_x = 0;
+                    }
+                    if adj_z < 0 {
+                        adj_chunk.y -= 1;
+                        adj_z = dim.z - 1;
+                    } else if adj_z >= dim.z {
+                        adj_chunk.y += 1;
+                        adj_z = 0;
+                    }
+
+                    if !terrain.bind().has_chunk(adj_chunk.x, adj_chunk.y) {
+                        continue;
+                    }
+
+                    let adj_cell = Vector2i::new(adj_x, adj_z);
+
+                    // Skip if already in wall pattern
+                    if let Some(existing) = do_wall_0.get(adj_chunk) {
+                        let d: VarDictionary = existing.to();
+                        if d.contains_key(adj_cell) {
+                            continue;
+                        }
+                    }
+
+                    let adj_chunk_gd = terrain.bind().get_chunk(adj_chunk.x, adj_chunk.y);
+                    let Some(adj_chunk_gd) = adj_chunk_gd else {
+                        continue;
+                    };
+
+                    let old_wc0 = adj_chunk_gd.bind().get_wall_color_0(adj_x, adj_z);
+                    let old_wc1 = adj_chunk_gd.bind().get_wall_color_1(adj_x, adj_z);
+
+                    let mut do_chunk_0: VarDictionary =
+                        Self::get_or_create_dict(do_wall_0, adj_chunk);
+                    do_chunk_0.set(adj_cell, vc0);
+                    do_wall_0.set(adj_chunk, do_chunk_0);
+
+                    let mut undo_chunk_0: VarDictionary =
+                        Self::get_or_create_dict(undo_wall_0, adj_chunk);
+                    undo_chunk_0.set(adj_cell, old_wc0);
+                    undo_wall_0.set(adj_chunk, undo_chunk_0);
+
+                    let mut do_chunk_1: VarDictionary =
+                        Self::get_or_create_dict(do_wall_1, adj_chunk);
+                    do_chunk_1.set(adj_cell, vc1);
+                    do_wall_1.set(adj_chunk, do_chunk_1);
+
+                    let mut undo_chunk_1: VarDictionary =
+                        Self::get_or_create_dict(undo_wall_1, adj_chunk);
+                    undo_chunk_1.set(adj_cell, old_wc1);
+                    undo_wall_1.set(adj_chunk, undo_chunk_1);
+                }
+            }
+        }
+    }
+
+    // -- Dictionary helper statics --
+
+    fn get_or_create_dict(dict: &VarDictionary, key: Vector2i) -> VarDictionary {
+        dict.get(key)
+            .and_then(|v| v.try_to::<VarDictionary>().ok())
+            .unwrap_or_default()
+    }
+
+    fn copy_dict_entry(
+        dict: &mut VarDictionary,
+        src_chunk: Vector2i,
+        src_cell: Vector2i,
+        adj_chunk: Vector2i,
+        adj_cell: Vector2i,
+    ) {
+        if let Some(src_outer) = dict.get(src_chunk) {
+            let src_dict: VarDictionary = src_outer.to();
+            if let Some(val) = src_dict.get(src_cell) {
+                let mut adj_dict: VarDictionary = Self::get_or_create_dict(dict, adj_chunk);
+                adj_dict.set(adj_cell, val);
+                dict.set(adj_chunk, adj_dict);
+            }
+        }
+    }
+
+    fn set_nested_dict(dict: &mut VarDictionary, chunk: Vector2i, cell: Vector2i, value: Variant) {
+        let mut inner: VarDictionary = Self::get_or_create_dict(dict, chunk);
+        inner.set(cell, value);
+        dict.set(chunk, inner);
+    }
+
+    // -- Undo/Redo --
+
+    fn register_undo_redo(
+        &mut self,
+        action_name: &str,
+        terrain_node: &Gd<Node>,
+        do_patterns: VarDictionary,
+        undo_patterns: VarDictionary,
+    ) {
+        let Some(mut undo_redo) = self.base_mut().get_undo_redo() else {
+            godot_warn!("No EditorUndoRedoManager available");
+            return;
+        };
+
+        undo_redo.create_action(action_name);
+        undo_redo.add_do_method(
+            terrain_node,
+            "apply_composite_pattern",
+            &[do_patterns.to_variant()],
+        );
+        undo_redo.add_undo_method(
+            terrain_node,
+            "apply_composite_pattern",
+            &[undo_patterns.to_variant()],
+        );
+        undo_redo.commit_action();
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
+    }
+
     fn register_chunk_undo_redo(
         &mut self,
-        _terrain_node: &Gd<Node>,
-        _chunk_x: i32,
-        _chunk_z: i32,
-        _action_name: &str,
-        _is_remove: bool,
+        terrain_node: &Gd<Node>,
+        chunk_x: i32,
+        chunk_z: i32,
+        action_name: &str,
+        is_remove: bool,
     ) {
-        // Stub — will create undo/redo actions in Part 17
+        let Some(mut undo_redo) = self.base_mut().get_undo_redo() else {
+            godot_warn!("No EditorUndoRedoManager available");
+            return;
+        };
+
+        let terrain_clone = terrain_node.clone();
+
+        if is_remove {
+            undo_redo.create_action(action_name);
+            undo_redo.add_do_method(
+                &terrain_clone,
+                "remove_chunk_from_tree",
+                &[chunk_x.to_variant(), chunk_z.to_variant()],
+            );
+            undo_redo.add_undo_method(
+                &terrain_clone,
+                "add_new_chunk",
+                &[chunk_x.to_variant(), chunk_z.to_variant()],
+            );
+            undo_redo.commit_action();
+        } else {
+            undo_redo.create_action(action_name);
+            undo_redo.add_do_method(
+                &terrain_clone,
+                "add_new_chunk",
+                &[chunk_x.to_variant(), chunk_z.to_variant()],
+            );
+            undo_redo.add_undo_method(
+                &terrain_clone,
+                "remove_chunk",
+                &[chunk_x.to_variant(), chunk_z.to_variant()],
+            );
+            undo_redo.commit_action();
+        }
+        self.base_mut()
+            .call_deferred("apply_collision_visibility_deferred", &[]);
     }
 }
-
