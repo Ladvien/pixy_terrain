@@ -537,18 +537,26 @@ impl PixyTerrainChunk {
                 .owned(false)
                 .done()
             {
-                if let Ok(mut planter) = child.try_cast::<PixyGrassPlanter>() {
-                    let chunk_id = self.base().instance_id();
-                    planter
-                        .bind_mut()
-                        .setup_with_config(chunk_id, grass_config.clone(), true);
+                if let Ok(planter) = child.try_cast::<PixyGrassPlanter>() {
                     self.grass_planter = Some(planter);
                 }
             }
         }
 
-        if should_regenerate_mesh && self.base().get_mesh().is_none() {
-            self.regenerate_mesh_with_material(terrain_material);
+        // Create new grass planter if none found
+        if self.grass_planter.is_none() {
+            let mut planter = PixyGrassPlanter::new_alloc();
+            planter.set_name("GrassPlanter");
+            self.base_mut().add_child(&planter);
+            self.grass_planter = Some(planter);
+        }
+
+        // Initialize the grass planter with config
+        let chunk_id = self.base().instance_id();
+        if let Some(ref mut planter) = self.grass_planter {
+            planter
+                .bind_mut()
+                .setup_with_config(chunk_id, grass_config, true);
         }
     }
 
@@ -613,6 +621,13 @@ impl PixyTerrainChunk {
         st.set_custom_format(2, CustomFormat::RGBA_FLOAT);
 
         // self.generate_terrain_cells(&mut st);
+
+        // Regenerate grass after mesh geometry is built
+        if let Some(ref mut planter) = self.grass_planter {
+            planter
+                .bind_mut()
+                .regenerate_all_cells_with_geometry(&self.cell_geometry);
+        }
     }
 
     fn generate_terrain_cells(&mut self, st: &mut Gd<SurfaceTool>) {
