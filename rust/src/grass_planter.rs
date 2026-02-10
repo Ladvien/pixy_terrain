@@ -27,7 +27,7 @@ pub struct GrassConfig {
     pub ground_colors: [Color; 6],
     pub tex_has_grass: [bool; 5],
     pub grass_mesh: Option<Gd<Mesh>>,
-    pub grass_material: Option<Gd<Mesh>>,
+    pub grass_material: Option<Gd<ShaderMaterial>>,
     pub grass_quad_mesh: Option<Gd<Mesh>>,
     pub ground_images: [Option<Gd<Image>>; 6],
     pub texture_scales: [f32; 6],
