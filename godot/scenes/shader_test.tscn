@@ -1,7 +1,13 @@
-[gd_scene format=3 uid="uid://c1234test"]
+[gd_scene load_steps=7 format=3 uid="uid://shader_test_001"]
 
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="1_orbit"]
-[ext_resource type="Script" path="res://scripts/terrain_test.gd" id="2_terrain_test"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="1_cam"]
+[ext_resource type="Shader" path="res://resources/shaders/mst_terrain.gdshader" id="3_shader"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_terrain"]
+shader = ExtResource("3_shader")
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_test"]
+size = Vector2(8, 8)
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -18,8 +24,7 @@ sky = SubResource("Sky_main")
 ambient_light_source = 2
 ambient_light_color = Color(0.5, 0.5, 0.5, 1)
 
-[node name="TestScene" type="Node3D"]
-script = ExtResource("2_terrain_test")
+[node name="ShaderTest" type="Node3D"]
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_env")
@@ -29,9 +34,11 @@ transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 
 shadow_enabled = true
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 15, 25)
+transform = Transform3D(1, 0, 0, 0, 0.707, 0.707, 0, -0.707, 0.707, 0, 8, 12)
 current = true
-fov = 60.0
-script = ExtResource("1_orbit")
+fov = 50.0
+script = ExtResource("1_cam")
 
-# PixyTerrain node will be added in Part 09 when terrain.rs is implemented
+[node name="TestPlane" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_test")
+material_override = SubResource("ShaderMaterial_terrain")
