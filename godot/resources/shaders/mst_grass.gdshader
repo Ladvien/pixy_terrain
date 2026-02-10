@@ -3,10 +3,18 @@
 // Renders MultiMesh grass sprites as camera-facing billboards.
 // Each instance carries a ground color (INSTANCE_CUSTOM.rgb) and
 // a sprite ID (INSTANCE_CUSTOM.a) to select from 6 grass textures.
-// Supports wind scrolling or per-sprite pixel-art sway animation.
+//
+// Original 6-texture grass pipeline by Yugen:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
+//
+// Wind system, character displacement, toon lighting, and cloud shadows
+// adapted from Dylearn 3D Pixel Art Grass Demo (MIT License):
+//   https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo
 
 shader_type spatial;
-render_mode diffuse_toon, depth_draw_opaque;
+render_mode depth_prepass_alpha, depth_draw_opaque, cull_disabled;
+
+#include "res://resources/shaders/clouds.gdshaderinc"
 
 // --- Primary grass texture + color ---
 group_uniforms Albedo;
@@ -41,167 +49,284 @@ uniform bool use_base_color_6 = false;
 uniform vec3 grass_color_6 : source_color = vec3(0.443, 0.447, 0.365);
 group_uniforms;
 
-// --- Animation uniforms ---
+// --- Animation uniforms (Dylearn-based) ---
 group_uniforms Animation;
-uniform sampler2D wind_texture : source_color;
-uniform vec2 wind_direction = vec2(1.0, 1.0);
-uniform float wind_scale = 0.1;
-uniform float wind_speed = 1.0;
-uniform bool animate_active = true;
-uniform float fps : hint_range(0.0, 30.0, 1.0) = 0.0;
-group_uniforms;
+uniform float framerate = 5.0;
+uniform bool quantised = true;
+	group_uniforms Animation.world_space;
+uniform bool world_space_sway = true;
+uniform float world_sway_angle : hint_range(0.0, 180.0) = 60.0;
+uniform float fake_perspective_scale : hint_range(-0.15, 0.6, 0.001) = 0.3;
+uniform sampler2D wind_noise;
+uniform float wind_noise_threshold : hint_range(-1.0, 1.0, 0.001) = 0.365;
+uniform float wind_noise_scale : hint_range(0.0, 0.1, 0.001) = 0.071;
+uniform float wind_noise_speed : hint_range(0.0, 0.2, 0.001) = 0.025;
+uniform vec2 wind_noise_direction = vec2(0.0, 1.0);
+uniform float noise_diverge_angle : hint_range(0.0, 45.0, 0.001) = 10.0;
+	group_uniforms Animation.view_space;
+uniform bool view_space_sway = true;
+uniform float view_sway_speed : hint_range(0.0, 5.0) = 0.1;
+uniform float view_sway_angle : hint_range(0.0, 45.0) = 10.0;
+	group_uniforms character_displacement;
+uniform bool character_displacement = true;
+uniform float player_displacement_angle_z : hint_range(0.0, 360.0, 0.1) = 45.0;
+uniform float player_displacement_angle_x : hint_range(0.0, 360.0, 0.1) = 45.0;
+uniform float radius_exponent : hint_range(0.0, 10.0, 0.001) = 1.0;
+const int character_count = 64;
+uniform vec4[character_count] character_positions;
 
-// --- Toon shading uniforms ---
-group_uniforms Shading;
+// --- Toon lighting uniforms (Dylearn-based) ---
+group_uniforms Lighting;
+uniform int cuts : hint_range(1, 8) = 3;
+uniform float wrap : hint_range(-2.0, 2.0) = 0.0;
+uniform float steepness : hint_range(1.0, 8.0) = 1.0;
+uniform float threshold_gradient_size = 0.2;
 uniform vec4 shadow_color : source_color;
-uniform int bands : hint_range(1, 10) = 5;
-uniform float shadow_intensity : hint_range(-1.0, 0.5, 0.05) = 0.0;
 group_uniforms;
 
 // --- Varyings ---
 varying vec3 model_origin;
-varying vec3 vertex_normal;
+varying vec3 object_origin;
+varying vec3 world_pos;
 varying vec3 instance_color;
 varying float instance_sprite_id;
-varying flat int instance_id;
-varying float wind_color;
+varying float wind_noise_sample;
+varying float player_displacement_fake_perspective;
+
+// --- Helper functions ---
+float location_seed(vec2 location) {
+	return fract(sin(dot(location, vec2(12.9898, 78.233))) * 43758.5453123);
+}
+
+float random(float n) {
+	return fract(sin(n * 12.9898) * 43758.5453);
+}
+
+mat4 rotateAroundAxis(vec3 axis, float angle) {
+	axis = normalize(axis);
+	float c = cos(angle);
+	float s = sin(angle);
+	float oc = 1.0 - c;
+	return mat4(
+		vec4(oc * axis.x * axis.x + c,
+			oc * axis.x * axis.y - axis.z * s,
+			oc * axis.z * axis.x + axis.y * s,
+			0.0),
+		vec4(oc * axis.x * axis.y + axis.z * s,
+			oc * axis.y * axis.y + c,
+			oc * axis.y * axis.z - axis.x * s,
+			0.0),
+		vec4(oc * axis.z * axis.x - axis.y * s,
+			oc * axis.y * axis.z + axis.x * s,
+			oc * axis.z * axis.z + c,
+			0.0),
+		vec4(0.0, 0.0, 0.0, 1.0)
+	);
+}
+
+mat4 view_space_rotate(float angle) {
+	return mat4(
+		vec4(cos(angle), -sin(angle), 0.0, 0.0),
+		vec4(sin(angle), cos(angle), 0.0, 0.0),
+		vec4(0.0, 0.0, 1.0, 0.0),
+		vec4(0.0, 0.0, 0.0, 1.0)
+	);
+}
 
 void vertex() {
-	// --- Animation: only affects top vertices (Y > 0 = grass tips) ---
-	if (animate_active && VERTEX.y > 0.0) {
-		float left_to_right_mult = 0.2;
+	// Instance data from MultiMesh
+	instance_color = INSTANCE_CUSTOM.rgb;
+	instance_sprite_id = INSTANCE_CUSTOM.a;
 
-		if (fps > 0.0) {
-			// Pixel-art sway: quantize time to discrete frames per sprite
-			float seed = dot(vec2(VERTEX.xz), vec2(12.9898, 78.233)) + float(INSTANCE_ID);
-			float time_offset = fract(sin(seed) * 43758.5453);
-			float quantized_time = floor(TIME * fps * time_offset) / fps;
-			float sway = sin(quantized_time) * left_to_right_mult;
-			VERTEX.x += sway;
+	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	object_origin = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+
+	// Per-instance phase offset for quantized time
+	float seed = 10.0 * location_seed(object_origin.xy);
+	float frametime = 1.0 / framerate;
+	float phase = mod(seed, frametime);
+
+	float time = TIME;
+	if (quantised) {
+		time += phase;
+		time = round(time * framerate) / framerate;
+	}
+
+	// --- Dual-noise wind sampling ---
+	vec2 wind_noise_direction1 = rotate_vec2(wind_noise_direction, noise_diverge_angle);
+	vec2 wind_noise_direction2 = rotate_vec2(wind_noise_direction, -noise_diverge_angle);
+	vec2 wind_noise_time_direction1 = time * wind_noise_speed * normalize(wind_noise_direction1);
+	vec2 wind_noise_time_direction2 = time * wind_noise_speed * normalize(wind_noise_direction2);
+	float wind_noise_sample1 = texture(wind_noise, object_origin.xz * wind_noise_scale + wind_noise_time_direction1).r;
+	float wind_noise_sample2 = texture(wind_noise, object_origin.xz * (wind_noise_scale * 0.8) + (wind_noise_time_direction2 * 0.89 * PI / 3.0)).r;
+	wind_noise_sample = (wind_noise_sample1 * wind_noise_sample2);
+	wind_noise_sample = clamp(wind_noise_sample + wind_noise_threshold, 0.0, 1.0);
+	wind_noise_sample = (wind_noise_sample - 0.5) * 2.0;
+
+	// --- World-space sway (wind) ---
+	float world_sway = wind_noise_sample * radians(world_sway_angle);
+	vec3 wind_world_axis = (vec4(wind_noise_direction.y, 0.0, -wind_noise_direction.x, 1.0) * INV_VIEW_MATRIX).xyz;
+	mat4 world_rotation = rotateAroundAxis(wind_world_axis, world_sway);
+
+	// --- View-space sway (gentle idle) ---
+	float model_sway = sin((time + seed) * view_sway_speed * 2.0 * PI) * radians(view_sway_angle);
+	mat4 model_rotation = view_space_rotate(model_sway);
+
+	// --- Character displacement ---
+	float character_displacement_x = 0.0;
+	float character_displacement_y = 0.0;
+	for (int i = 0; i < character_count; i++) {
+		float distance = length(character_positions[i].xyz - object_origin) / character_positions[i].w;
+		float displacement_strength = pow(1.0 - distance, radius_exponent);
+
+		if (displacement_strength > 0.0) {
+			displacement_strength = clamp(displacement_strength, 0.0, 1.0);
+			vec3 character_to_grass = object_origin - character_positions[i].xyz;
+			float view_y_dot = dot(normalize(CAMERA_DIRECTION_WORLD.xz), normalize(character_to_grass.xz));
+			vec3 perpendicular_camera_direction_world = vec3(CAMERA_DIRECTION_WORLD.z, 0.0, -CAMERA_DIRECTION_WORLD.x);
+			float view_x_dot = dot(normalize(perpendicular_camera_direction_world.xz), normalize(character_to_grass.xz));
+			character_displacement_x += displacement_strength * view_x_dot;
+			character_displacement_y += displacement_strength * view_y_dot;
 		}
-		else {
-			// Wind: scroll a noise texture across world space, bend grass by its value
-			float wind_time = TIME * wind_speed;
-			vec2 scroll = wind_time * wind_direction;
-			vec3 world_pos = MODEL_MATRIX[3].xyz;
-			vec2 wind_uv = (world_pos.xy * wind_scale) + scroll;
-			float wind_value = texture(wind_texture, wind_uv).r;
-			wind_color = wind_value;
-			float wind = wind_value * left_to_right_mult;
-			float bend_factor = clamp(VERTEX.y, 0.0, 1.0);
-			VERTEX += vec3(wind, 0.0, 0.0) * bend_factor;
+	}
+	character_displacement_x = clamp(character_displacement_x, -1.0, 1.0);
+	character_displacement_y = clamp(character_displacement_y, -1.0, 1.0);
+
+	mat4 player_displacement_rotation =
+		rotateAroundAxis(vec3(0.0, 0.0, 1.0), character_displacement_x * radians(player_displacement_angle_z))
+		* rotateAroundAxis(vec3(1.0, 0.0, 0.0), character_displacement_y * radians(player_displacement_angle_x));
+	player_displacement_fake_perspective = character_displacement_y;
+
+	// --- Apply rotations conditionally ---
+	if (view_space_sway) {
+		VERTEX = (model_rotation * vec4(VERTEX, 1.0)).xyz;
+	}
+	if (character_displacement) {
+		VERTEX = (player_displacement_rotation * vec4(VERTEX, 1.0)).xyz;
+	}
+	if (world_space_sway) {
+		VERTEX = (world_rotation * vec4(VERTEX, 1.0)).xyz;
+	}
+
+	// --- Billboard via MODELVIEW_MATRIX replacement ---
+	mat4 modified_model_view = VIEW_MATRIX * mat4(
+		vec4(INV_VIEW_MATRIX[0].xyz, 0.0),
+		vec4(INV_VIEW_MATRIX[1].xyz, 0.0),
+		vec4(INV_VIEW_MATRIX[2].xyz, 0.0),
+		MODEL_MATRIX[3]
+	);
+
+	model_origin = (MODELVIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+	MODELVIEW_MATRIX = modified_model_view;
+}
+
+void fragment() {
+	// Fake perspective UV distortion from wind and character displacement
+	vec2 uv = UV;
+	uv.x -= 0.5;
+	float _wind_noise_sample = wind_noise_sample * fake_perspective_scale;
+	if (world_space_sway) {
+		_wind_noise_sample *= dot(CAMERA_DIRECTION_WORLD.xz, wind_noise_direction);
+		uv.x *= (1.0 - uv.y) * _wind_noise_sample + 1.0;
+	}
+	if (character_displacement) {
+		uv.x *= (1.0 - uv.y) * -player_displacement_fake_perspective + 1.0;
+	}
+	uv.x += 0.5;
+	uv.x = clamp(uv.x, 0.0, 1.0);
+
+	// 6-slot texture selection from instance_sprite_id (0.0..1.0 mapped to slots 1-6)
+	vec4 grass_tex = texture(grass_texture, uv);
+	vec3 grass_color = use_base_color ? grass_base_color : instance_color * grass_base_color;
+	int tex_id = 1;
+
+	if (instance_sprite_id > 0.9) {
+		grass_color = use_base_color_6 ? grass_color_6 : instance_color * grass_color_6;
+		tex_id = 6;
+	} else if (instance_sprite_id > 0.7) {
+		grass_color = use_base_color_5 ? grass_color_5 : instance_color * grass_color_5;
+		tex_id = 5;
+	} else if (instance_sprite_id > 0.5) {
+		grass_color = use_base_color_4 ? grass_color_4 : instance_color * grass_color_4;
+		tex_id = 4;
+	} else if (instance_sprite_id > 0.3) {
+		grass_color = use_base_color_3 ? grass_color_3 : instance_color * grass_color_3;
+		tex_id = 3;
+	} else if (instance_sprite_id > 0.1) {
+		grass_color = use_base_color_2 ? grass_color_2 : instance_color * grass_color_2;
+		tex_id = 2;
+	}
+
+	ALBEDO = grass_color;
+
+	// Sample alpha from the correct sprite texture
+	if (tex_id == 2) {
+		ALPHA = use_grass_tex_2 ? texture(grass_texture_2, uv).a : 0.0;
+	} else if (tex_id == 3) {
+		ALPHA = use_grass_tex_3 ? texture(grass_texture_3, uv).a : 0.0;
+	} else if (tex_id == 4) {
+		ALPHA = use_grass_tex_4 ? texture(grass_texture_4, uv).a : 0.0;
+	} else if (tex_id == 5) {
+		ALPHA = use_grass_tex_5 ? texture(grass_texture_5, uv).a : 0.0;
+	} else if (tex_id == 6) {
+		ALPHA = use_grass_tex_6 ? texture(grass_texture_6, uv).a : 0.0;
+	} else {
+		ALPHA = grass_tex.a;
+	}
+
+	// Strict alpha cutoff (Dylearn approach)
+	ALPHA_SCISSOR_THRESHOLD = 1.0;
+
+	// Flat lighting: use instance origin so the whole billboard shades uniformly
+	LIGHT_VERTEX = model_origin;
+}
+
+// --- Hybrid toon light shader (Dylearn-based) ---
+void light() {
+	float NdotL = dot(NORMAL, LIGHT);
+	float diffuse_amount = NdotL + (ATTENUATION - 1.0) + wrap;
+	diffuse_amount *= steepness;
+
+	// Cloud shadows on directional light
+	if (LIGHT_IS_DIRECTIONAL) {
+		vec3 vertex_world_pos = (INV_VIEW_MATRIX * vec4(model_origin, 1.0)).xyz;
+		float light_value = get_cloud_noise(vertex_world_pos);
+		diffuse_amount = min(diffuse_amount, light_value);
+	}
+
+	// Toon banding with smooth threshold gradients
+	float cuts_inv = 1.0 / float(cuts);
+	float cut = cuts_inv;
+	float original_index = ceil(diffuse_amount * float(cuts));
+	float original_stepped = clamp(original_index * cut, 0.0, 1.0);
+	float diffuse_stepped = clamp(diffuse_amount + mod(1.0 - diffuse_amount, cuts_inv), 0.0, 1.0);
+
+	if (threshold_gradient_size > 0.0) {
+		float nearest_k = floor(diffuse_amount / cut + 0.5);
+		float threshold = nearest_k * cut;
+
+		if (nearest_k >= 0.0 && nearest_k <= float(cuts)) {
+			float halfWidth = 0.5 * cut * threshold_gradient_size;
+			float low  = max(0.0, threshold - halfWidth);
+			float high = min(1.0, threshold + halfWidth);
+
+			float blend = 0.0;
+			if (high > low) {
+				blend = smoothstep(low, high, diffuse_amount);
+			} else {
+				blend = step(threshold, diffuse_amount);
+			}
+
+			float leftValue  = threshold;
+			float rightValue = min(threshold + (cut * 1.0), 1.0);
+			diffuse_stepped = mix(leftValue, rightValue, blend);
+			diffuse_stepped = clamp(diffuse_stepped, 0.0, 1.0);
+		} else {
+			diffuse_stepped = original_stepped;
 		}
 	}
 
-	// --- Spherical billboarding: rotate quad to face camera ---
-	vec3 cam_z = normalize(CAMERA_DIRECTION_WORLD);
-	vec3 cam_y = vec3(0.0, 1.0, 0.0);
-	vec3 cam_x = normalize(cross(cam_y, cam_z));
-	mat3 spherical_billboard = mat3(cam_x, cam_y, cam_z);
-	vec3 billboarded_vertex = spherical_billboard * VERTEX;
-
-	// Position in world: instance origin + billboarded local vertex
-	vec3 instance_origin = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	vec3 world_position = instance_origin + billboarded_vertex;
-	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(world_position, 1.0);
-
-	// Pass instance data to fragment
-	model_origin = (MODELVIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	instance_color = INSTANCE_CUSTOM.rgb;
-	instance_sprite_id = INSTANCE_CUSTOM.a;
-	instance_id = INSTANCE_ID;
-
-	vec3 world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
-	vertex_normal = world_normal;
-}
-
-// --- STUB fragment (replace as you type) ---
-void fragment() {
-     ALPHA_SCISSOR_THRESHOLD = 0.5;                                                                
-
-    // Start with primary grass texture + color
-    vec4 grass_tex = texture(grass_texture, UV);
-    vec3 grass_color = use_base_color ? grass_base_color : instance_color * grass_base_color;
-
-    // Select sprite variant by instance_sprite_id (0.0..1.0 mapped to slots 1-6)
-    int tex_id = 1;
-    if (instance_sprite_id > 0.9) {
-            grass_color = use_base_color_6 ? grass_color_6 : instance_color * grass_color_6;
-            tex_id = 6;
-    }
-    else if (instance_sprite_id > 0.7) {
-            grass_color = use_base_color_5 ? grass_color_5 : instance_color * grass_color_5;
-            tex_id = 5;
-    }
-    else if (instance_sprite_id > 0.5) {
-            grass_color = use_base_color_4 ? grass_color_4 : instance_color * grass_color_4;
-            tex_id = 4;
-    }
-    else if (instance_sprite_id > 0.3) {
-            grass_color = use_base_color_3 ? grass_color_3 : instance_color * grass_color_3;
-            tex_id = 3;
-    }
-    else if (instance_sprite_id > 0.1) {
-            grass_color = use_base_color_2 ? grass_color_2 : instance_color * grass_color_2;
-            tex_id = 2;
-    }
-    ALBEDO = grass_color;
-
-    // Floor-only rendering: hide grass on walls (and adjust for merge rounds)
-    float w_threshold = wall_threshold;
-    if (is_merge_round && wall_threshold <= 0.0)
-            w_threshold -= 1.5;
-    if (dot(vertex_normal, vec3(0.0, 1.0, 0.0)) > w_threshold) {
-            // Sample alpha from the correct sprite texture
-            if (tex_id == 2) {
-                    if (use_grass_tex_2) ALPHA = texture(grass_texture_2, UV).a;
-                    else ALPHA = 0.0;
-            }
-            else if (tex_id == 3) {
-                    if (use_grass_tex_3) ALPHA = texture(grass_texture_3, UV).a;
-                    else ALPHA = 0.0;
-            }
-            else if (tex_id == 4) {
-                    if (use_grass_tex_4) ALPHA = texture(grass_texture_4, UV).a;
-                    else ALPHA = 0.0;
-            }
-            else if (tex_id == 5) {
-                    if (use_grass_tex_5) ALPHA = texture(grass_texture_5, UV).a;
-                    else ALPHA = 0.0;
-            }
-            else if (tex_id == 6) {
-                    if (use_grass_tex_6) ALPHA = texture(grass_texture_6, UV).a;
-                    else ALPHA = 0.0;
-            }
-            else
-                    ALPHA = grass_tex.a;
-    }
-    else
-            ALPHA = 0.0;
-
-    // Hard discard for near-transparent pixels
-    if (ALPHA < 0.1) discard;
-
-    // Flat lighting: use instance origin so the whole billboard shades uniformly
-    LIGHT_VERTEX = model_origin;
-}
-
-                                                                                                
-// --- Toon light shader ---                                                                        
-// Same cel-shading as terrain but uses ceil() instead of floor()
-// for slightly brighter grass (ceil rounds up, floor rounds down).
-void light() {
-    float NdotL = dot(NORMAL, LIGHT);
-    NdotL = clamp(NdotL, 0.0, 1.0);
-
-    // Quantize with ceil (grass gets the higher band, slightly brighter than terrain)
-    float stepped = ceil(NdotL * float(bands)) / float(bands);
-    float toon_light = mix(shadow_intensity, 0.3, stepped);
-
-    toon_light *= ATTENUATION;
-
-    // Mix shadow color with light color (not albedo — albedo is applied by Godot)
-    vec3 light_color = mix(shadow_color.rgb, LIGHT_COLOR.rgb, toon_light);
-
-    DIFFUSE_LIGHT += light_color;
+	vec3 diffuse = ALBEDO.rgb * LIGHT_COLOR / PI;
+	diffuse *= diffuse_stepped;
+	DIFFUSE_LIGHT = max(DIFFUSE_LIGHT, diffuse);
 }

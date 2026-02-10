@@ -1,7 +1,16 @@
+// Pixy Terrain — Terrain manager
+//
+// Original architecture ported from Yugen's marching_squares_terrain.gd:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
+//
+// Grass/cloud shader integration adapted from Dylearn's 3D Pixel Art Grass Demo:
+//   https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo
+
 use std::collections::HashMap;
 
 use godot::classes::{
-    Engine, Image, Node3D, QuadMesh, ResourceLoader, Shader, ShaderMaterial, Texture2D,
+    DirectionalLight3D, Engine, Image, Node3D, QuadMesh, RenderingServer, ResourceLoader, Shader,
+    ShaderMaterial, Texture2D,
 };
 use godot::prelude::*;
 
@@ -312,6 +321,142 @@ pub struct PixyTerrain {
     pub current_texture_preset: Option<Gd<crate::texture_preset::PixyTexturePreset>>,
 
     // ═══════════════════════════════════════════
+    // Grass Animation (Dylearn-based)
+    // ═══════════════════════════════════════════
+    #[export]
+    #[init(val = 5.0)]
+    pub grass_framerate: f32,
+
+    #[export]
+    #[init(val = true)]
+    pub grass_quantised: bool,
+
+    #[export]
+    #[init(val = true)]
+    pub world_space_sway: bool,
+
+    #[export]
+    #[init(val = 60.0)]
+    pub world_sway_angle: f32,
+
+    #[export]
+    #[init(val = 0.3)]
+    pub fake_perspective_scale: f32,
+
+    #[export]
+    #[init(val = 0.365)]
+    pub wind_noise_threshold: f32,
+
+    #[export]
+    #[init(val = 0.071)]
+    pub wind_noise_scale: f32,
+
+    #[export]
+    #[init(val = 0.025)]
+    pub wind_noise_speed: f32,
+
+    #[export]
+    #[init(val = Vector2::new(0.0, 1.0))]
+    pub wind_noise_direction: Vector2,
+
+    #[export]
+    #[init(val = 10.0)]
+    pub noise_diverge_angle: f32,
+
+    #[export]
+    #[init(val = true)]
+    pub view_space_sway: bool,
+
+    #[export]
+    #[init(val = 0.1)]
+    pub view_sway_speed: f32,
+
+    #[export]
+    #[init(val = 10.0)]
+    pub view_sway_angle: f32,
+
+    #[export]
+    #[init(val = true)]
+    pub character_displacement_enabled: bool,
+
+    #[export]
+    #[init(val = 45.0)]
+    pub player_displacement_angle_z: f32,
+
+    #[export]
+    #[init(val = 45.0)]
+    pub player_displacement_angle_x: f32,
+
+    #[export]
+    #[init(val = 1.0)]
+    pub radius_exponent: f32,
+
+    #[export]
+    #[init(val = GString::from("pixy_characters"))]
+    pub character_group_name: GString,
+
+    // ═══════════════════════════════════════════
+    // Grass Toon Lighting (Dylearn-based)
+    // ═══════════════════════════════════════════
+    #[export]
+    #[init(val = 3)]
+    pub grass_toon_cuts: i32,
+
+    #[export]
+    #[init(val = 0.0)]
+    pub grass_toon_wrap: f32,
+
+    #[export]
+    #[init(val = 1.0)]
+    pub grass_toon_steepness: f32,
+
+    #[export]
+    #[init(val = 0.2)]
+    pub grass_threshold_gradient_size: f32,
+
+    // ═══════════════════════════════════════════
+    // Cloud Shadow Settings
+    // ═══════════════════════════════════════════
+    #[export]
+    #[init(val = true)]
+    pub clouds_enabled: bool,
+
+    #[export]
+    #[init(val = 100.0)]
+    pub cloud_scale: f32,
+
+    #[export]
+    #[init(val = 0.02)]
+    pub cloud_speed: f32,
+
+    #[export]
+    #[init(val = Vector2::new(1.0, 0.0))]
+    pub cloud_direction: Vector2,
+
+    #[export]
+    #[init(val = 0.3)]
+    pub cloud_threshold: f32,
+
+    #[export]
+    #[init(val = 2.0)]
+    pub cloud_contrast: f32,
+
+    #[export]
+    #[init(val = 0.3)]
+    pub cloud_shadow_min: f32,
+
+    #[export]
+    #[init(val = 50.0)]
+    pub cloud_world_y: f32,
+
+    #[export]
+    #[init(val = 10.0)]
+    pub cloud_diverge_angle: f32,
+
+    #[export]
+    pub cloud_noise_texture: Option<Gd<Texture2D>>,
+
+    // ═══════════════════════════════════════════
     // Internal State (not exported)
     // ═══════════════════════════════════════════
     pub terrain_material: Option<Gd<ShaderMaterial>>,
@@ -331,6 +476,48 @@ impl INode3D for PixyTerrain {
         }
 
         self.base_mut().call_deferred("_deferred_enter_tree", &[]);
+    }
+
+    fn process(&mut self, _delta: f64) {
+        if !Engine::singleton().is_editor_hint() {
+            return;
+        }
+
+        // Character tracking: collect positions from group, push to grass material
+        if self.character_displacement_enabled {
+            if let Some(mut tree) = self.base().get_tree() {
+                let group_name = StringName::from(&self.character_group_name);
+                let nodes = tree.get_nodes_in_group(&group_name);
+                let mut positions: Vec<Vector4> = Vec::with_capacity(64);
+                for i in 0..nodes.len().min(64) {
+                    if let Some(node) = nodes.get(i) {
+                        if let Ok(node3d) = node.try_cast::<Node3D>() {
+                            let pos = node3d.get_global_position();
+                            // w = displacement radius (default 2.0)
+                            positions.push(Vector4::new(pos.x, pos.y, pos.z, 2.0));
+                        }
+                    }
+                }
+                // Pad to 64 entries
+                while positions.len() < 64 {
+                    positions.push(Vector4::new(0.0, 0.0, 0.0, 0.001));
+                }
+                // Set on grass material
+                if let Some(ref mut mat) = self.grass_material {
+                    let arr = VarArray::from_iter(
+                        positions.iter().map(|v| v.to_variant()),
+                    );
+                    mat.set_shader_parameter("character_positions", &arr.to_variant());
+                }
+            }
+        }
+
+        // Light direction sync for clouds
+        if self.clouds_enabled {
+            let dir = self.find_directional_light_direction();
+            let mut rs = RenderingServer::singleton();
+            rs.global_shader_parameter_set("light_direction", &dir.to_variant());
+        }
     }
 }
 
@@ -360,6 +547,8 @@ impl PixyTerrain {
                 self.chunks.insert([coords.x, coords.y], chunk);
             }
         }
+
+        self.update_cloud_globals();
 
         // Create configs ONCE before iteraing chunks (Avoid borrow issues)
         let terrain_config = self.make_terrain_config();
@@ -526,7 +715,6 @@ impl PixyTerrain {
             MergeMode::RoundedPolyhedron | MergeMode::SemiRound | MergeMode::Spherical
         );
         let wall_threshold = self.wall_threshold;
-        let animation_fps = self.animation_fps as f32;
 
         let sprites = [
             self.get_grass_sprite_or_default(0),
@@ -564,19 +752,40 @@ impl PixyTerrain {
         ];
 
         let shadow_color = self.shadow_color;
-        let shadow_bands = self.shadow_bands;
-        let shadow_intensity = self.shadow_intensity;
         let grass_size = self.grass_size;
-        let wind_direction = self.wind_direction;
-        let wind_scale = self.wind_scale;
-        let wind_speed = self.wind_speed;
+
+        // Dylearn animation uniforms
+        let grass_framerate = self.grass_framerate;
+        let grass_quantised = self.grass_quantised;
+        let world_space_sway = self.world_space_sway;
+        let world_sway_angle = self.world_sway_angle;
+        let fake_perspective_scale = self.fake_perspective_scale;
+        let wind_noise_threshold = self.wind_noise_threshold;
+        let wind_noise_scale = self.wind_noise_scale;
+        let wind_noise_speed = self.wind_noise_speed;
+        let wind_noise_direction = self.wind_noise_direction;
+        let noise_diverge_angle = self.noise_diverge_angle;
+        let view_space_sway = self.view_space_sway;
+        let view_sway_speed = self.view_sway_speed;
+        let view_sway_angle = self.view_sway_angle;
+        let character_displacement = self.character_displacement_enabled;
+        let player_displacement_angle_z = self.player_displacement_angle_z;
+        let player_displacement_angle_x = self.player_displacement_angle_x;
+        let radius_exponent = self.radius_exponent;
+
+        // Dylearn toon lighting uniforms
+        let grass_toon_cuts = self.grass_toon_cuts;
+        let grass_toon_wrap = self.grass_toon_wrap;
+        let grass_toon_steepness = self.grass_toon_steepness;
+        let grass_threshold_gradient_size = self.grass_threshold_gradient_size;
 
         let mat = self.grass_material.as_mut().unwrap();
 
+        // Core settings (kept)
         mat.set_shader_parameter("is_merge_round", &is_merge_round.to_variant());
         mat.set_shader_parameter("wall_threshold", &wall_threshold.to_variant());
-        mat.set_shader_parameter("fps", &animation_fps.to_variant());
 
+        // Grass textures (kept)
         let texture_names = [
             "grass_texture",
             "grass_texture_2",
@@ -591,6 +800,7 @@ impl PixyTerrain {
             }
         }
 
+        // Ground colors (kept)
         mat.set_shader_parameter("grass_base_color", &ground_colors[0].to_variant());
         let color_names = [
             "grass_color_2",
@@ -603,6 +813,7 @@ impl PixyTerrain {
             mat.set_shader_parameter(*name, &ground_colors[i + 1].to_variant());
         }
 
+        // use_base_color flags (kept)
         mat.set_shader_parameter("use_base_color", &use_base_color[0].to_variant());
         mat.set_shader_parameter("use_base_color_2", &use_base_color[1].to_variant());
         mat.set_shader_parameter("use_base_color_3", &use_base_color[2].to_variant());
@@ -610,33 +821,142 @@ impl PixyTerrain {
         mat.set_shader_parameter("use_base_color_5", &use_base_color[4].to_variant());
         mat.set_shader_parameter("use_base_color_6", &use_base_color[5].to_variant());
 
+        // use_grass_tex flags (kept)
         mat.set_shader_parameter("use_grass_tex_2", &tex_has_grass[0].to_variant());
         mat.set_shader_parameter("use_grass_tex_3", &tex_has_grass[1].to_variant());
         mat.set_shader_parameter("use_grass_tex_4", &tex_has_grass[2].to_variant());
         mat.set_shader_parameter("use_grass_tex_5", &tex_has_grass[3].to_variant());
         mat.set_shader_parameter("use_grass_tex_6", &tex_has_grass[4].to_variant());
 
-        mat.set_shader_parameter("wind_direction", &wind_direction.to_variant());
-        mat.set_shader_parameter("wind_scale", &wind_scale.to_variant());
-        mat.set_shader_parameter("wind_speed", &wind_speed.to_variant());
-        mat.set_shader_parameter("animate_active", &true.to_variant());
+        // Dylearn animation parameters (new)
+        mat.set_shader_parameter("framerate", &grass_framerate.to_variant());
+        mat.set_shader_parameter("quantised", &grass_quantised.to_variant());
+        mat.set_shader_parameter("world_space_sway", &world_space_sway.to_variant());
+        mat.set_shader_parameter("world_sway_angle", &world_sway_angle.to_variant());
+        mat.set_shader_parameter("fake_perspective_scale", &fake_perspective_scale.to_variant());
+        mat.set_shader_parameter("wind_noise_threshold", &wind_noise_threshold.to_variant());
+        mat.set_shader_parameter("wind_noise_scale", &wind_noise_scale.to_variant());
+        mat.set_shader_parameter("wind_noise_speed", &wind_noise_speed.to_variant());
+        mat.set_shader_parameter("wind_noise_direction", &wind_noise_direction.to_variant());
+        mat.set_shader_parameter("noise_diverge_angle", &noise_diverge_angle.to_variant());
+        mat.set_shader_parameter("view_space_sway", &view_space_sway.to_variant());
+        mat.set_shader_parameter("view_sway_speed", &view_sway_speed.to_variant());
+        mat.set_shader_parameter("view_sway_angle", &view_sway_angle.to_variant());
+        mat.set_shader_parameter("character_displacement", &character_displacement.to_variant());
+        mat.set_shader_parameter(
+            "player_displacement_angle_z",
+            &player_displacement_angle_z.to_variant(),
+        );
+        mat.set_shader_parameter(
+            "player_displacement_angle_x",
+            &player_displacement_angle_x.to_variant(),
+        );
+        mat.set_shader_parameter("radius_exponent", &radius_exponent.to_variant());
 
+        // Wind noise texture (same resource, new uniform name)
         let mut loader = ResourceLoader::singleton();
         let wind_path = "res://resources/textures/wind_noise_texture.tres";
         if loader.exists(wind_path) {
             if let Some(wind_tex) = loader.load(wind_path) {
-                mat.set_shader_parameter("wind_texture", &wind_tex.to_variant());
+                mat.set_shader_parameter("wind_noise", &wind_tex.to_variant());
             }
         }
 
+        // Dylearn toon lighting parameters (new)
+        mat.set_shader_parameter("cuts", &grass_toon_cuts.to_variant());
+        mat.set_shader_parameter("wrap", &grass_toon_wrap.to_variant());
+        mat.set_shader_parameter("steepness", &grass_toon_steepness.to_variant());
+        mat.set_shader_parameter(
+            "threshold_gradient_size",
+            &grass_threshold_gradient_size.to_variant(),
+        );
         mat.set_shader_parameter("shadow_color", &shadow_color.to_variant());
-        mat.set_shader_parameter("bands", &shadow_bands.to_variant());
-        mat.set_shader_parameter("shadow_intensity", &shadow_intensity.to_variant());
 
+        // Update QuadMesh size
         if let Some(ref mut quad) = self.grass_quad_mesh {
             quad.set_size(grass_size);
             quad.set_center_offset(Vector3::new(0.0, grass_size.y / 2.0, 0.0));
         }
+    }
+
+    /// Update global shader parameters for the cloud shadow system.
+    pub fn update_cloud_globals(&mut self) {
+        if !self.clouds_enabled {
+            return;
+        }
+
+        let mut rs = RenderingServer::singleton();
+        rs.global_shader_parameter_set("cloud_scale", &self.cloud_scale.to_variant());
+        rs.global_shader_parameter_set("cloud_world_y", &self.cloud_world_y.to_variant());
+        rs.global_shader_parameter_set("cloud_speed", &self.cloud_speed.to_variant());
+        rs.global_shader_parameter_set("cloud_contrast", &self.cloud_contrast.to_variant());
+        rs.global_shader_parameter_set("cloud_threshold", &self.cloud_threshold.to_variant());
+        rs.global_shader_parameter_set("cloud_direction", &self.cloud_direction.to_variant());
+        rs.global_shader_parameter_set("cloud_shadow_min", &self.cloud_shadow_min.to_variant());
+        rs.global_shader_parameter_set(
+            "cloud_diverge_angle",
+            &self.cloud_diverge_angle.to_variant(),
+        );
+
+        // Load and set cloud noise texture
+        let cloud_tex = if let Some(ref tex) = self.cloud_noise_texture {
+            Some(tex.clone())
+        } else {
+            let mut loader = ResourceLoader::singleton();
+            let path = "res://resources/textures/cloud_noise.tres";
+            if loader.exists(path) {
+                loader
+                    .load(path)
+                    .and_then(|r| r.try_cast::<Texture2D>().ok())
+            } else {
+                None
+            }
+        };
+        if let Some(tex) = cloud_tex {
+            rs.global_shader_parameter_set("cloud_noise", &tex.to_variant());
+        }
+
+        // Sync light direction
+        let dir = self.find_directional_light_direction();
+        rs.global_shader_parameter_set("light_direction", &dir.to_variant());
+    }
+
+    /// Find the first DirectionalLight3D in the scene and return its forward direction.
+    fn find_directional_light_direction(&self) -> Vector3 {
+        if let Some(mut tree) = self.base().get_tree() {
+            let nodes = tree.get_nodes_in_group(&StringName::from("directional_lights"));
+            for i in 0..nodes.len() {
+                if let Some(node) = nodes.get(i) {
+                    if let Ok(light) = node.try_cast::<DirectionalLight3D>() {
+                        let basis = light.get_global_transform().basis;
+                        return -basis.col_c();
+                    }
+                }
+            }
+            // Fallback: search scene tree for any DirectionalLight3D
+            if let Some(root) = tree.get_edited_scene_root() {
+                if let Some(dir) = Self::find_light_recursive(&root) {
+                    return dir;
+                }
+            }
+        }
+        Vector3::new(0.0, -1.0, 0.0)
+    }
+
+    fn find_light_recursive(node: &Gd<godot::classes::Node>) -> Option<Vector3> {
+        if let Ok(light) = node.clone().try_cast::<DirectionalLight3D>() {
+            let basis = light.get_global_transform().basis;
+            return Some(-basis.col_c());
+        }
+        let children = node.get_children();
+        for i in 0..children.len() {
+            if let Some(child) = children.get(i) {
+                if let Some(dir) = Self::find_light_recursive(&child) {
+                    return Some(dir);
+                }
+            }
+        }
+        None
     }
 
     fn get_ground_colors(&self) -> [Color; 6] {

@@ -22,3 +22,46 @@ config/icon="res://icon.svg"
 [rendering]
 
 textures/canvas_textures/default_texture_filter=0
+
+[shader_globals]
+
+cloud_noise={
+"type": "sampler2D",
+"value": ""
+}
+cloud_scale={
+"type": "float",
+"value": 100.0
+}
+cloud_world_y={
+"type": "float",
+"value": 50.0
+}
+cloud_speed={
+"type": "float",
+"value": 0.02
+}
+cloud_contrast={
+"type": "float",
+"value": 2.0
+}
+cloud_threshold={
+"type": "float",
+"value": 0.3
+}
+cloud_direction={
+"type": "vec2",
+"value": "Vector2(1, 0)"
+}
+light_direction={
+"type": "vec3",
+"value": "Vector3(0, -1, 0)"
+}
+cloud_shadow_min={
+"type": "float",
+"value": 0.3
+}
+cloud_diverge_angle={
+"type": "float",
+"value": 10.0
+}

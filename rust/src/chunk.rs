@@ -1,4 +1,7 @@
-// Terrain chunk mesh generation — implemented in Parts 06-07
+// Pixy Terrain — Chunk mesh generation
+//
+// Original chunk algorithm ported from Yugen's marching_squares_terrain_chunk.gd:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
 
 use std::collections::HashMap;
 
@@ -620,7 +623,20 @@ impl PixyTerrainChunk {
         st.set_custom_format(1, CustomFormat::RGBA_FLOAT);
         st.set_custom_format(2, CustomFormat::RGBA_FLOAT);
 
-        // self.generate_terrain_cells(&mut st);
+        self.generate_terrain_cells(&mut st);
+
+        st.generate_normals();
+
+        if let Some(mesh) = st.commit() {
+            self.base_mut().set_mesh(&mesh);
+
+            // Apply terrain material to surface 0
+            let mat_clone = self.terrain_material.clone();
+            if let Some(mat) = mat_clone {
+                self.base_mut()
+                    .set_surface_override_material(0, &mat.upcast::<godot::classes::Material>());
+            }
+        }
 
         // Regenerate grass after mesh geometry is built
         if let Some(ref mut planter) = self.grass_planter {

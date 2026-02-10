@@ -1,4 +1,10 @@
-// Grass planting system — implemented in Part 12
+// Pixy Terrain — Grass planting system
+//
+// Original planting logic ported from Yugen's terrain toolkit:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
+//
+// Shader integration adapted from Dylearn's 3D Pixel Art Grass Demo:
+//   https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo
 use std::collections::HashMap;
 
 use godot::classes::{
@@ -89,6 +95,7 @@ impl PixyGrassPlanter {
         let dim_z = config.dimensions.z - 1;
         let subs = config.subdivisions;
         let instance_count = (dim_x * dim_z * subs * subs) as i32;
+        let grass_material = config.grass_material.clone();
 
         let mut mm = MultiMesh::new_gd();
         mm.set_transform_format(godot::classes::multi_mesh::TransformFormat::TRANSFORM_3D);
@@ -112,6 +119,12 @@ impl PixyGrassPlanter {
         self.base_mut().set_cast_shadows_setting(
             godot::classes::geometry_instance_3d::ShadowCastingSetting::OFF,
         );
+
+        // Apply grass ShaderMaterial for alpha-cutout rendering
+        if let Some(mat) = grass_material {
+            self.base_mut()
+                .set_material_override(&mat.upcast::<godot::classes::Material>());
+        }
     }
 
     /// Convert a color_0 / color_1 pair to a texture slot ID (1–16).

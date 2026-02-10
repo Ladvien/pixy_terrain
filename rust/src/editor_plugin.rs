@@ -1,3 +1,8 @@
+// Pixy Terrain — Editor plugin
+//
+// Original editor plugin design ported from Yugen's marching_squares_terrain_plugin.gd:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
+
 use std::collections::HashMap;
 
 use godot::classes::editor_plugin::AfterGuiInput;
@@ -913,6 +918,278 @@ impl PixyTerrainPlugin {
         self.base_mut()
             .call_deferred("_rebuild_attributes_deferred", &[]);
     }
+
+    /// Called when an attribute control value changes.
+    /// Godot passes signal args first (value: Variant), then bound args (setting_name: GString).
+    #[func]
+    fn on_attribute_changed(&mut self, value: Variant, setting_name: GString) {
+        match setting_name.to_string().as_str() {
+            "brush_type" => {
+                let idx: i64 = value.to();
+                self.brush_type = if idx == 0 {
+                    BrushType::Round
+                } else {
+                    BrushType::Square
+                };
+            }
+            "size" => {
+                let v = value.to::<f64>();
+                self.brush_size = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "size", "Size", v);
+                }
+            }
+            "strength" => {
+                let v = value.to::<f64>();
+                self.strength = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "strength", "Strength", v);
+                }
+            }
+            "height" => {
+                let v = value.to::<f64>();
+                self.height = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "height", "Height", v);
+                }
+            }
+            "flatten" => {
+                self.flatten = value.to();
+            }
+            "falloff" => {
+                self.falloff = value.to();
+            }
+            "ease_value" => {
+                let v = value.to::<f64>();
+                self.ease_value = v as f32;
+                if let Some(ref hbox) = self.attributes_hbox {
+                    Self::update_slider_label(hbox, "ease_value", "Ease", v);
+                }
+            }
+            "mask_mode" => {
+                self.should_mask_grass = value.to();
+            }
+            "material" => {
+                let idx: i64 = value.to();
+                self.set_vertex_colors(idx as i32);
+            }
+            "paint_walls" => {
+                self.paint_walls_mode = value.to();
+            }
+            "quick_paint" => {
+                let idx: i64 = value.to();
+                if idx == 0 {
+                    self.current_quick_paint = None;
+                } else {
+                    let preset_idx = (idx - 1) as usize;
+                    self.current_quick_paint = self.quick_paint_presets.get(preset_idx).cloned();
+                }
+            }
+            "chunk_select" => {
+                if let Some(ref terrain) = self.current_terrain {
+                    if terrain.is_instance_valid() {
+                        let t: Gd<PixyTerrain> = terrain.clone().cast();
+                        let keys = t.bind().get_chunk_keys();
+                        let idx = value.to::<i64>() as usize;
+                        if idx < keys.len() {
+                            let k = keys[idx];
+                            self.selected_chunk_coords =
+                                Some(Vector2i::new(k.x as i32, k.y as i32));
+                            self.base_mut()
+                                .call_deferred("_rebuild_attributes_deferred", &[]);
+                        }
+                    }
+                }
+            }
+            "chunk_merge_mode" => {
+                if let Some(ref terrain) = self.current_terrain {
+                    if terrain.is_instance_valid() {
+                        let t: Gd<PixyTerrain> = terrain.clone().cast();
+                        if let Some(sel) = self.selected_chunk_coords {
+                            if let Some(mut chunk) = t.bind().get_chunk(sel.x, sel.y) {
+                                chunk.bind_mut().merge_mode = value.to::<i64>() as i32;
+                                chunk.bind_mut().regenerate_mesh();
+                            }
+                        }
+                    }
+                }
+            }
+            // ── Terrain Settings ──
+            "dim_x"
+            | "dim_z"
+            | "dim_y"
+            | "cell_size_x"
+            | "cell_size_z"
+            | "blend_mode"
+            | "wall_threshold"
+            | "ridge_threshold"
+            | "ledge_threshold"
+            | "merge_mode"
+            | "grass_subdivisions"
+            | "grass_size_x"
+            | "grass_size_y"
+            | "default_wall_texture"
+            | "blend_sharpness"
+            | "blend_noise_scale"
+            | "blend_noise_strength"
+            | "animation_fps"
+            | "use_ridge_texture"
+            | "extra_collision_layer"
+            // Grass Animation (Dylearn)
+            | "grass_framerate"
+            | "grass_quantised"
+            | "world_space_sway"
+            | "world_sway_angle"
+            | "fake_perspective_scale"
+            | "wind_noise_threshold"
+            | "wind_noise_scale"
+            | "wind_noise_speed"
+            | "wind_noise_dir_x"
+            | "wind_noise_dir_y"
+            | "noise_diverge_angle"
+            | "view_space_sway"
+            | "view_sway_speed"
+            | "view_sway_angle"
+            | "character_displacement_enabled"
+            | "player_displacement_angle_z"
+            | "player_displacement_angle_x"
+            | "radius_exponent"
+            // Grass Toon Lighting
+            | "grass_toon_cuts"
+            | "grass_toon_wrap"
+            | "grass_toon_steepness"
+            | "grass_threshold_gradient_size"
+            // Cloud Shadows
+            | "clouds_enabled"
+            | "cloud_scale"
+            | "cloud_speed"
+            | "cloud_threshold"
+            | "cloud_contrast"
+            | "cloud_shadow_min"
+            | "cloud_world_y"
+            | "cloud_diverge_angle" => {
+                self.apply_terrain_setting(setting_name.to_string().as_str(), &value);
+                let label_text = match setting_name.to_string().as_str() {
+                    "cell_size_x" => Some("Cell X"),
+                    "cell_size_z" => Some("Cell Z"),
+                    "wall_threshold" => Some("Wall Thresh"),
+                    "ridge_threshold" => Some("Ridge Thresh"),
+                    "ledge_threshold" => Some("Ledge Thresh"),
+                    "grass_size_x" => Some("Grass W"),
+                    "grass_size_y" => Some("Grass H"),
+                    "blend_sharpness" => Some("Blend Sharp"),
+                    "blend_noise_scale" => Some("Noise Scale"),
+                    "blend_noise_strength" => Some("Noise Str"),
+                    "grass_framerate" => Some("Framerate"),
+                    "world_sway_angle" => Some("Sway Angle"),
+                    "fake_perspective_scale" => Some("Fake Persp"),
+                    "wind_noise_threshold" => Some("Wind Thresh"),
+                    "wind_noise_scale" => Some("Wind Scale"),
+                    "wind_noise_speed" => Some("Wind Speed"),
+                    "wind_noise_dir_x" => Some("Wind Dir X"),
+                    "wind_noise_dir_y" => Some("Wind Dir Y"),
+                    "noise_diverge_angle" => Some("Diverge Ang"),
+                    "view_sway_speed" => Some("View Speed"),
+                    "view_sway_angle" => Some("View Angle"),
+                    "player_displacement_angle_z" => Some("Disp Ang Z"),
+                    "player_displacement_angle_x" => Some("Disp Ang X"),
+                    "radius_exponent" => Some("Radius Exp"),
+                    "grass_toon_wrap" => Some("Toon Wrap"),
+                    "grass_toon_steepness" => Some("Toon Steep"),
+                    "grass_threshold_gradient_size" => Some("Grad Size"),
+                    "cloud_scale" => Some("Cloud Scale"),
+                    "cloud_speed" => Some("Cloud Speed"),
+                    "cloud_threshold" => Some("Cloud Thresh"),
+                    "cloud_contrast" => Some("Cloud Contrast"),
+                    "cloud_shadow_min" => Some("Shadow Min"),
+                    "cloud_world_y" => Some("Cloud Y"),
+                    "cloud_diverge_angle" => Some("Cloud Div Ang"),
+                    _ => None,
+                };
+                if let (Some(label), Some(ref hbox)) = (label_text, &self.attributes_hbox) {
+                    Self::update_slider_label(
+                        hbox,
+                        setting_name.to_string().as_str(),
+                        label,
+                        value.to::<f64>(),
+                    );
+                }
+            }
+            // ── Texture Panel Settings ──
+            name if name.starts_with("tex_scale_")
+                || name.starts_with("tex_has_grass_")
+                || name.starts_with("ground_color_") =>
+            {
+                if name.starts_with("tex_scale_") {
+                    if let Some(ref panel) = self.texture_panel {
+                        Self::update_slider_label(panel, name, "Scale", value.to::<f64>());
+                    }
+                }
+                self.apply_terrain_setting(name, &value);
+            }
+            _ => {}
+        }
+    }
+
+    /// Called when a texture resource is changed via EditorResourcePicker.
+    /// Godot passes signal args first (resource), then bound args (setting_name).
+    #[func]
+    fn on_texture_resource_changed(&mut self, resource: Variant, setting_name: GString) {
+        let Some(ref terrain_node) = self.current_terrain else {
+            return;
+        };
+        if !terrain_node.is_instance_valid() {
+            return;
+        }
+        let mut terrain: Gd<PixyTerrain> = terrain_node.clone().cast();
+
+        let name = setting_name.to_string();
+        let tex: Option<Gd<godot::classes::Texture2D>> = if resource.is_nil() {
+            None
+        } else {
+            Some(resource.to())
+        };
+
+        {
+            let mut t = terrain.bind_mut();
+
+            if let Some(slot_str) = name.strip_prefix("ground_tex_") {
+                let slot: i32 = slot_str.parse().unwrap_or(1);
+                match slot {
+                    1 => t.ground_texture = tex,
+                    2 => t.texture_2 = tex,
+                    3 => t.texture_3 = tex,
+                    4 => t.texture_4 = tex,
+                    5 => t.texture_5 = tex,
+                    6 => t.texture_6 = tex,
+                    7 => t.texture_7 = tex,
+                    8 => t.texture_8 = tex,
+                    9 => t.texture_9 = tex,
+                    10 => t.texture_10 = tex,
+                    11 => t.texture_11 = tex,
+                    12 => t.texture_12 = tex,
+                    13 => t.texture_13 = tex,
+                    14 => t.texture_14 = tex,
+                    15 => t.texture_15 = tex,
+                    _ => {}
+                }
+            } else if let Some(slot_str) = name.strip_prefix("grass_sprite_") {
+                let slot: i32 = slot_str.parse().unwrap_or(1);
+                match slot {
+                    1 => t.grass_sprite = tex,
+                    2 => t.grass_sprite_tex_2 = tex,
+                    3 => t.grass_sprite_tex_3 = tex,
+                    4 => t.grass_sprite_tex_4 = tex,
+                    5 => t.grass_sprite_tex_5 = tex,
+                    6 => t.grass_sprite_tex_6 = tex,
+                    _ => {}
+                }
+            }
+        }
+
+        // Sync shader uniforms
+        terrain.bind_mut().force_batch_update();
+    }
 }
 
 // =======================================
@@ -1770,6 +2047,340 @@ impl PixyTerrainPlugin {
                     5.0,
                     0.01,
                     blend_nstr as f64,
+                    &plugin_ref,
+                );
+
+                // ── Grass Animation (Dylearn) ──
+                let (
+                    grass_fr,
+                    grass_q,
+                    w_sway,
+                    w_sway_ang,
+                    fake_persp,
+                    wn_thresh,
+                    wn_scale,
+                    wn_speed,
+                    wn_dir,
+                    n_div_ang,
+                    v_sway,
+                    v_sway_sp,
+                    v_sway_ang,
+                    char_disp,
+                    pd_ang_z,
+                    pd_ang_x,
+                    rad_exp,
+                    toon_cuts,
+                    toon_wrap,
+                    toon_steep,
+                    toon_grad,
+                    cl_enabled,
+                    cl_scale,
+                    cl_speed,
+                    cl_thresh,
+                    cl_contrast,
+                    cl_shadow_min,
+                    cl_world_y,
+                    cl_div_ang,
+                ) = if let Some(ref terrain) = self.current_terrain {
+                    if terrain.is_instance_valid() {
+                        let t: Gd<PixyTerrain> = terrain.clone().cast();
+                        let tb = t.bind();
+                        (
+                            tb.grass_framerate,
+                            tb.grass_quantised,
+                            tb.world_space_sway,
+                            tb.world_sway_angle,
+                            tb.fake_perspective_scale,
+                            tb.wind_noise_threshold,
+                            tb.wind_noise_scale,
+                            tb.wind_noise_speed,
+                            tb.wind_noise_direction,
+                            tb.noise_diverge_angle,
+                            tb.view_space_sway,
+                            tb.view_sway_speed,
+                            tb.view_sway_angle,
+                            tb.character_displacement_enabled,
+                            tb.player_displacement_angle_z,
+                            tb.player_displacement_angle_x,
+                            tb.radius_exponent,
+                            tb.grass_toon_cuts,
+                            tb.grass_toon_wrap,
+                            tb.grass_toon_steepness,
+                            tb.grass_threshold_gradient_size,
+                            tb.clouds_enabled,
+                            tb.cloud_scale,
+                            tb.cloud_speed,
+                            tb.cloud_threshold,
+                            tb.cloud_contrast,
+                            tb.cloud_shadow_min,
+                            tb.cloud_world_y,
+                            tb.cloud_diverge_angle,
+                        )
+                    } else {
+                        return;
+                    }
+                } else {
+                    return;
+                };
+
+                // Grass Animation
+                self.add_slider_attribute(
+                    "grass_framerate",
+                    "Framerate",
+                    1.0,
+                    30.0,
+                    1.0,
+                    grass_fr as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "grass_quantised",
+                    "Quantised",
+                    grass_q,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "world_space_sway",
+                    "World Sway",
+                    w_sway,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "world_sway_angle",
+                    "Sway Angle",
+                    0.0,
+                    180.0,
+                    1.0,
+                    w_sway_ang as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "fake_perspective_scale",
+                    "Fake Persp",
+                    -0.15,
+                    0.6,
+                    0.001,
+                    fake_persp as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wind_noise_threshold",
+                    "Wind Thresh",
+                    -1.0,
+                    1.0,
+                    0.001,
+                    wn_thresh as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wind_noise_scale",
+                    "Wind Scale",
+                    0.0,
+                    0.1,
+                    0.001,
+                    wn_scale as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wind_noise_speed",
+                    "Wind Speed",
+                    0.0,
+                    0.2,
+                    0.001,
+                    wn_speed as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wind_noise_dir_x",
+                    "Wind Dir X",
+                    -1.0,
+                    1.0,
+                    0.01,
+                    wn_dir.x as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "wind_noise_dir_y",
+                    "Wind Dir Y",
+                    -1.0,
+                    1.0,
+                    0.01,
+                    wn_dir.y as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "noise_diverge_angle",
+                    "Diverge Ang",
+                    0.0,
+                    45.0,
+                    0.1,
+                    n_div_ang as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "view_space_sway",
+                    "View Sway",
+                    v_sway,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "view_sway_speed",
+                    "View Speed",
+                    0.0,
+                    5.0,
+                    0.01,
+                    v_sway_sp as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "view_sway_angle",
+                    "View Angle",
+                    0.0,
+                    45.0,
+                    0.1,
+                    v_sway_ang as f64,
+                    &plugin_ref,
+                );
+                self.add_checkbox_attribute(
+                    "character_displacement_enabled",
+                    "Char Displace",
+                    char_disp,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "player_displacement_angle_z",
+                    "Disp Ang Z",
+                    0.0,
+                    360.0,
+                    0.1,
+                    pd_ang_z as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "player_displacement_angle_x",
+                    "Disp Ang X",
+                    0.0,
+                    360.0,
+                    0.1,
+                    pd_ang_x as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "radius_exponent",
+                    "Radius Exp",
+                    0.0,
+                    10.0,
+                    0.01,
+                    rad_exp as f64,
+                    &plugin_ref,
+                );
+
+                // Grass Toon Lighting
+                self.add_spinbox_attribute(
+                    "grass_toon_cuts",
+                    "Toon Cuts",
+                    1.0,
+                    8.0,
+                    1.0,
+                    toon_cuts as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "grass_toon_wrap",
+                    "Toon Wrap",
+                    -2.0,
+                    2.0,
+                    0.01,
+                    toon_wrap as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "grass_toon_steepness",
+                    "Toon Steep",
+                    1.0,
+                    8.0,
+                    0.1,
+                    toon_steep as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "grass_threshold_gradient_size",
+                    "Grad Size",
+                    0.0,
+                    1.0,
+                    0.01,
+                    toon_grad as f64,
+                    &plugin_ref,
+                );
+
+                // Cloud Shadows
+                self.add_checkbox_attribute(
+                    "clouds_enabled",
+                    "Clouds",
+                    cl_enabled,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_scale",
+                    "Cloud Scale",
+                    1.0,
+                    500.0,
+                    1.0,
+                    cl_scale as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_speed",
+                    "Cloud Speed",
+                    0.0,
+                    0.2,
+                    0.001,
+                    cl_speed as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_threshold",
+                    "Cloud Thresh",
+                    0.0,
+                    1.0,
+                    0.01,
+                    cl_thresh as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_contrast",
+                    "Cloud Contrast",
+                    0.0,
+                    10.0,
+                    0.1,
+                    cl_contrast as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_shadow_min",
+                    "Shadow Min",
+                    0.0,
+                    1.0,
+                    0.01,
+                    cl_shadow_min as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_world_y",
+                    "Cloud Y",
+                    0.0,
+                    200.0,
+                    1.0,
+                    cl_world_y as f64,
+                    &plugin_ref,
+                );
+                self.add_slider_attribute(
+                    "cloud_diverge_angle",
+                    "Cloud Div Ang",
+                    0.0,
+                    45.0,
+                    0.1,
+                    cl_div_ang as f64,
                     &plugin_ref,
                 );
             }
@@ -3117,10 +3728,149 @@ impl PixyTerrainPlugin {
                         _ => {}
                     }
                 }
+                // ── Grass Animation (Dylearn) ──
+                "grass_framerate" => {
+                    t.grass_framerate = value.to::<f64>() as f32;
+                }
+                "grass_quantised" => {
+                    t.grass_quantised = value.to();
+                }
+                "world_space_sway" => {
+                    t.world_space_sway = value.to();
+                }
+                "world_sway_angle" => {
+                    t.world_sway_angle = value.to::<f64>() as f32;
+                }
+                "fake_perspective_scale" => {
+                    t.fake_perspective_scale = value.to::<f64>() as f32;
+                }
+                "wind_noise_threshold" => {
+                    t.wind_noise_threshold = value.to::<f64>() as f32;
+                }
+                "wind_noise_scale" => {
+                    t.wind_noise_scale = value.to::<f64>() as f32;
+                }
+                "wind_noise_speed" => {
+                    t.wind_noise_speed = value.to::<f64>() as f32;
+                }
+                "wind_noise_dir_x" => {
+                    let v = value.to::<f64>() as f32;
+                    t.wind_noise_direction = Vector2::new(v, t.wind_noise_direction.y);
+                }
+                "wind_noise_dir_y" => {
+                    let v = value.to::<f64>() as f32;
+                    t.wind_noise_direction = Vector2::new(t.wind_noise_direction.x, v);
+                }
+                "noise_diverge_angle" => {
+                    t.noise_diverge_angle = value.to::<f64>() as f32;
+                }
+                "view_space_sway" => {
+                    t.view_space_sway = value.to();
+                }
+                "view_sway_speed" => {
+                    t.view_sway_speed = value.to::<f64>() as f32;
+                }
+                "view_sway_angle" => {
+                    t.view_sway_angle = value.to::<f64>() as f32;
+                }
+                "character_displacement_enabled" => {
+                    t.character_displacement_enabled = value.to();
+                }
+                "player_displacement_angle_z" => {
+                    t.player_displacement_angle_z = value.to::<f64>() as f32;
+                }
+                "player_displacement_angle_x" => {
+                    t.player_displacement_angle_x = value.to::<f64>() as f32;
+                }
+                "radius_exponent" => {
+                    t.radius_exponent = value.to::<f64>() as f32;
+                }
+                // ── Grass Toon Lighting ──
+                "grass_toon_cuts" => {
+                    t.grass_toon_cuts = value.to::<f64>() as i32;
+                }
+                "grass_toon_wrap" => {
+                    t.grass_toon_wrap = value.to::<f64>() as f32;
+                }
+                "grass_toon_steepness" => {
+                    t.grass_toon_steepness = value.to::<f64>() as f32;
+                }
+                "grass_threshold_gradient_size" => {
+                    t.grass_threshold_gradient_size = value.to::<f64>() as f32;
+                }
+                // ── Cloud Shadows ──
+                "clouds_enabled" => {
+                    t.clouds_enabled = value.to();
+                }
+                "cloud_scale" => {
+                    t.cloud_scale = value.to::<f64>() as f32;
+                }
+                "cloud_speed" => {
+                    t.cloud_speed = value.to::<f64>() as f32;
+                }
+                "cloud_threshold" => {
+                    t.cloud_threshold = value.to::<f64>() as f32;
+                }
+                "cloud_contrast" => {
+                    t.cloud_contrast = value.to::<f64>() as f32;
+                }
+                "cloud_shadow_min" => {
+                    t.cloud_shadow_min = value.to::<f64>() as f32;
+                }
+                "cloud_world_y" => {
+                    t.cloud_world_y = value.to::<f64>() as f32;
+                }
+                "cloud_diverge_angle" => {
+                    t.cloud_diverge_angle = value.to::<f64>() as f32;
+                }
                 _ => {}
             }
         }
 
+        // Determine what updates are needed
+        let is_grass_setting = matches!(
+            name,
+            "grass_framerate"
+                | "grass_quantised"
+                | "world_space_sway"
+                | "world_sway_angle"
+                | "fake_perspective_scale"
+                | "wind_noise_threshold"
+                | "wind_noise_scale"
+                | "wind_noise_speed"
+                | "wind_noise_dir_x"
+                | "wind_noise_dir_y"
+                | "noise_diverge_angle"
+                | "view_space_sway"
+                | "view_sway_speed"
+                | "view_sway_angle"
+                | "character_displacement_enabled"
+                | "player_displacement_angle_z"
+                | "player_displacement_angle_x"
+                | "radius_exponent"
+                | "grass_toon_cuts"
+                | "grass_toon_wrap"
+                | "grass_toon_steepness"
+                | "grass_threshold_gradient_size"
+        );
+        let is_cloud_setting = matches!(
+            name,
+            "clouds_enabled"
+                | "cloud_scale"
+                | "cloud_speed"
+                | "cloud_threshold"
+                | "cloud_contrast"
+                | "cloud_shadow_min"
+                | "cloud_world_y"
+                | "cloud_diverge_angle"
+        );
+
         terrain.bind_mut().force_batch_update();
+        if is_grass_setting {
+            terrain.bind_mut().force_grass_material_update();
+        }
+        if is_cloud_setting {
+            terrain.bind_mut().update_cloud_globals();
+        }
     }
 }

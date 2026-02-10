@@ -1,5 +1,8 @@
 // Pixy Terrain — Main terrain surface shader
 //
+// Original shader design by Yugen:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
+//
 // Decodes vertex color data into texture selections, blends up to 3 textures
 // per cell (or 16 at boundaries), handles floor vs wall rendering with triplanar
 // projection for walls, and applies toon-style stepped lighting.

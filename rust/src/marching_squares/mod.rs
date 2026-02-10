@@ -1,4 +1,7 @@
-// Marching squares terrain algorithm — implemented in Parts 02-05
+// Pixy Terrain — Marching squares algorithm
+//
+// Original marching squares algorithm ported from Yugen's GDScript implementation:
+//   https://github.com/Yukitty/Yugens-Terrain-Authoring-Toolkit
 mod cases;
 mod cell_context;
 mod primitives;
