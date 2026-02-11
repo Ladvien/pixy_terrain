@@ -17,50 +17,66 @@ pub fn add_outer_corner(
     let mid_ab = ctx.ab_height(0.5, false); // (0.5, ?, 0.0) on AB, lower side
     let mid_ac = ctx.ac_height(0.5, false); // (0.0, ?, 0.5) on AC, lower side
 
+    // Upper profile heights at midpoints — for merged boundaries these interpolate
+    // between corner heights (giving correct slope); for walled boundaries these
+    // equal max(h1,h2) = ay (A is the raised corner), so no visible change.
+    let mid_ab_upper = ctx.ab_height(0.5, true);
+    let mid_ac_upper = ctx.ac_height(0.5, true);
+
     if floor_above {
         ctx.start_floor();
         add_point(ctx, geometry, 0.0, ay, 0.0, 0.0, 0.0, false);
-        add_point(ctx, geometry, 0.5, ay, 0.0, 0.0, 1.0, false);
-        add_point(ctx, geometry, 0.0, ay, 0.5, 0.0, 1.0, false);
+        add_point(ctx, geometry, 0.5, mid_ab_upper, 0.0, 0.0, 1.0, false);
+        add_point(ctx, geometry, 0.0, mid_ac_upper, 0.5, 0.0, 1.0, false);
     }
 
-    // Walls — adaptive triangulation to create shared edge with adjacent edge primitive
-    ctx.start_wall();
-    if mid_ab >= mid_ac {
-        // Diagonal from mid_ab to ay on AC side (for a_x=0.5 half-edge cases)
-        add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
-        add_point(ctx, geometry, 0.0, ay, 0.5, 0.0, 1.0, false);
-        add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
+    // Walls — skip degenerate triangles when a boundary is merged (upper == lower)
+    let ac_walled = (mid_ac_upper - mid_ac).abs() > 1e-5;
+    let ab_walled = (mid_ab_upper - mid_ab).abs() > 1e-5;
 
-        add_point(ctx, geometry, 0.5, ay, 0.0, 1.0, 1.0, false);
-        add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
-        add_point(ctx, geometry, 0.0, ay, 0.5, 0.0, 1.0, false);
-    } else {
-        // Diagonal from mid_ac to ay on AB side (for b_x=0.5 half-edge cases)
-        add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
-        add_point(ctx, geometry, 0.0, ay, 0.5, 0.0, 1.0, false);
-        add_point(ctx, geometry, 0.5, ay, 0.0, 1.0, 1.0, false);
-
-        add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
-        add_point(ctx, geometry, 0.5, ay, 0.0, 1.0, 1.0, false);
-        add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
+    if ac_walled || ab_walled {
+        ctx.start_wall();
+        if mid_ab >= mid_ac {
+            if ac_walled {
+                add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
+                add_point(ctx, geometry, 0.0, mid_ac_upper, 0.5, 0.0, 1.0, false);
+                add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
+            }
+            if ab_walled {
+                add_point(ctx, geometry, 0.5, mid_ab_upper, 0.0, 1.0, 1.0, false);
+                add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
+                add_point(ctx, geometry, 0.0, mid_ac_upper, 0.5, 0.0, 1.0, false);
+            }
+        } else {
+            if ac_walled {
+                add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
+                add_point(ctx, geometry, 0.0, mid_ac_upper, 0.5, 0.0, 1.0, false);
+                add_point(ctx, geometry, 0.5, mid_ab_upper, 0.0, 1.0, 1.0, false);
+            }
+            if ab_walled {
+                add_point(ctx, geometry, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
+                add_point(ctx, geometry, 0.5, mid_ab_upper, 0.0, 1.0, 1.0, false);
+                add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
+            }
+        }
     }
 
     // Corner cap: closes the wall bottom edge when floor_below=false.
-    // Matches the wall's diagonal triangulation to share the existing diagonal edge,
-    // producing only canonical boundary edges (AC wall or AB wall).
-    if !floor_below {
+    // When both walled, use the diagonal direction (mid_ab >= mid_ac) to pick AC or AB cap.
+    // When only one walled, cap closes that side's wall.
+    if !floor_below && (ac_walled || ab_walled) {
         ctx.start_floor();
-        if mid_ab >= mid_ac {
-            // Wall diagonal: AC_up → AB_lo. Cap connects to AC_up.
-            // Boundary edge: AC wall (canonical).
-            add_point(ctx, geometry, 0.0, ay, 0.5, 0.0, 0.0, false);
+        let use_ac_cap = if ac_walled && ab_walled {
+            mid_ab >= mid_ac
+        } else {
+            ac_walled
+        };
+        if use_ac_cap {
+            add_point(ctx, geometry, 0.0, mid_ac_upper, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.0, mid_ac, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
         } else {
-            // Wall diagonal: AC_lo → AB_up. Cap connects to AB_up.
-            // Boundary edge: AB wall (canonical).
-            add_point(ctx, geometry, 0.5, ay, 0.0, 0.0, 0.0, false);
+            add_point(ctx, geometry, 0.5, mid_ab_upper, 0.0, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.0, mid_ac, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 0.0, false);
         }
@@ -226,8 +242,8 @@ pub fn add_edge(
             add_point(ctx, geometry, 1.0, bd_top, 0.5, uv_right, 1.0, false);
             add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
         } else {
-            // T1: left triangle — split AC boundary when floor slopes to wall top
-            if (a_x).abs() < 1e-5 && (ac_top - va_y).abs() > 1e-5 {
+            // T1: left triangle — split AC boundary only when AC is walled
+            if (a_x).abs() < 1e-5 && (ac_top - ac_bot).abs() > 1e-5 && (ac_top - va_y).abs() > 1e-5 {
                 // A → B → AC_mid_floor (flat half at floor level)
                 add_point(ctx, geometry, a_x, va_y, 0.0, uv_a, 0.0, false);
                 add_point(ctx, geometry, b_x, vb_y, 0.0, uv_b, 0.0, false);
@@ -242,8 +258,8 @@ pub fn add_edge(
                 add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
             }
 
-            // T2: right triangle — split BD boundary when floor slopes to wall top
-            if (b_x - 1.0).abs() < 1e-5 && (bd_top - vb_y).abs() > 1e-5 {
+            // T2: right triangle — split BD boundary only when BD is walled
+            if (b_x - 1.0).abs() < 1e-5 && (bd_top - bd_bot).abs() > 1e-5 && (bd_top - vb_y).abs() > 1e-5 {
                 // BD_mid_floor → AC_top → B (flat half at floor level)
                 add_point(ctx, geometry, 1.0, vb_y, 0.5, uv_right, 1.0, false);
                 add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
@@ -284,8 +300,8 @@ pub fn add_edge(
         let mid_cd_c = ctx.cd_height(0.5, cy >= dy); // C-side midpoint
         let mid_cd_d = ctx.cd_height(0.5, dy >= cy); // D-side midpoint
 
-        // C-side: wall_left → mid_c → C — split AC when floor slopes to corner
-        if (ac_bot - cy).abs() > 1e-5 {
+        // C-side: wall_left → mid_c → C — split AC only when AC is walled
+        if (ac_top - ac_bot).abs() > 1e-5 && (ac_bot - cy).abs() > 1e-5 {
             // AC flat half at C level
             add_point(ctx, geometry, 0.0, cy, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 0.0, 0.0, false);
@@ -300,8 +316,8 @@ pub fn add_edge(
             add_point(ctx, geometry, 0.0, cy, 1.0, 0.0, 0.0, false);
         }
 
-        // D-side: wall_right → D → mid_d — split BD when floor slopes to corner
-        if (bd_bot - dy).abs() > 1e-5 {
+        // D-side: wall_right → D → mid_d — split BD only when BD is walled
+        if (bd_top - bd_bot).abs() > 1e-5 && (bd_bot - dy).abs() > 1e-5 {
             // BD flat half at D level
             add_point(ctx, geometry, 1.0, dy, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 1.0, dy, 1.0, 0.0, 0.0, false);

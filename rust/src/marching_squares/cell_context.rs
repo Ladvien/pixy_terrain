@@ -137,28 +137,41 @@ impl CellContext {
 
     /// Get the boundary height along the AB edge (top edge in rotated frame).
     /// t=0 is the A corner, t=1 is the B corner.
+    ///
+    /// Profiles 2 (CD) and 3 (AC) have their h1→h2 direction reversed relative
+    /// to the circular rotation order, so t must be flipped when using them.
     pub fn ab_height(&self, t: f32, is_upper: bool) -> f32 {
-        self.profiles[self.rotation].height_at(t, is_upper)
+        let p = self.rotation;
+        let t_adj = if p >= 2 { 1.0 - t } else { t };
+        self.profiles[p].height_at(t_adj, is_upper)
     }
 
     /// Get the boundary height along the BD edge (right edge in rotated frame).
     /// t=0 is the B corner, t=1 is the D corner.
     pub fn bd_height(&self, t: f32, is_upper: bool) -> f32 {
-        self.profiles[(self.rotation + 1) % 4].height_at(t, is_upper)
+        let p = (self.rotation + 1) % 4;
+        let t_adj = if p >= 2 { 1.0 - t } else { t };
+        self.profiles[p].height_at(t_adj, is_upper)
     }
 
     /// Get the boundary height along the CD edge (bottom edge in rotated frame).
     /// t=0 is the C corner, t=1 is the D corner.
-    /// Note: CD runs opposite in the circular order, so t is flipped.
+    ///
+    /// CD traverses reverse circular order. Flip t when the profile direction
+    /// agrees with circular order (profiles 0, 1) — the two reversals cancel
+    /// for profiles 2, 3.
     pub fn cd_height(&self, t: f32, is_upper: bool) -> f32 {
-        self.profiles[(self.rotation + 2) % 4].height_at(1.0 - t, is_upper)
+        let p = (self.rotation + 2) % 4;
+        let t_adj = if p < 2 { 1.0 - t } else { t };
+        self.profiles[p].height_at(t_adj, is_upper)
     }
 
     /// Get the boundary height along the AC edge (left edge in rotated frame).
     /// t=0 is the A corner, t=1 is the C corner.
-    /// Note: AC runs opposite in the circular order, so t is flipped.
     pub fn ac_height(&self, t: f32, is_upper: bool) -> f32 {
-        self.profiles[(self.rotation + 3) % 4].height_at(1.0 - t, is_upper)
+        let p = (self.rotation + 3) % 4;
+        let t_adj = if p < 2 { 1.0 - t } else { t };
+        self.profiles[p].height_at(t_adj, is_upper)
     }
 
     pub fn start_floor(&mut self) {

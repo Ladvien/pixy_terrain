@@ -916,6 +916,179 @@ mod tests {
         );
     }
 
+    /// Near-threshold cross-cell boundary matching test.
+    /// Uses heights that produce mixed merged/walled boundaries within the same cell pair,
+    /// which the original test (using well-separated heights) never exercises.
+    #[test]
+    fn test_cross_cell_near_threshold() {
+        let height_values = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0];
+        let mut failures = Vec::new();
+
+        for &la in &height_values {
+            for &lb in &height_values {
+                for &ld in &height_values {
+                    for &lc in &height_values {
+                        let left = [la, lb, ld, lc];
+                        // Right cell shares B,D as A,C: right = [B, newB, newD, D]
+                        for &rb in &height_values {
+                            for &rd in &height_values {
+                                let right = [lb, rb, rd, ld];
+                                let result = validate_cell_pair_watertight(left, right);
+                                if !result.is_watertight {
+                                    failures.push((left, right, result.open_edges.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            eprintln!(
+                "\n=== NEAR-THRESHOLD CROSS-CELL FAILURES ({}) ===",
+                failures.len()
+            );
+            let threshold = 1.3;
+            for (l, r, edges) in failures.iter().take(30) {
+                let lc_name = identify_case(*l, threshold);
+                let rc_name = identify_case(*r, threshold);
+                eprintln!(
+                    "L[{:.0},{:.0},{:.0},{:.0}] R[{:.0},{:.0},{:.0},{:.0}] {} | {}: {} open edges",
+                    l[0], l[1], l[2], l[3], r[0], r[1], r[2], r[3], lc_name, rc_name, edges.len()
+                );
+                for (a, b) in edges.iter().take(4) {
+                    eprintln!(
+                        "  ({:.3},{:.3},{:.3})-({:.3},{:.3},{:.3})",
+                        a.x, a.y, a.z, b.x, b.y, b.z
+                    );
+                }
+            }
+            panic!(
+                "{} near-threshold cross-cell pairs have open edges",
+                failures.len()
+            );
+        }
+    }
+
+    /// Validate a combined 2-cell mesh for watertightness (vertical adjacency).
+    /// Generates two vertically adjacent cells (top and bottom), combines their geometry,
+    /// and checks for open internal edges (excluding the outer perimeter).
+    fn validate_cell_pair_vertical(
+        top_heights: [f32; 4],
+        bottom_heights: [f32; 4],
+    ) -> ValidationResult {
+        let cell_size = Vector2::new(2.0, 2.0);
+
+        let mut top_ctx = default_context();
+        top_ctx.heights = top_heights;
+        let mut top_geo = CellGeometry::default();
+        generate_cell(&mut top_ctx, &mut top_geo);
+
+        let mut bottom_ctx = default_context();
+        bottom_ctx.heights = bottom_heights;
+        bottom_ctx.cell_coords = Vector2i::new(0, 1);
+        let mut bottom_geo = CellGeometry::default();
+        generate_cell(&mut bottom_ctx, &mut bottom_geo);
+
+        // Combine geometry
+        let mut combined = CellGeometry::default();
+        combined.verts.extend_from_slice(&top_geo.verts);
+        combined.verts.extend_from_slice(&bottom_geo.verts);
+
+        // Validate combined: outer boundary is 2-cell block perimeter
+        // x: 0 to 2, z: 0 to 4
+        let min_x = 0.0;
+        let max_x = cell_size.x; // 2.0
+        let min_z = 0.0;
+        let max_z = 2.0 * cell_size.y; // 4.0
+
+        let mut edge_counts: HashMap<EdgeKey, (Vector3, Vector3, u32)> = HashMap::new();
+        let tri_count = combined.verts.len() / 3;
+
+        for tri in 0..tri_count {
+            let i = tri * 3;
+            let v0 = combined.verts[i];
+            let v1 = combined.verts[i + 1];
+            let v2 = combined.verts[i + 2];
+
+            for (a, b) in [(v0, v1), (v1, v2), (v2, v0)] {
+                let key = make_edge_key(a, b);
+                edge_counts
+                    .entry(key)
+                    .and_modify(|e| e.2 += 1)
+                    .or_insert((a, b, 1));
+            }
+        }
+
+        let mut open_edges = Vec::new();
+        for (_key, (a, b, count)) in &edge_counts {
+            if *count == 1 && !is_boundary_edge(*a, *b, min_x, max_x, min_z, max_z) {
+                open_edges.push((*a, *b));
+            }
+        }
+
+        ValidationResult {
+            is_watertight: open_edges.is_empty(),
+            open_edges,
+        }
+    }
+
+    /// Vertical cross-cell boundary matching test.
+    /// Tests that top-bottom adjacent cells produce matching edges along their shared
+    /// CD/AB boundary. Bottom cell's A=top's C, bottom cell's B=top's D.
+    #[test]
+    fn test_cross_cell_vertical_matching() {
+        let height_values = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0];
+        let mut failures = Vec::new();
+
+        for &ta in &height_values {
+            for &tb in &height_values {
+                for &td in &height_values {
+                    for &tc in &height_values {
+                        let top = [ta, tb, td, tc];
+                        // Bottom cell shares C,D as A,B: bottom = [C, D, newD, newC]
+                        for &bd in &height_values {
+                            for &bc in &height_values {
+                                let bottom = [tc, td, bd, bc];
+                                let result = validate_cell_pair_vertical(top, bottom);
+                                if !result.is_watertight {
+                                    failures.push((top, bottom, result.open_edges.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            eprintln!(
+                "\n=== VERTICAL CROSS-CELL FAILURES ({}) ===",
+                failures.len()
+            );
+            let threshold = 1.3;
+            for (t, b, edges) in failures.iter().take(30) {
+                let tc_name = identify_case(*t, threshold);
+                let bc_name = identify_case(*b, threshold);
+                eprintln!(
+                    "T[{:.0},{:.0},{:.0},{:.0}] B[{:.0},{:.0},{:.0},{:.0}] {} | {}: {} open edges",
+                    t[0], t[1], t[2], t[3], b[0], b[1], b[2], b[3], tc_name, bc_name, edges.len()
+                );
+                for (a, b) in edges.iter().take(4) {
+                    eprintln!(
+                        "  ({:.3},{:.3},{:.3})-({:.3},{:.3},{:.3})",
+                        a.x, a.y, a.z, b.x, b.y, b.z
+                    );
+                }
+            }
+            panic!(
+                "{} vertical cross-cell pairs have open edges",
+                failures.len()
+            );
+        }
+    }
+
     fn assert_brute_force_results(failures: &[([f32; 4], Vec<(Vector3, Vector3)>)]) {
         if !failures.is_empty() {
             eprintln!("\n=== BRUTE FORCE FAILURES ({}) ===", failures.len());

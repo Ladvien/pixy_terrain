@@ -1,4 +1,3 @@
-
 use godot::classes::Resource;
 use godot::prelude::*;
 
