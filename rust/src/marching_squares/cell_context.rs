@@ -36,6 +36,7 @@ pub struct CellContext {
     // Grid
     pub heights: [f32; 4],
     pub edges: [bool; 4],
+    pub profiles: [BoundaryProfile; 4],
     pub rotation: usize,
     pub cell_coords: Vector2i,
     pub dimensions: Vector3i,
@@ -116,6 +117,50 @@ impl CellContext {
     pub fn is_merged(&self, a: f32, b: f32) -> bool {
         (a - b).abs() < self.merge_threshold
     }
+
+    /// Compute boundary profiles from canonical (unrotated) heights.
+    /// Must be called after edges are computed but before case matching.
+    /// profiles[0] = AB, profiles[1] = BD, profiles[2] = CD, profiles[3] = AC
+    pub fn compute_profiles(&mut self) {
+        let (a, b, d, c) = (
+            self.heights[0],
+            self.heights[1],
+            self.heights[2],
+            self.heights[3],
+        );
+        self.profiles[0] = compute_boundary_profile(a, b, self.merge_threshold); // AB
+        self.profiles[1] = compute_boundary_profile(b, d, self.merge_threshold); // BD
+        self.profiles[2] = compute_boundary_profile(c, d, self.merge_threshold); // CD
+        self.profiles[3] = compute_boundary_profile(a, c, self.merge_threshold);
+        // AC
+    }
+
+    /// Get the boundary height along the AB edge (top edge in rotated frame).
+    /// t=0 is the A corner, t=1 is the B corner.
+    pub fn ab_height(&self, t: f32, is_upper: bool) -> f32 {
+        self.profiles[self.rotation].height_at(t, is_upper)
+    }
+
+    /// Get the boundary height along the BD edge (right edge in rotated frame).
+    /// t=0 is the B corner, t=1 is the D corner.
+    pub fn bd_height(&self, t: f32, is_upper: bool) -> f32 {
+        self.profiles[(self.rotation + 1) % 4].height_at(t, is_upper)
+    }
+
+    /// Get the boundary height along the CD edge (bottom edge in rotated frame).
+    /// t=0 is the C corner, t=1 is the D corner.
+    /// Note: CD runs opposite in the circular order, so t is flipped.
+    pub fn cd_height(&self, t: f32, is_upper: bool) -> f32 {
+        self.profiles[(self.rotation + 2) % 4].height_at(1.0 - t, is_upper)
+    }
+
+    /// Get the boundary height along the AC edge (left edge in rotated frame).
+    /// t=0 is the A corner, t=1 is the C corner.
+    /// Note: AC runs opposite in the circular order, so t is flipped.
+    pub fn ac_height(&self, t: f32, is_upper: bool) -> f32 {
+        self.profiles[(self.rotation + 3) % 4].height_at(1.0 - t, is_upper)
+    }
+
     pub fn start_floor(&mut self) {
         self.floor_mode = true;
     }

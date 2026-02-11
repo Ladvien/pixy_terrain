@@ -15,7 +15,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Pixy Terrain"
-run/main_scene="res://scenes/shader_test.tscn"
+run/main_scene="uid://xdlk2h5htqxh"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -43,7 +43,7 @@ cloud_speed={
 }
 cloud_contrast={
 "type": "float",
-"value": 2.0
+"value": 0.0
 }
 cloud_threshold={
 "type": "float",
@@ -59,9 +59,33 @@ light_direction={
 }
 cloud_shadow_min={
 "type": "float",
-"value": 0.3
+"value": 1.0
 }
 cloud_diverge_angle={
+"type": "float",
+"value": 10.0
+}
+wind_noise={
+"type": "sampler2D",
+"value": ""
+}
+wind_noise_threshold={
+"type": "float",
+"value": -0.5
+}
+wind_noise_scale={
+"type": "float",
+"value": 0.071
+}
+wind_noise_speed={
+"type": "float",
+"value": 0.025
+}
+wind_noise_direction={
+"type": "vec2",
+"value": "Vector2(0, 1)"
+}
+wind_diverge_angle={
 "type": "float",
 "value": 10.0
 }

@@ -97,6 +97,14 @@ impl PixyGrassPlanter {
         let instance_count = (dim_x * dim_z * subs * subs) as i32;
         let grass_material = config.grass_material.clone();
 
+        godot_print!(
+            "GrassPlanter::setup() — instances={}, has_material={}, has_grass_mesh={}, has_quad_mesh={}",
+            instance_count,
+            grass_material.is_some(),
+            config.grass_mesh.is_some(),
+            config.grass_quad_mesh.is_some()
+        );
+
         let mut mm = MultiMesh::new_gd();
         mm.set_transform_format(godot::classes::multi_mesh::TransformFormat::TRANSFORM_3D);
         mm.set_use_custom_data(true);
@@ -104,10 +112,13 @@ impl PixyGrassPlanter {
 
         // Use custom grass mesh if set, otherwise use the shared QuadMesh
         if let Some(ref mesh) = config.grass_mesh {
+            godot_print!("GrassPlanter: Using custom grass mesh");
             mm.set_mesh(mesh);
         } else if let Some(ref quad) = config.grass_quad_mesh {
+            godot_print!("GrassPlanter: Using shared QuadMesh");
             mm.set_mesh(quad);
         } else {
+            godot_warn!("GrassPlanter: No grass mesh or quad mesh — using fallback (no material!)");
             // Fallback: create a temporary QuadMesh
             let mut quad = QuadMesh::new_gd();
             quad.set_size(config.grass_size);
@@ -122,8 +133,11 @@ impl PixyGrassPlanter {
 
         // Apply grass ShaderMaterial for alpha-cutout rendering
         if let Some(mat) = grass_material {
+            godot_print!("GrassPlanter: Applying material_override with ShaderMaterial");
             self.base_mut()
                 .set_material_override(&mat.upcast::<godot::classes::Material>());
+        } else {
+            godot_warn!("GrassPlanter: No grass material — quads will render white!");
         }
     }
 

@@ -53,29 +53,45 @@ cd rust && cargo clippy
 ## Project Structure
 
 ```
-pixy_terrain/
-├── godot/                        # Godot project files
-│   ├── project.godot             # Godot project configuration
-│   ├── pixy_terrain.gdextension  # GDExtension configuration
+pixy_terrain/                         # Lives at ~/pixy/pixy_terrain/
+├── godot/                            # Godot test project for standalone addon development
+│   ├── project.godot                 # Godot project configuration
+│   ├── addons/pixy_terrain/          # Addon directory (symlinked into game projects)
+│   │   ├── pixy_terrain.gdextension  # GDExtension configuration
+│   │   ├── bin/                      # Symlinks to compiled libraries
+│   │   └── resources/                # Shaders, textures, materials
+│   │       ├── shaders/
+│   │       └── textures/
 │   ├── scenes/
-│   │   └── test_scene.tscn       # Test scene with terrain node
+│   │   └── test_scene.tscn           # Test scene with terrain node
 │   └── scripts/
-│       └── orbit_camera.gd       # Camera controller for testing
-└── rust/                         # Rust GDExtension library
+│       └── player.gd                 # Isometric camera + WASD player
+└── rust/                             # Rust GDExtension library
     ├── Cargo.toml
     └── src/
-        ├── lib.rs                # Extension entry point
-        └── terrain.rs            # PixyTerrain node implementation
+        ├── lib.rs                    # Extension entry point
+        ├── terrain.rs                # PixyTerrain node (Node3D)
+        ├── chunk.rs                  # PixyTerrainChunk (MeshInstance3D)
+        ├── marching_squares/         # Geometry generation (17 cases)
+        ├── editor_plugin.rs          # Editor tool modes
+        ├── gizmo.rs                  # Brush visualization
+        ├── grass_planter.rs          # MultiMesh grass
+        ├── texture_preset.rs         # Texture presets
+        └── quick_paint.rs            # Quick paint presets
 ```
 
-## Architecture
+## Addon Architecture
 
-- **GDExtension Entry**: `rust/src/lib.rs` - Registers the extension with Godot via `#[gdextension]` macro
-- **PixyTerrain Node**: `rust/src/terrain.rs` - Main terrain editor node (extends MeshInstance3D)
-  - Exports: `grid_size` (Vector3i), `voxel_size` (f32), `debug_wireframe` (bool)
-  - Methods: `regenerate()`, `clear()`, `set_voxel()`, `get_grid_dimensions()`
-- **Library Output**: Compiled to `rust/target/{debug,release}/libpixy_terrain.dylib` (macOS), `.so` (Linux), or `.dll` (Windows)
-- **Godot Integration**: The `.gdextension` file in `godot/` tells Godot where to find the compiled library
+This repo is structured as a **GDExtension addon**. The addon lives at `godot/addons/pixy_terrain/`.
+
+- **Symlink into game projects**: `ln -s ~/pixy/pixy_terrain/godot/addons/pixy_terrain ~/pixy/pixy_game/godot/addons/pixy_terrain`
+- **Resource paths**: All Rust code uses `res://addons/pixy_terrain/resources/` prefix
+- **Library paths**: .gdextension references `res://addons/pixy_terrain/bin/` with platform-specific symlinks to `rust/target/`
+
+### Related Projects
+
+- `~/pixy/pixy_tree/` — Procedural tree addon (same addon pattern)
+- `~/pixy/pixy_game/` — Game project that symlinks both addons + owns player/camera
 
 ## Development Workflow
 

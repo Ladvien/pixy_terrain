@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::surface_tool::CustomFormat;
 use godot::classes::{
-    ArrayMesh, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D,
-    SurfaceTool,
+    ArrayMesh, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D, SurfaceTool,
 };
 use godot::prelude::*;
 
 use crate::grass_planter::{GrassConfig, PixyGrassPlanter};
-use crate::marching_squares::{self, BlendMode, CellContext, CellGeometry, MergeMode};
+use crate::marching_squares::{
+    self, validate_cell_watertight, BlendMode, CellContext, CellGeometry, MergeMode,
+};
 
 /// Cached terrain configuration (avoids needing to bind terrain during chunk operations)
 /// Passed from terrain to chunk at initialization time to break the borrow cycle
@@ -274,6 +275,40 @@ impl PixyTerrainChunk {
         }
         let dim_x = self.terrain_config.dimensions.x;
         self.grass_mask_map[(z * dim_x + x) as usize]
+    }
+
+    #[func]
+    pub fn validate_mesh_gaps(&self) -> i32 {
+        let cell_size = self.terrain_config.cell_size;
+        let mut total_gaps = 0i32;
+        for (key, geo) in &self.cell_geometry {
+            let cell_x = key[0];
+            let cell_z = key[1];
+            let result = validate_cell_watertight(geo, cell_x, cell_z, cell_size);
+            if !result.is_watertight {
+                let gap_count = result.open_edges.len();
+                total_gaps += gap_count as i32;
+                for (a, b) in &result.open_edges {
+                    godot_warn!(
+                        "Mesh gap in cell ({},{}): ({:.3},{:.3},{:.3}) - ({:.3},{:.3},{:.3})",
+                        cell_x,
+                        cell_z,
+                        a.x,
+                        a.y,
+                        a.z,
+                        b.x,
+                        b.y,
+                        b.z
+                    );
+                }
+            }
+        }
+        if total_gaps == 0 {
+            godot_print!("Mesh validation passed: no gaps found.");
+        } else {
+            godot_warn!("Mesh validation found {} total gaps.", total_gaps);
+        }
+        total_gaps
     }
 }
 
@@ -553,6 +588,11 @@ impl PixyTerrainChunk {
                 .bind_mut()
                 .setup_with_config(chunk_id, grass_config, true);
         }
+
+        // Regenerate mesh + grass on scene reload (rebuilds cell_geometry from restored maps)
+        if should_regenerate_mesh {
+            self.regenerate_mesh();
+        }
     }
 
     pub fn generate_height_map_with_noise(&mut self, noise: Option<Gd<Noise>>) {
@@ -654,6 +694,9 @@ impl PixyTerrainChunk {
                 .bind_mut()
                 .regenerate_all_cells_with_geometry(&self.cell_geometry);
         }
+
+        // Keep packed arrays in sync so Ctrl+S captures current state
+        self.sync_to_packed();
     }
 
     fn generate_terrain_cells(&mut self, st: &mut Gd<SurfaceTool>) {
@@ -673,6 +716,7 @@ impl PixyTerrainChunk {
         let mut ctx = CellContext {
             heights: [0.0; 4],
             edges: [true; 4],
+            profiles: Default::default(),
             rotation: 0,
             cell_coords: Vector2i::ZERO,
             dimensions: dim,
@@ -759,6 +803,7 @@ impl PixyTerrainChunk {
                 continue;
             };
             if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
+                body.set_visible(false); // Hidden by default; editor toggle controls visibility
                 body.set_collision_layer(1 << 16);
 
                 let extra = self.terrain_config.extra_collision_layer;

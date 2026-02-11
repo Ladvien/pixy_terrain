@@ -268,7 +268,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
             "Level",
             "Smooth",
             "Slope",
-            "Grass Mask",
+            "Add Grass",
             "Vertex Paint",
             "Debug",
             "Add Area",
@@ -291,9 +291,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
   points.\n\n[Shortcuts]\n\
                \u{2022} Click start, drag to end\n\u{2022} Ease controls slope
    curve",
-            "Grass Mask Tool\n\nEnable/disable grass on
-  terrain.\n\n[Shortcuts]\n\
-               \u{2022} Click to toggle grass mask",
+            "Grass Tool\n\nAdd or remove grass on terrain.\n\nClick again to toggle between Add/Remove.",
             "Vertex Paint Tool\n\nPaint texture materials on
   terrain.\n\n[Shortcuts]\n\
                \u{2022} Select material slot first\n\
@@ -331,6 +329,13 @@ impl IEditorPlugin for PixyTerrainPlugin {
             btn.connect("toggled", &callable);
 
             toolbar.add_child(&btn);
+
+            if i == 4 {
+                let down_callable =
+                    Callable::from_object_method(&plugin_ref, "on_grass_mask_button_down");
+                btn.connect("button_down", &down_callable);
+            }
+
             tool_buttons.push(btn);
         }
 
@@ -362,8 +367,7 @@ impl IEditorPlugin for PixyTerrainPlugin {
         );
         settings_btn.set_toggle_mode(true);
         settings_btn.set_custom_minimum_size(Vector2::new(BUTTON_MIN_WIDTH, BUTTON_MIN_HEIGHT));
-        let settings_callable =
-            Callable::from_object_method(&plugin_ref, "on_settings_toggled");
+        let settings_callable = Callable::from_object_method(&plugin_ref, "on_settings_toggled");
         settings_btn.connect("toggled", &settings_callable);
         toolbar.add_child(&settings_btn);
         self.settings_toggle_button = Some(settings_btn);
@@ -931,7 +935,15 @@ impl PixyTerrainPlugin {
             1 => TerrainToolMode::Level,
             2 => TerrainToolMode::Smooth,
             3 => TerrainToolMode::Bridge,
-            4 => TerrainToolMode::GrassMask,
+            4 => {
+                // Only reset when genuinely switching to the tool, not on
+                // re-clicks (which the gui_input handler already handled).
+                if self.mode != TerrainToolMode::GrassMask {
+                    self.should_mask_grass = false;
+                    self.update_grass_mask_button_text();
+                }
+                TerrainToolMode::GrassMask
+            }
             5 => TerrainToolMode::VertexPaint,
             6 => TerrainToolMode::DebugBrush,
             7 => TerrainToolMode::ChunkManagement,
@@ -948,6 +960,34 @@ impl PixyTerrainPlugin {
         self.settings_toggle_active = pressed;
         self.base_mut()
             .call_deferred("_rebuild_attributes_deferred", &[]);
+    }
+
+    /// Handle re-clicks on the grass mask button to toggle Add/Remove mode.
+    /// `button_down` fires during the button's own press processing. If the
+    /// button is already pressed (toggle state) this must be a re-click.
+    #[func]
+    fn on_grass_mask_button_down(&mut self) {
+        // button_down fires before toggle logic, so is_pressed() == true
+        // means the button was already active — this is a re-click.
+        let Some(btn) = self.tool_buttons.get(4) else {
+            return;
+        };
+        if !btn.is_pressed() {
+            return;
+        }
+        self.should_mask_grass = !self.should_mask_grass;
+        self.update_grass_mask_button_text();
+    }
+
+    fn update_grass_mask_button_text(&mut self) {
+        if let Some(btn) = self.tool_buttons.get_mut(4) {
+            let text = if self.should_mask_grass {
+                "Remove Grass"
+            } else {
+                "Add Grass"
+            };
+            btn.set_text(text);
+        }
     }
 
     /// Called when an attribute control value changes.
@@ -996,9 +1036,6 @@ impl PixyTerrainPlugin {
                 if let Some(ref hbox) = self.attributes_hbox {
                     Self::update_slider_label(hbox, "ease_value", "Ease", v);
                 }
-            }
-            "mask_mode" => {
-                self.should_mask_grass = value.to();
             }
             "material" => {
                 let idx: i64 = value.to();
@@ -1072,12 +1109,6 @@ impl PixyTerrainPlugin {
             | "world_space_sway"
             | "world_sway_angle"
             | "fake_perspective_scale"
-            | "wind_noise_threshold"
-            | "wind_noise_scale"
-            | "wind_noise_speed"
-            | "wind_noise_dir_x"
-            | "wind_noise_dir_y"
-            | "noise_diverge_angle"
             | "view_space_sway"
             | "view_sway_speed"
             | "view_sway_angle"
@@ -1090,15 +1121,7 @@ impl PixyTerrainPlugin {
             | "grass_toon_wrap"
             | "grass_toon_steepness"
             | "grass_threshold_gradient_size"
-            // Cloud Shadows
-            | "clouds_enabled"
-            | "cloud_scale"
-            | "cloud_speed"
-            | "cloud_threshold"
-            | "cloud_contrast"
-            | "cloud_shadow_min"
-            | "cloud_world_y"
-            | "cloud_diverge_angle" => {
+            => {
                 self.apply_terrain_setting(setting_name.to_string().as_str(), &value);
                 let label_text = match setting_name.to_string().as_str() {
                     "cell_size_x" => Some("Cell X"),
@@ -1114,12 +1137,6 @@ impl PixyTerrainPlugin {
                     "grass_framerate" => Some("Framerate"),
                     "world_sway_angle" => Some("Sway Angle"),
                     "fake_perspective_scale" => Some("Fake Persp"),
-                    "wind_noise_threshold" => Some("Wind Thresh"),
-                    "wind_noise_scale" => Some("Wind Scale"),
-                    "wind_noise_speed" => Some("Wind Speed"),
-                    "wind_noise_dir_x" => Some("Wind Dir X"),
-                    "wind_noise_dir_y" => Some("Wind Dir Y"),
-                    "noise_diverge_angle" => Some("Diverge Ang"),
                     "view_sway_speed" => Some("View Speed"),
                     "view_sway_angle" => Some("View Angle"),
                     "player_displacement_angle_z" => Some("Disp Ang Z"),
@@ -1128,13 +1145,6 @@ impl PixyTerrainPlugin {
                     "grass_toon_wrap" => Some("Toon Wrap"),
                     "grass_toon_steepness" => Some("Toon Steep"),
                     "grass_threshold_gradient_size" => Some("Grad Size"),
-                    "cloud_scale" => Some("Cloud Scale"),
-                    "cloud_speed" => Some("Cloud Speed"),
-                    "cloud_threshold" => Some("Cloud Thresh"),
-                    "cloud_contrast" => Some("Cloud Contrast"),
-                    "cloud_shadow_min" => Some("Shadow Min"),
-                    "cloud_world_y" => Some("Cloud Y"),
-                    "cloud_diverge_angle" => Some("Cloud Div Ang"),
                     _ => None,
                 };
                 if let (Some(label), Some(ref hbox)) = (label_text, &self.attributes_hbox) {
@@ -1734,12 +1744,6 @@ impl PixyTerrainPlugin {
                     self.brush_size as f64,
                     &plugin_ref,
                 );
-                self.add_checkbox_attribute(
-                    "mask_mode",
-                    "Mask",
-                    self.should_mask_grass,
-                    &plugin_ref,
-                );
             }
             TerrainToolMode::VertexPaint => {
                 self.add_option_attribute(
@@ -2154,11 +2158,6 @@ impl PixyTerrainPlugin {
                     w_sway,
                     w_sway_ang,
                     fake_persp,
-                    wn_thresh,
-                    wn_scale,
-                    wn_speed,
-                    wn_dir,
-                    n_div_ang,
                     v_sway,
                     v_sway_sp,
                     v_sway_ang,
@@ -2170,14 +2169,6 @@ impl PixyTerrainPlugin {
                     toon_wrap,
                     toon_steep,
                     toon_grad,
-                    cl_enabled,
-                    cl_scale,
-                    cl_speed,
-                    cl_thresh,
-                    cl_contrast,
-                    cl_shadow_min,
-                    cl_world_y,
-                    cl_div_ang,
                 ) = if let Some(ref terrain) = self.current_terrain {
                     if terrain.is_instance_valid() {
                         let t: Gd<PixyTerrain> = terrain.clone().cast();
@@ -2188,11 +2179,6 @@ impl PixyTerrainPlugin {
                             tb.world_space_sway,
                             tb.world_sway_angle,
                             tb.fake_perspective_scale,
-                            tb.wind_noise_threshold,
-                            tb.wind_noise_scale,
-                            tb.wind_noise_speed,
-                            tb.wind_noise_direction,
-                            tb.noise_diverge_angle,
                             tb.view_space_sway,
                             tb.view_sway_speed,
                             tb.view_sway_angle,
@@ -2204,14 +2190,6 @@ impl PixyTerrainPlugin {
                             tb.grass_toon_wrap,
                             tb.grass_toon_steepness,
                             tb.grass_threshold_gradient_size,
-                            tb.clouds_enabled,
-                            tb.cloud_scale,
-                            tb.cloud_speed,
-                            tb.cloud_threshold,
-                            tb.cloud_contrast,
-                            tb.cloud_shadow_min,
-                            tb.cloud_world_y,
-                            tb.cloud_diverge_angle,
                         )
                     } else {
                         return;
@@ -2231,18 +2209,8 @@ impl PixyTerrainPlugin {
                     grass_fr as f64,
                     &plugin_ref,
                 );
-                self.add_checkbox_attribute(
-                    "grass_quantised",
-                    "Quantised",
-                    grass_q,
-                    &plugin_ref,
-                );
-                self.add_checkbox_attribute(
-                    "world_space_sway",
-                    "World Sway",
-                    w_sway,
-                    &plugin_ref,
-                );
+                self.add_checkbox_attribute("grass_quantised", "Quantised", grass_q, &plugin_ref);
+                self.add_checkbox_attribute("world_space_sway", "World Sway", w_sway, &plugin_ref);
                 self.add_slider_attribute(
                     "world_sway_angle",
                     "Sway Angle",
@@ -2261,68 +2229,9 @@ impl PixyTerrainPlugin {
                     fake_persp as f64,
                     &plugin_ref,
                 );
-                self.add_slider_attribute(
-                    "wind_noise_threshold",
-                    "Wind Thresh",
-                    -1.0,
-                    1.0,
-                    0.001,
-                    wn_thresh as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "wind_noise_scale",
-                    "Wind Scale",
-                    0.0,
-                    0.1,
-                    0.001,
-                    wn_scale as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "wind_noise_speed",
-                    "Wind Speed",
-                    0.0,
-                    0.2,
-                    0.001,
-                    wn_speed as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "wind_noise_dir_x",
-                    "Wind Dir X",
-                    -1.0,
-                    1.0,
-                    0.01,
-                    wn_dir.x as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "wind_noise_dir_y",
-                    "Wind Dir Y",
-                    -1.0,
-                    1.0,
-                    0.01,
-                    wn_dir.y as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "noise_diverge_angle",
-                    "Diverge Ang",
-                    0.0,
-                    45.0,
-                    0.1,
-                    n_div_ang as f64,
-                    &plugin_ref,
-                );
                 // ── View Sway ──
                 self.add_group_separator("View Sway");
-                self.add_checkbox_attribute(
-                    "view_space_sway",
-                    "View Sway",
-                    v_sway,
-                    &plugin_ref,
-                );
+                self.add_checkbox_attribute("view_space_sway", "View Sway", v_sway, &plugin_ref);
                 self.add_slider_attribute(
                     "view_sway_speed",
                     "View Speed",
@@ -2413,78 +2322,6 @@ impl PixyTerrainPlugin {
                     1.0,
                     0.01,
                     toon_grad as f64,
-                    &plugin_ref,
-                );
-
-                // ── Cloud Shadows ──
-                self.add_group_separator("Cloud Shadows");
-                self.add_checkbox_attribute(
-                    "clouds_enabled",
-                    "Clouds",
-                    cl_enabled,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_scale",
-                    "Cloud Scale",
-                    1.0,
-                    500.0,
-                    1.0,
-                    cl_scale as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_speed",
-                    "Cloud Speed",
-                    0.0,
-                    0.2,
-                    0.001,
-                    cl_speed as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_threshold",
-                    "Cloud Thresh",
-                    0.0,
-                    1.0,
-                    0.01,
-                    cl_thresh as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_contrast",
-                    "Cloud Contrast",
-                    0.0,
-                    10.0,
-                    0.1,
-                    cl_contrast as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_shadow_min",
-                    "Shadow Min",
-                    0.0,
-                    1.0,
-                    0.01,
-                    cl_shadow_min as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_world_y",
-                    "Cloud Y",
-                    0.0,
-                    200.0,
-                    1.0,
-                    cl_world_y as f64,
-                    &plugin_ref,
-                );
-                self.add_slider_attribute(
-                    "cloud_diverge_angle",
-                    "Cloud Div Ang",
-                    0.0,
-                    45.0,
-                    0.1,
-                    cl_div_ang as f64,
                     &plugin_ref,
                 );
             }
@@ -3854,26 +3691,6 @@ impl PixyTerrainPlugin {
                 "fake_perspective_scale" => {
                     t.fake_perspective_scale = value.to::<f64>() as f32;
                 }
-                "wind_noise_threshold" => {
-                    t.wind_noise_threshold = value.to::<f64>() as f32;
-                }
-                "wind_noise_scale" => {
-                    t.wind_noise_scale = value.to::<f64>() as f32;
-                }
-                "wind_noise_speed" => {
-                    t.wind_noise_speed = value.to::<f64>() as f32;
-                }
-                "wind_noise_dir_x" => {
-                    let v = value.to::<f64>() as f32;
-                    t.wind_noise_direction = Vector2::new(v, t.wind_noise_direction.y);
-                }
-                "wind_noise_dir_y" => {
-                    let v = value.to::<f64>() as f32;
-                    t.wind_noise_direction = Vector2::new(t.wind_noise_direction.x, v);
-                }
-                "noise_diverge_angle" => {
-                    t.noise_diverge_angle = value.to::<f64>() as f32;
-                }
                 "view_space_sway" => {
                     t.view_space_sway = value.to();
                 }
@@ -3908,31 +3725,6 @@ impl PixyTerrainPlugin {
                 "grass_threshold_gradient_size" => {
                     t.grass_threshold_gradient_size = value.to::<f64>() as f32;
                 }
-                // ── Cloud Shadows ──
-                "clouds_enabled" => {
-                    t.clouds_enabled = value.to();
-                }
-                "cloud_scale" => {
-                    t.cloud_scale = value.to::<f64>() as f32;
-                }
-                "cloud_speed" => {
-                    t.cloud_speed = value.to::<f64>() as f32;
-                }
-                "cloud_threshold" => {
-                    t.cloud_threshold = value.to::<f64>() as f32;
-                }
-                "cloud_contrast" => {
-                    t.cloud_contrast = value.to::<f64>() as f32;
-                }
-                "cloud_shadow_min" => {
-                    t.cloud_shadow_min = value.to::<f64>() as f32;
-                }
-                "cloud_world_y" => {
-                    t.cloud_world_y = value.to::<f64>() as f32;
-                }
-                "cloud_diverge_angle" => {
-                    t.cloud_diverge_angle = value.to::<f64>() as f32;
-                }
                 _ => {}
             }
         }
@@ -3945,12 +3737,6 @@ impl PixyTerrainPlugin {
                 | "world_space_sway"
                 | "world_sway_angle"
                 | "fake_perspective_scale"
-                | "wind_noise_threshold"
-                | "wind_noise_scale"
-                | "wind_noise_speed"
-                | "wind_noise_dir_x"
-                | "wind_noise_dir_y"
-                | "noise_diverge_angle"
                 | "view_space_sway"
                 | "view_sway_speed"
                 | "view_sway_angle"
@@ -3963,24 +3749,9 @@ impl PixyTerrainPlugin {
                 | "grass_toon_steepness"
                 | "grass_threshold_gradient_size"
         );
-        let is_cloud_setting = matches!(
-            name,
-            "clouds_enabled"
-                | "cloud_scale"
-                | "cloud_speed"
-                | "cloud_threshold"
-                | "cloud_contrast"
-                | "cloud_shadow_min"
-                | "cloud_world_y"
-                | "cloud_diverge_angle"
-        );
-
         terrain.bind_mut().force_batch_update();
         if is_grass_setting {
             terrain.bind_mut().force_grass_material_update();
-        }
-        if is_cloud_setting {
-            terrain.bind_mut().update_cloud_globals();
         }
     }
 }

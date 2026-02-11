@@ -28,6 +28,8 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
     ctx.color_state.is_boundary =
         (ctx.color_state.max_height - ctx.color_state.min_height) > ctx.merge_threshold;
 
+    ctx.compute_profiles();
+
     ctx.calculate_cell_material_pair();
     if ctx.color_state.is_boundary {
         ctx.calculate_boundary_colors();
@@ -250,17 +252,17 @@ fn case_3_edge_a_outer_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
 
 /// Case 4: Half-width edge with B outer corner above.
 fn case_4_edge_b_outer_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    let cy = ctx.cy();
+    let edge_floor = ctx.ay().min(ctx.by());
     add_edge(ctx, geo, true, true, 0.0, 0.5);
     ctx.rotate_cell(1);
-    add_outer_corner(ctx, geo, false, true, true, cy);
+    add_outer_corner(ctx, geo, false, true, true, edge_floor);
 }
 
 /// Case 5: To inner corners at A and D with diagonal floor bridge
 fn case_5_double_inner_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let (by, cy) = (ctx.by(), ctx.cy());
     add_inner_corner(ctx, geo, true, false, false, false, false);
-    add_diagonal_floor(ctx, geo, by, cy, true, true);
+    add_diagonal_floor(ctx, geo, by, cy, true, true, None, None);
     ctx.rotate_cell(2);
     add_inner_corner(ctx, geo, true, false, false, false, false);
 }
@@ -268,8 +270,9 @@ fn case_5_double_inner_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
 /// Case 5.5: Like case 5 but B higher than C - ads outer corner at B.
 fn case_5_5_double_inner_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let (by, cy) = (ctx.by(), ctx.cy());
+    let flat = by.min(cy);
     add_inner_corner(ctx, geo, true, false, true, false, false);
-    add_diagonal_floor(ctx, geo, by, cy, true, true);
+    add_diagonal_floor(ctx, geo, by, cy, true, true, Some(flat), Some(flat));
     ctx.rotate_cell(2);
     add_inner_corner(ctx, geo, true, false, true, false, false);
     ctx.rotate_cell(-1);
@@ -283,97 +286,77 @@ fn case_6_inner_corner(ctx: &mut CellContext, geo: &mut CellGeometry) {
 
 /// Case 7: A lowest, BD connected (not CD), C higher than D.
 fn case_7_inner_asymmetric_bd(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    add_inner_corner(ctx, geo, true, false, true, false, false);
+    add_inner_corner(ctx, geo, true, false, true, false, true);
 
-    let by = ctx.by();
-    let dy = ctx.dy();
-    let cy = ctx.cy();
-    let bd_edge_midpoint = (by + dy) / 2.0;
+    let (_, _, cy, dy) = ctx.corner_heights();
+    let mid_ac = ctx.ac_height(0.5, true);
+    let mid_bd = ctx.bd_height(0.5, true);
+    let cd_upper = ctx.cd_height(0.5, true);
+    let cd_lower = ctx.cd_height(0.5, false);
 
-    // Floor fan: 4 triangles bridging B through BD midpoint to D
+    // Floor from BD_mid to D to CD_lower
     ctx.start_floor();
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 0.0, 0.0, false);
     add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, dy, 1.0, 1.0, 0.0, false);
-    add_point(ctx, geo, 1.0, bd_edge_midpoint, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, cd_lower, 1.0, 1.0, 0.0, false);
 
-    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, bd_edge_midpoint, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, by, 0.0, 0.0, 1.0, false);
+    // Connecting floor: AC_mid to BD_mid to CD_lower
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, cd_lower, 1.0, 1.0, 0.0, false);
 
-    add_point(ctx, geo, 0.5, by, 0.0, 0.0, 1.0, false);
-    add_point(ctx, geo, 1.0, bd_edge_midpoint, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, by, 0.5, 1.0, 1.0, false);
-
-    add_point(ctx, geo, 0.5, dy, 1.0, 1.0, 0.0, false);
-    add_point(ctx, geo, 0.0, by, 0.5, 1.0, 1.0, false);
-    add_point(ctx, geo, 1.0, bd_edge_midpoint, 0.5, 0.0, 0.0, false);
-
-    // Wall: 2 triangles rising to C's height
+    // Wall at CD midpoint
     ctx.start_wall();
-    add_point(ctx, geo, 0.0, by, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, dy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
-
-    add_point(ctx, geo, 0.5, cy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, dy, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, cd_lower, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.5, cd_upper, 1.0, 0.0, 1.0, false);
 
     // C upper floor
     ctx.start_floor();
     add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 1.0, false);
-    add_point(ctx, geo, 0.5, cy, 1.0, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.5, cd_upper, 1.0, 0.0, 1.0, false);
 }
 
 /// Case 8: A lowest, CD connected (not BD), B higher than D.
 fn case_8_inner_asymmetric_cd(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    add_inner_corner(ctx, geo, true, false, true, false, false);
+    add_inner_corner(ctx, geo, true, false, true, true, false);
 
-    let by = ctx.by();
-    let dy = ctx.dy();
-    let cy = ctx.cy();
-    let cd_edge_midpoint = (dy + cy) / 2.0;
+    let (_, by, _, dy) = ctx.corner_heights();
+    let mid_ab = ctx.ab_height(0.5, true);
+    let bd_upper = ctx.bd_height(0.5, true);
+    let bd_lower = ctx.bd_height(0.5, false);
+    let cd_mid = ctx.cd_height(0.5, true);
 
-    // Floor fan: 4 triangles bridging C through CD midpoint to D
+    // Floor from AB_mid toward D: AB_mid - D - CD_mid
     ctx.start_floor();
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
     add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cd_edge_midpoint, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, cd_mid, 1.0, 1.0, 0.0, false);
 
-    add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cd_edge_midpoint, 1.0, 0.0, 0.0, false);
+    // Floor: AB_mid - BD_lower - D
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, bd_lower, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
 
-    add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cd_edge_midpoint, 1.0, 0.0, 0.0, false);
-
-    add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cd_edge_midpoint, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
-
-    // Wall: 2 triangles rising to B's height
+    // BD wall
     ctx.start_wall();
-    add_point(ctx, geo, 0.5, cy, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
-
-    add_point(ctx, geo, 1.0, by, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, bd_lower, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 1.0, false);
+    add_point(ctx, geo, 1.0, bd_upper, 0.5, 0.0, 1.0, false);
 
     // B upper floor
     ctx.start_floor();
     add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, by, 0.5, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.5, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 1.0, false);
+    add_point(ctx, geo, 1.0, bd_upper, 0.5, 0.0, 1.0, false);
 }
 
 /// Case 9: Inner corner at A, diagonal floor, outer corner at D
 fn case_9_inner_diagonal_outer(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let (by, cy) = (ctx.by(), ctx.cy());
     add_inner_corner(ctx, geo, true, false, false, false, false);
-    add_diagonal_floor(ctx, geo, by, cy, true, false);
+    add_diagonal_floor(ctx, geo, by, cy, true, false, None, None);
     ctx.rotate_cell(2);
     add_outer_corner(ctx, geo, true, false, false, -1.0);
 }
@@ -381,6 +364,23 @@ fn case_9_inner_diagonal_outer(ctx: &mut CellContext, geo: &mut CellGeometry) {
 /// Case 10: Inner corner at A with edge atop BD.
 fn case_10_inner_corner_edge_bd(ctx: &mut CellContext, geo: &mut CellGeometry) {
     add_inner_corner(ctx, geo, true, false, true, true, false);
+
+    // Bridge floor: connects inner corner's lower region to the edge wall bottom.
+    // Uses AC_upper (wall-top height) so boundary edge C→AC_upper matches the
+    // canonical decomposition that adjacent cells expect.
+    let (ay, _, cy, _) = ctx.corner_heights();
+    let mid_cd_lower = ctx.cd_height(0.5, false);
+    let mid_ac_upper = ctx.ac_height(0.5, true);
+    ctx.start_floor();
+    // Tri 1: AB_mid → C → CD_mid_lower
+    add_point(ctx, geo, 0.5, ay, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd_lower, 1.0, 1.0, 0.0, false);
+    // Tri 2: C → AB_mid → AC_upper (canonical AC boundary edge)
+    add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, ay, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, mid_ac_upper, 0.5, 0.0, 0.0, false);
+
     ctx.rotate_cell(1);
     add_edge(ctx, geo, false, true, 0.0, 1.0);
 }
@@ -388,53 +388,76 @@ fn case_10_inner_corner_edge_bd(ctx: &mut CellContext, geo: &mut CellGeometry) {
 /// Case 11: Inner corner at A with edge atop CD.
 fn case_11_inner_corner_edge_cd(ctx: &mut CellContext, geo: &mut CellGeometry) {
     add_inner_corner(ctx, geo, true, false, true, false, true);
+
+    // Bridge floor: connects inner corner's lower region to the edge wall bottom.
+    // Split the AB boundary edge at the midpoint for canonical cross-cell matching.
+    let (ay, by, _, _) = ctx.corner_heights();
+    let mid_bd_lower = ctx.bd_height(0.5, false);
+    let mid_ab_upper = ctx.ab_height(0.5, true);
+    let mid_ab_lower = ctx.ab_height(0.5, false);
+    ctx.start_floor();
+    // T1: AC_mid → B → BD_lower (unchanged)
+    add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd_lower, 0.5, 1.0, 0.0, false);
+    // T2b: AB_mid_upper → B → AC_mid (upper half of AB)
+    add_point(ctx, geo, 0.5, mid_ab_upper, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 0.0, false);
+    // T2c: AB_mid_lower → AB_mid_upper → AC_mid (wall at AB midpoint)
+    if (mid_ab_upper - mid_ab_lower).abs() > 1e-5 {
+        add_point(ctx, geo, 0.5, mid_ab_lower, 0.0, 0.0, 0.0, false);
+        add_point(ctx, geo, 0.5, mid_ab_upper, 0.0, 0.0, 0.0, false);
+        add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 0.0, false);
+    }
+
     ctx.rotate_cell(2);
     add_edge(ctx, geo, false, true, 0.0, 1.0);
 }
 
 /// Case 12: Clockwise spiral A<B<D<C.
 fn case_12_spiral_clockwise(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    let cy = ctx.cy();
     add_inner_corner(ctx, geo, true, false, true, false, true);
     ctx.rotate_cell(2);
+    let edge_floor = ctx.ay().min(ctx.by());
     add_edge(ctx, geo, true, true, 0.0, 0.5);
     ctx.rotate_cell(1);
-    add_outer_corner(ctx, geo, true, true, true, cy);
+    add_outer_corner(ctx, geo, true, true, true, edge_floor);
 }
 
 /// Case 13: Counter-clockwise spiral A<C<D<B.
 fn case_13_spiral_counter(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    let by = ctx.by();
     add_inner_corner(ctx, geo, true, false, true, true, false);
     ctx.rotate_cell(1);
+    let edge_floor = ctx.ay().min(ctx.by());
     add_edge(ctx, geo, true, true, 0.5, 1.0);
-    add_outer_corner(ctx, geo, true, true, true, by);
+    add_outer_corner(ctx, geo, true, true, true, edge_floor);
 }
 
 /// Case 14: Staircase A<B<C<D.
 fn case_14_staircase_abcd(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    let by = ctx.by();
     add_inner_corner(ctx, geo, true, false, true, false, true);
     ctx.rotate_cell(2);
+    let edge_floor = ctx.ay().min(ctx.by());
     add_edge(ctx, geo, true, true, 0.5, 1.0);
-    add_outer_corner(ctx, geo, true, true, true, by);
+    add_outer_corner(ctx, geo, true, true, true, edge_floor);
 }
 
 /// Case 15: Staircase A<C<B<D.
 fn case_15_staircase_acbd(ctx: &mut CellContext, geo: &mut CellGeometry) {
-    let cy = ctx.cy();
     add_inner_corner(ctx, geo, true, false, true, true, false);
     ctx.rotate_cell(1);
+    let edge_floor = ctx.ay().min(ctx.by());
     add_edge(ctx, geo, true, true, 0.0, 0.5);
     ctx.rotate_cell(1);
-    add_outer_corner(ctx, geo, true, true, true, cy);
+    add_outer_corner(ctx, geo, true, true, true, edge_floor);
 }
 
 /// Case 17: A highest, D lowest, all corners different.
 fn case_17_outer_diagonal_inner(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let (by, cy) = (ctx.by(), ctx.cy());
     add_outer_corner(ctx, geo, false, true, false, -1.0);
-    add_diagonal_floor(ctx, geo, by, cy, true, true);
+    add_diagonal_floor(ctx, geo, by, cy, true, true, None, None);
     ctx.rotate_cell(2);
     add_inner_corner(ctx, geo, true, false, false, false, false);
 }
@@ -443,7 +466,7 @@ fn case_17_outer_diagonal_inner(ctx: &mut CellContext, geo: &mut CellGeometry) {
 fn case_18_outer_diagonal_outer(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let (by, cy) = (ctx.by(), ctx.cy());
     add_outer_corner(ctx, geo, false, true, false, -1.0);
-    add_diagonal_floor(ctx, geo, by, cy, false, false);
+    add_diagonal_floor(ctx, geo, by, cy, false, false, None, None);
     ctx.rotate_cell(2);
     add_outer_corner(ctx, geo, true, false, false, -1.0);
 }
@@ -477,34 +500,45 @@ fn case_22_single_wall_ac(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let by = ctx.by();
     let cy = ctx.cy();
     let dy = ctx.dy();
-    let upper_edge_height = (by + dy) / 2.0;
-    let lower_edge_height = (by + dy) / 2.0;
 
-    // Upper floor
+    // Profile heights for BD midpoint (merged boundary)
+    let mid_bd = ctx.bd_height(0.5, true);
+    let mid_ab = ctx.ab_height(0.5, true);
+    let mid_cd = ctx.cd_height(0.5, true);
+
+    // Upper floor — split AB boundary at midpoint
     ctx.start_floor();
     add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, upper_edge_height, 0.5, 0.0, 0.0, false);
-
-    add_point(ctx, geo, 1.0, upper_edge_height, 0.5, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
     add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 1.0, false);
-    add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
+
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 0.0, 0.0, false);
+
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 1.0, false);
 
     // Wall
     ctx.start_wall();
     add_point(ctx, geo, 0.0, cy, 0.5, 0.0, 0.0, false);
     add_point(ctx, geo, 0.0, ay, 0.5, 0.0, 1.0, false);
-    add_point(ctx, geo, 1.0, lower_edge_height, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 1.0, 0.0, false);
 
-    // Lower floor
+    // Lower floor — split CD boundary at midpoint
     ctx.start_floor();
     add_point(ctx, geo, 0.0, cy, 0.5, 1.0, 0.0, false);
-    add_point(ctx, geo, 1.0, lower_edge_height, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
+
+    add_point(ctx, geo, 0.0, cy, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
     add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
 
     add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, lower_edge_height, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, mid_bd, 0.5, 0.0, 0.0, false);
 }
 
 /// Case 23: All edges connected except BD. B higher than D.
@@ -513,34 +547,45 @@ fn case_23_single_wall_bd(ctx: &mut CellContext, geo: &mut CellGeometry) {
     let by = ctx.by();
     let cy = ctx.cy();
     let dy = ctx.dy();
-    let upper_edge_height = (ay + cy) / 2.0;
-    let lower_edge_height = (ay + cy) / 2.0;
 
-    // Upper floor
+    // Profile heights for AC midpoint (merged boundary)
+    let mid_ac = ctx.ac_height(0.5, true);
+    let mid_ab = ctx.ab_height(0.5, true);
+    let mid_cd = ctx.cd_height(0.5, true);
+
+    // Upper floor — split AB boundary at midpoint
     ctx.start_floor();
     add_point(ctx, geo, 0.0, ay, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, upper_edge_height, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
 
-    add_point(ctx, geo, 1.0, by, 0.5, 0.0, 1.0, false);
-    add_point(ctx, geo, 0.0, upper_edge_height, 0.5, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
     add_point(ctx, geo, 1.0, by, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, by, 0.5, 0.0, 1.0, false);
+
+    add_point(ctx, geo, 0.5, mid_ab, 0.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 1.0, by, 0.5, 0.0, 1.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 1.0, false);
 
     // Wall
     ctx.start_wall();
     add_point(ctx, geo, 1.0, by, 0.5, 1.0, 1.0, false);
     add_point(ctx, geo, 1.0, dy, 0.5, 1.0, 0.0, false);
-    add_point(ctx, geo, 0.0, upper_edge_height, 0.5, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 0.0, 0.0, false);
 
-    // Lower floor
+    // Lower floor — split CD boundary at midpoint
     ctx.start_floor();
-    add_point(ctx, geo, 0.0, lower_edge_height, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 1.0, 0.0, false);
     add_point(ctx, geo, 1.0, dy, 0.5, 1.0, 0.0, false);
-    add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
 
+    add_point(ctx, geo, 0.0, mid_ac, 0.5, 1.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
     add_point(ctx, geo, 0.0, cy, 1.0, 0.0, 0.0, false);
-    add_point(ctx, geo, 0.0, lower_edge_height, 0.5, 0.0, 0.0, false);
+
+    add_point(ctx, geo, 1.0, dy, 0.5, 0.0, 0.0, false);
     add_point(ctx, geo, 1.0, dy, 1.0, 0.0, 0.0, false);
+    add_point(ctx, geo, 0.5, mid_cd, 1.0, 0.0, 0.0, false);
 }
 
 fn validate_geometry(ctx: &CellContext, geo: &CellGeometry, initial_vert_count: usize) {
@@ -579,6 +624,7 @@ mod tests {
         CellContext {
             heights: [0.0; 4],
             edges: [true; 4],
+            profiles: Default::default(),
             rotation: 0,
             cell_coords: Vector2i::new(0, 0),
             dimensions: Vector3i::new(dim_x, 32, dim_z),
@@ -636,23 +682,23 @@ mod tests {
     }
 
     #[test]
-    fn test_full_floor_higher_poly_generates_12_vertices() {
+    fn test_full_floor_higher_poly_generates_24_vertices() {
         let mut ctx = default_context(3, 3);
         ctx.heights = [0.0, 0.0, 0.0, 0.0];
         ctx.higher_poly_floors = true;
         let mut geo = CellGeometry::default();
         add_full_floor(&mut ctx, &mut geo);
-        assert_eq!(geo.verts.len(), 12);
+        assert_eq!(geo.verts.len(), 24); // 8 triangles with midpoint splits
     }
 
     #[test]
-    fn test_full_floor_low_poly_generates_6_vertices() {
+    fn test_full_floor_low_poly_generates_24_vertices() {
         let mut ctx = default_context(3, 3);
         ctx.heights = [0.0, 0.0, 0.0, 0.0];
         ctx.higher_poly_floors = false;
         let mut geo = CellGeometry::default();
         add_full_floor(&mut ctx, &mut geo);
-        assert_eq!(geo.verts.len(), 6);
+        assert_eq!(geo.verts.len(), 24); // same structure, different interior flag
     }
 
     #[test]

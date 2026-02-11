@@ -180,3 +180,79 @@ pub fn texture_index_to_colors(idx: i32) -> (Color, Color) {
     };
     (c0, c1)
 }
+
+// ================================
+// ===== Boundary Profiles ========
+// ================================
+
+/// Describes the canonical vertex layout along a shared cell boundary.
+/// Computed from only the two shared corner heights + merge_threshold,
+/// so both adjacent cells produce identical boundary geometry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoundaryProfile {
+    pub h1: f32,
+    pub h2: f32,
+    pub is_merged: bool,
+}
+
+/// Compute the canonical boundary profile for an edge defined by two corner heights.
+pub fn compute_boundary_profile(h1: f32, h2: f32, merge_threshold: f32) -> BoundaryProfile {
+    let is_merged = (h1 - h2).abs() < merge_threshold;
+    BoundaryProfile { h1, h2, is_merged }
+}
+
+impl BoundaryProfile {
+    /// Get the height at parameter t along this boundary.
+    /// `is_upper`: true = top of wall (max height), false = bottom of wall (min height).
+    /// At t=0 returns h1, at t=1 returns h2.
+    /// At t=0.5 (midpoint): if merged, linearly interpolate; if walled, return upper or lower height.
+    pub fn height_at(&self, t: f32, is_upper: bool) -> f32 {
+        if self.is_merged {
+            // Smooth slope: linear interpolation
+            self.h1 + (self.h2 - self.h1) * t
+        } else if is_upper {
+            self.h1.max(self.h2)
+        } else {
+            self.h1.min(self.h2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod boundary_profile_tests {
+    use super::*;
+
+    #[test]
+    fn test_merged_profile_interpolates() {
+        let p = compute_boundary_profile(5.0, 5.5, 1.3);
+        assert!(p.is_merged);
+        assert_eq!(p.height_at(0.0, true), 5.0);
+        assert_eq!(p.height_at(1.0, true), 5.5);
+        assert_eq!(p.height_at(0.5, true), 5.25);
+    }
+
+    #[test]
+    fn test_walled_profile_returns_extremes() {
+        let p = compute_boundary_profile(3.0, 8.0, 1.3);
+        assert!(!p.is_merged);
+        assert_eq!(p.height_at(0.5, true), 8.0);
+        assert_eq!(p.height_at(0.5, false), 3.0);
+    }
+
+    #[test]
+    fn test_endpoints_always_return_corner_heights() {
+        let p = compute_boundary_profile(3.0, 8.0, 1.3);
+        assert_eq!(p.height_at(0.0, true), 8.0);
+        assert_eq!(p.height_at(0.0, false), 3.0);
+        assert_eq!(p.height_at(1.0, true), 8.0);
+        assert_eq!(p.height_at(1.0, false), 3.0);
+    }
+
+    #[test]
+    fn test_merged_endpoints() {
+        let p = compute_boundary_profile(5.0, 6.0, 1.3);
+        assert!(p.is_merged);
+        assert_eq!(p.height_at(0.0, true), 5.0);
+        assert_eq!(p.height_at(1.0, false), 6.0);
+    }
+}
