@@ -464,24 +464,12 @@ impl INode3D for PixyTerrain {
                             player_pos.z,
                         );
                         if let Some(ref mut mat) = self.terrain_material {
-                            mat.set_shader_parameter(
-                                "cross_section_enabled",
-                                &true.to_variant(),
-                            );
-                            mat.set_shader_parameter(
-                                "clip_origin",
-                                &clip_origin.to_variant(),
-                            );
+                            mat.set_shader_parameter("cross_section_enabled", &true.to_variant());
+                            mat.set_shader_parameter("clip_origin", &clip_origin.to_variant());
                         }
                         if let Some(ref mut mat) = self.grass_material {
-                            mat.set_shader_parameter(
-                                "cross_section_enabled",
-                                &true.to_variant(),
-                            );
-                            mat.set_shader_parameter(
-                                "clip_origin",
-                                &clip_origin.to_variant(),
-                            );
+                            mat.set_shader_parameter("cross_section_enabled", &true.to_variant());
+                            mat.set_shader_parameter("clip_origin", &clip_origin.to_variant());
                         }
                     }
                 }
@@ -560,8 +548,7 @@ impl PixyTerrain {
         // Create a 1×1 white fallback texture for sampler2D defaults.
         // Guarantees the sampler returns 1.0 (white) on all GPU drivers,
         // which the existing threshold math converts to zero wind / full brightness.
-        let mut img =
-            Image::create(1, 1, false, godot::classes::image::Format::RGBA8).unwrap();
+        let mut img = Image::create(1, 1, false, godot::classes::image::Format::RGBA8).unwrap();
         img.set_pixel(0, 0, Color::WHITE);
         let tex = ImageTexture::create_from_image(&img).unwrap();
 

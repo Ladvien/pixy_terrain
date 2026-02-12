@@ -243,7 +243,8 @@ pub fn add_edge(
             add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
         } else {
             // T1: left triangle — split AC boundary only when AC is walled
-            if (a_x).abs() < 1e-5 && (ac_top - ac_bot).abs() > 1e-5 && (ac_top - va_y).abs() > 1e-5 {
+            if (a_x).abs() < 1e-5 && (ac_top - ac_bot).abs() > 1e-5 && (ac_top - va_y).abs() > 1e-5
+            {
                 // A → B → AC_mid_floor (flat half at floor level)
                 add_point(ctx, geometry, a_x, va_y, 0.0, uv_a, 0.0, false);
                 add_point(ctx, geometry, b_x, vb_y, 0.0, uv_b, 0.0, false);
@@ -259,7 +260,10 @@ pub fn add_edge(
             }
 
             // T2: right triangle — split BD boundary only when BD is walled
-            if (b_x - 1.0).abs() < 1e-5 && (bd_top - bd_bot).abs() > 1e-5 && (bd_top - vb_y).abs() > 1e-5 {
+            if (b_x - 1.0).abs() < 1e-5
+                && (bd_top - bd_bot).abs() > 1e-5
+                && (bd_top - vb_y).abs() > 1e-5
+            {
                 // BD_mid_floor → AC_top → B (flat half at floor level)
                 add_point(ctx, geometry, 1.0, vb_y, 0.5, uv_right, 1.0, false);
                 add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);

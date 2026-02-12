@@ -955,7 +955,17 @@ mod tests {
                 let rc_name = identify_case(*r, threshold);
                 eprintln!(
                     "L[{:.0},{:.0},{:.0},{:.0}] R[{:.0},{:.0},{:.0},{:.0}] {} | {}: {} open edges",
-                    l[0], l[1], l[2], l[3], r[0], r[1], r[2], r[3], lc_name, rc_name, edges.len()
+                    l[0],
+                    l[1],
+                    l[2],
+                    l[3],
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[3],
+                    lc_name,
+                    rc_name,
+                    edges.len()
                 );
                 for (a, b) in edges.iter().take(4) {
                     eprintln!(
@@ -1073,7 +1083,17 @@ mod tests {
                 let bc_name = identify_case(*b, threshold);
                 eprintln!(
                     "T[{:.0},{:.0},{:.0},{:.0}] B[{:.0},{:.0},{:.0},{:.0}] {} | {}: {} open edges",
-                    t[0], t[1], t[2], t[3], b[0], b[1], b[2], b[3], tc_name, bc_name, edges.len()
+                    t[0],
+                    t[1],
+                    t[2],
+                    t[3],
+                    b[0],
+                    b[1],
+                    b[2],
+                    b[3],
+                    tc_name,
+                    bc_name,
+                    edges.len()
                 );
                 for (a, b) in edges.iter().take(4) {
                     eprintln!(

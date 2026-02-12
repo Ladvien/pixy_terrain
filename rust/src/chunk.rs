@@ -816,9 +816,7 @@ impl PixyTerrainChunk {
                     if let Some(shape_node) = body_children.get(j) {
                         if let Ok(shape_node) = shape_node.try_cast::<CollisionShape3D>() {
                             if let Some(shape) = shape_node.get_shape() {
-                                if let Ok(mut concave) =
-                                    shape.try_cast::<ConcavePolygonShape3D>()
-                                {
+                                if let Ok(mut concave) = shape.try_cast::<ConcavePolygonShape3D>() {
                                     concave.set_backface_collision_enabled(true);
                                 }
                             }
