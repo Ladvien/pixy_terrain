@@ -9,6 +9,9 @@ mod quick_paint;
 mod terrain;
 mod texture_preset;
 
+#[cfg(test)]
+mod shader_validation;
+
 struct PixyTerrainExtension;
 
 #[gdextension]

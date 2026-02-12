@@ -10,7 +10,7 @@
 // Vertex attribute pipeline (set by replay_geometry() in chunk.rs):
 //   COLOR   → ground texture pair 0 (dominant RGBA channel = texture group)
 //   CUSTOM0 → ground texture pair 1 (dominant RGBA channel = slot within group)
-//   CUSTOM1 → grass mask (R=mask, G=ridge flag)
+//   CUSTOM1 → grass mask (R=mask, G=ridge flag, B=floor flag)
 //   CUSTOM2 → material blend (R=packed mat IDs, G=mat_c, B=weight_a, A=weight_b)
 //   UV      → per-cell texture coordinates (0-1)
 //   UV2     → world-space position (floor) or world-offset (wall)
@@ -117,7 +117,7 @@ group_uniforms;
 // --- Varyings: vertex → fragment data pipeline ---
 // Standard (GPU-interpolated across triangle for smooth gradients):
 varying vec3 vertex_normal;   // Surface normal
-varying vec4 custom1;         // CUSTOM1 passthrough (R=grass mask, G=ridge flag)
+varying vec4 custom1;         // CUSTOM1 passthrough (R=grass mask, G=ridge flag, B=floor flag)
 varying vec3 world_pos;       // World-space position (for noise-based blend variation)
 varying vec4 vc_color_0;      // COLOR passthrough (texture group selection)
 varying vec4 vc_color_1;      // CUSTOM0 passthrough (texture slot selection)
@@ -396,12 +396,14 @@ void vertex() {
 	use_vertex_colors = CUSTOM2.a >= VERTEX_COLOR_FLAG ? 1.0 : 0.0;
 
 	// Z-fighting fix: push wall geometry slightly further from camera in clip space.
+	// Godot 4 Forward+ uses reverse-Z (near=1.0, far=0.0), so subtracting
+	// from clip_pos.z decreases z_ndc, moving walls farther from camera.
 	// Resolves depth buffer competition between wall backfaces (cull_disabled)
 	// and coplanar floor surfaces at cliff edges.
 	vec4 clip_pos = PROJECTION_MATRIX * MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
-	float normal_up = dot(NORMAL, vec3(0.0, 1.0, 0.0));
-	if (normal_up <= wall_threshold) {
-		clip_pos.z += wall_depth_bias * clip_pos.w;
+	float is_floor_flag = CUSTOM1.b;
+	if (is_floor_flag < 0.5) {
+		clip_pos.z -= wall_depth_bias * clip_pos.w;
 	}
 	POSITION = clip_pos;
 }
@@ -427,9 +429,10 @@ void fragment() {
 	vec2 tiling_factor_wall = vec2(1.0 / float(chunk_size.x), 1.0 / float(chunk_size.y));
 
 	// Floor vs wall classification:
-	// Floor = normal points up (dot > threshold) AND not a ridge vertex
+	// Authoritative floor flag from Rust (CUSTOM1.b: 1.0=floor, 0.0=wall)
 	float is_ridge = custom1.g;
-	bool is_floor = dot(vertex_normal, vec3(0.0, 1.0, 0.0)) > wall_threshold && is_ridge < RIDGE_THRESHOLD;
+	float is_floor_flag = custom1.b;
+	bool is_floor = is_floor_flag > 0.5 && is_ridge < RIDGE_THRESHOLD;
 
 	if (is_floor) {
 		// Floor UV from world-space position (UV2), scaled to tile once per chunk

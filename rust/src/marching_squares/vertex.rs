@@ -275,6 +275,7 @@ pub fn add_point(
     // Grass mask
     let mut grass_mask = ctx.grass_mask_map[(cc.y * dim_x + cc.x) as usize];
     grass_mask.g = if is_ridge { 1.0 } else { 0.0 };
+    grass_mask.b = if ctx.floor_mode { 1.0 } else { 0.0 };
 
     // Material blend
     let mut material_blend =
