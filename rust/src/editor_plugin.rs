@@ -2198,8 +2198,8 @@ impl PixyTerrainPlugin {
                     return;
                 };
 
-                // ── Wind ──
-                self.add_group_separator("Wind");
+                // ── Grass Animation ──
+                self.add_group_separator("Grass Animation");
                 self.add_slider_attribute(
                     "grass_framerate",
                     "Framerate",

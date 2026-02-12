@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use godot::classes::{
-    rendering_server::GlobalShaderParameterType, Engine, Image, Node3D, QuadMesh, RenderingServer,
-    ResourceLoader, Shader, ShaderMaterial, Texture2D,
+    rendering_server::GlobalShaderParameterType, Engine, Image, ImageTexture, Node3D, QuadMesh,
+    RenderingServer, ResourceLoader, Shader, ShaderMaterial, Texture2D,
 };
 use godot::prelude::*;
 
@@ -301,18 +301,6 @@ pub struct PixyTerrain {
     pub tex6_has_grass: bool,
 
     #[export]
-    #[init(val = Vector2::new(1.0, 1.0))]
-    pub wind_direction: Vector2,
-
-    #[export]
-    #[init(val = 0.02)]
-    pub wind_scale: f32,
-
-    #[export]
-    #[init(val = 0.14)]
-    pub wind_speed: f32,
-
-    #[export]
     #[init(val = 5)]
     pub default_wall_texture: i32,
 
@@ -513,11 +501,19 @@ impl PixyTerrain {
     fn ensure_environment_globals() {
         let mut rs = RenderingServer::singleton();
 
+        // Create a 1×1 white fallback texture for sampler2D defaults.
+        // Guarantees the sampler returns 1.0 (white) on all GPU drivers,
+        // which the existing threshold math converts to zero wind / full brightness.
+        let mut img =
+            Image::create(1, 1, false, godot::classes::image::Format::RGBA8).unwrap();
+        img.set_pixel(0, 0, Color::WHITE);
+        let tex = ImageTexture::create_from_image(&img).unwrap();
+
         // Cloud system defaults (zero-effect: no shadow visible)
         rs.global_shader_parameter_add(
             "cloud_noise",
             GlobalShaderParameterType::SAMPLER2D,
-            &GString::new().to_variant(),
+            &tex.to_variant(),
         );
         rs.global_shader_parameter_add(
             "cloud_scale",
@@ -569,7 +565,7 @@ impl PixyTerrain {
         rs.global_shader_parameter_add(
             "wind_noise",
             GlobalShaderParameterType::SAMPLER2D,
-            &GString::new().to_variant(),
+            &tex.to_variant(),
         );
         rs.global_shader_parameter_add(
             "wind_noise_threshold",
