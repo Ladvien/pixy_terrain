@@ -370,6 +370,17 @@ pub struct PixyTerrain {
     pub character_group_name: GString,
 
     // ═══════════════════════════════════════════
+    // Cross-Section (Y-clip)
+    // ═══════════════════════════════════════════
+    #[export]
+    #[init(val = false)]
+    pub cross_section_enabled: bool,
+
+    #[export]
+    #[init(val = 3.0)]
+    pub cross_section_y_offset: f32,
+
+    // ═══════════════════════════════════════════
     // Grass Toon Lighting (Dylearn-based)
     // ═══════════════════════════════════════════
     #[export]
@@ -438,6 +449,44 @@ impl INode3D for PixyTerrain {
                 }
             }
         }
+
+        // Cross-section: clip terrain above the player from the camera's perspective
+        if self.cross_section_enabled {
+            if let Some(mut tree) = self.base().get_tree() {
+                let group_name = StringName::from(&self.character_group_name);
+                let nodes = tree.get_nodes_in_group(&group_name);
+                if let Some(node) = nodes.get(0) {
+                    if let Ok(node3d) = node.try_cast::<Node3D>() {
+                        let player_pos = node3d.get_global_position();
+                        let clip_origin = Vector3::new(
+                            player_pos.x,
+                            player_pos.y + self.cross_section_y_offset,
+                            player_pos.z,
+                        );
+                        if let Some(ref mut mat) = self.terrain_material {
+                            mat.set_shader_parameter(
+                                "cross_section_enabled",
+                                &true.to_variant(),
+                            );
+                            mat.set_shader_parameter(
+                                "clip_origin",
+                                &clip_origin.to_variant(),
+                            );
+                        }
+                        if let Some(ref mut mat) = self.grass_material {
+                            mat.set_shader_parameter(
+                                "cross_section_enabled",
+                                &true.to_variant(),
+                            );
+                            mat.set_shader_parameter(
+                                "clip_origin",
+                                &clip_origin.to_variant(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -494,12 +543,19 @@ impl PixyTerrain {
 
     /// Register fallback global shader parameters for wind/cloud systems.
     ///
-    /// Uses `global_shader_parameter_add()` which is silently ignored when the
-    /// parameter already exists (e.g. from project.godot or pixy_environment).
-    /// Zero-effect defaults ensure grass renders without wind/cloud artifacts
-    /// when pixy_environment is not installed.
+    /// Checks whether globals are already registered (e.g. from project.godot
+    /// `[shader_globals]`) and skips registration to avoid duplicate-add errors
+    /// in Godot 4.6+. Zero-effect defaults ensure grass renders without
+    /// wind/cloud artifacts when pixy_environment is not installed.
     fn ensure_environment_globals() {
         let mut rs = RenderingServer::singleton();
+
+        // Skip if globals already registered (e.g. from project.godot [shader_globals])
+        let existing = rs.global_shader_parameter_get_list();
+        if existing.contains(&StringName::from("cloud_noise")) {
+            godot_print!("PixyTerrain: Registered fallback environment globals");
+            return;
+        }
 
         // Create a 1×1 white fallback texture for sampler2D defaults.
         // Guarantees the sampler returns 1.0 (white) on all GPU drivers,
@@ -743,6 +799,12 @@ impl PixyTerrain {
         mat.set_shader_parameter("shadow_color", &shadow_color.to_variant());
         mat.set_shader_parameter("bands", &shadow_bands.to_variant());
         mat.set_shader_parameter("shadow_intensity", &shadow_intensity.to_variant());
+
+        // Cross-section initial state
+        mat.set_shader_parameter(
+            "cross_section_enabled",
+            &self.cross_section_enabled.to_variant(),
+        );
 
         self.is_batch_updating = false;
     }

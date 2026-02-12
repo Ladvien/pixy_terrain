@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use godot::classes::mesh::PrimitiveType;
 use godot::classes::surface_tool::CustomFormat;
 use godot::classes::{
-    ArrayMesh, IMeshInstance3D, MeshInstance3D, Noise, ShaderMaterial, StaticBody3D, SurfaceTool,
+    CollisionShape3D, ConcavePolygonShape3D, IMeshInstance3D, MeshInstance3D, Noise,
+    ShaderMaterial, StaticBody3D, SurfaceTool,
 };
 use godot::prelude::*;
 
@@ -670,7 +671,7 @@ impl PixyTerrainChunk {
             }
 
             // Remove any existing StaticBody3D children (cleanup for re-generation)
-            let children = self.base().get_children();
+            let children = self.base().get_children_ex().include_internal(true).done();
             for i in (0..children.len()).rev() {
                 if let Some(child) = children.get(i) {
                     if child.is_class("StaticBody3D") {
@@ -681,11 +682,9 @@ impl PixyTerrainChunk {
                 }
             }
 
-            // Create trimesh collision from the new mesh
+            // Create collision via Godot's built-in method, then configure it.
             self.base_mut().create_trimesh_collision();
-
-            // Set collision layer 17 on the new StaticBody3D
-            self.configure_collision_layer();
+            self.configure_collision();
         }
 
         // Regenerate grass after mesh geometry is built
@@ -796,19 +795,35 @@ impl PixyTerrainChunk {
         }
     }
 
-    fn configure_collision_layer(&mut self) {
-        let children = self.base().get_children();
+    fn configure_collision(&mut self) {
+        let children = self.base().get_children_ex().include_internal(true).done();
         for i in 0..children.len() {
             let Some(child) = children.get(i) else {
                 continue;
             };
             if let Ok(mut body) = child.try_cast::<StaticBody3D>() {
-                body.set_visible(false); // Hidden by default; editor toggle controls visibility
+                body.set_visible(false);
                 body.set_collision_layer(1 << 16);
 
                 let extra = self.terrain_config.extra_collision_layer;
                 if (1..=32).contains(&extra) {
                     body.set_collision_layer_value(extra, true);
+                }
+
+                // Enable backface collision on the ConcavePolygonShape3D
+                let body_children = body.get_children_ex().include_internal(true).done();
+                for j in 0..body_children.len() {
+                    if let Some(shape_node) = body_children.get(j) {
+                        if let Ok(shape_node) = shape_node.try_cast::<CollisionShape3D>() {
+                            if let Some(shape) = shape_node.get_shape() {
+                                if let Ok(mut concave) =
+                                    shape.try_cast::<ConcavePolygonShape3D>()
+                                {
+                                    concave.set_backface_collision_enabled(true);
+                                }
+                            }
+                        }
+                    }
                 }
                 return;
             }
