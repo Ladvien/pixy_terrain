@@ -143,7 +143,7 @@ pub fn add_full_floor(ctx: &mut CellContext, geometry: &mut CellGeometry) {
     ctx.start_floor();
     let (ay, by, cy, dy) = ctx.corner_heights();
     let ey = (ay + by + cy + dy) / 4.0;
-    let interior = ctx.higher_poly_floors;
+    let interior = ctx.config.higher_poly_floors;
 
     // Boundary midpoints (for merged boundaries, is_upper doesn't matter)
     let mid_ab = ctx.ab_height(0.5, true);
@@ -249,8 +249,7 @@ pub fn add_edge(
             add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
         } else {
             // T1: left triangle — split AC boundary only when AC is walled
-            if (a_x).abs() < 1e-5 && is_walled(ac_top, ac_bot) && is_walled(ac_top, va_y)
-            {
+            if (a_x).abs() < 1e-5 && is_walled(ac_top, ac_bot) && is_walled(ac_top, va_y) {
                 // A → B → AC_mid_floor (flat half at floor level)
                 add_point(ctx, geometry, a_x, va_y, 0.0, uv_a, 0.0, false);
                 add_point(ctx, geometry, b_x, vb_y, 0.0, uv_b, 0.0, false);
@@ -266,10 +265,7 @@ pub fn add_edge(
             }
 
             // T2: right triangle — split BD boundary only when BD is walled
-            if (b_x - 1.0).abs() < 1e-5
-                && is_walled(bd_top, bd_bot)
-                && is_walled(bd_top, vb_y)
-            {
+            if (b_x - 1.0).abs() < 1e-5 && is_walled(bd_top, bd_bot) && is_walled(bd_top, vb_y) {
                 // BD_mid_floor → AC_top → B (flat half at floor level)
                 add_point(ctx, geometry, 1.0, vb_y, 0.5, uv_right, 1.0, false);
                 add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);

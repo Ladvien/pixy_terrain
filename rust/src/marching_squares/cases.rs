@@ -16,17 +16,17 @@ pub fn generate_cell(ctx: &mut CellContext, geo: &mut CellGeometry) {
 
     // Edge connectivitys: true = slop (merged), false = wall (separated)
     ctx.edges = [
-        (ay - by).abs() < ctx.merge_threshold, // AB (top)
-        (by - dy).abs() < ctx.merge_threshold, // BD (right)
-        (cy - dy).abs() < ctx.merge_threshold, // CD (bottom)
-        (ay - cy).abs() < ctx.merge_threshold, // AC (left)
+        (ay - by).abs() < ctx.config.merge_threshold, // AB (top)
+        (by - dy).abs() < ctx.config.merge_threshold, // BD (right)
+        (cy - dy).abs() < ctx.config.merge_threshold, // CD (bottom)
+        (ay - cy).abs() < ctx.config.merge_threshold, // AC (left)
     ];
 
     // Pre-compute cell color state
     ctx.color_state.min_height = ay.min(by).min(cy).min(dy);
     ctx.color_state.max_height = ay.max(by).max(cy).max(dy);
     ctx.color_state.is_boundary =
-        (ctx.color_state.max_height - ctx.color_state.min_height) > ctx.merge_threshold;
+        (ctx.color_state.max_height - ctx.color_state.min_height) > ctx.config.merge_threshold;
 
     ctx.compute_profiles();
 
@@ -620,47 +620,7 @@ mod tests {
     use super::*;
 
     fn default_context(dim_x: i32, dim_z: i32) -> CellContext {
-        let total = (dim_x * dim_z) as usize;
-        CellContext {
-            heights: [0.0; 4],
-            edges: [true; 4],
-            profiles: Default::default(),
-            rotation: 0,
-            cell_coords: Vector2i::new(0, 0),
-            dimensions: Vector3i::new(dim_x, 32, dim_z),
-            cell_size: Vector2::new(2.0, 2.0),
-            merge_threshold: 1.3,
-            higher_poly_floors: true,
-            color_map_0: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            color_map_1: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            wall_color_map_0: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            wall_color_map_1: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            grass_mask_map: vec![Color::from_rgba(1.0, 1.0, 1.0, 1.0); total],
-            color_state: CellColorState {
-                min_height: 0.0,
-                max_height: 0.0,
-                is_boundary: false,
-                floor_lower_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                floor_upper_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                floor_lower_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                floor_upper_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                wall_lower_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                wall_upper_color_0: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                wall_lower_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                wall_upper_color_1: Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-                material_a: TextureIndex(0),
-                material_b: TextureIndex(0),
-                material_c: TextureIndex(0),
-            },
-            blend_mode: BlendMode::Interpolated,
-            use_ridge_texture: false,
-            ridge_threshold: 1.0,
-            is_new_chunk: false,
-            floor_mode: true,
-            lower_threshold: 0.3,
-            upper_threshold: 0.7,
-            chunk_position: Vector3::ZERO,
-        }
+        CellContext::test_default(dim_x, dim_z)
     }
 
     #[test]
@@ -685,7 +645,7 @@ mod tests {
     fn test_full_floor_higher_poly_generates_24_vertices() {
         let mut ctx = default_context(3, 3);
         ctx.heights = [0.0, 0.0, 0.0, 0.0];
-        ctx.higher_poly_floors = true;
+        ctx.config.higher_poly_floors = true;
         let mut geo = CellGeometry::default();
         add_full_floor(&mut ctx, &mut geo);
         assert_eq!(geo.verts.len(), 24); // 8 triangles with midpoint splits
@@ -695,7 +655,7 @@ mod tests {
     fn test_full_floor_low_poly_generates_24_vertices() {
         let mut ctx = default_context(3, 3);
         ctx.heights = [0.0, 0.0, 0.0, 0.0];
-        ctx.higher_poly_floors = false;
+        ctx.config.higher_poly_floors = false;
         let mut geo = CellGeometry::default();
         add_full_floor(&mut ctx, &mut geo);
         assert_eq!(geo.verts.len(), 24); // same structure, different interior flag

@@ -615,12 +615,8 @@ impl PixyTerrain {
         let blend_sharpness = self.blend_sharpness;
         let blend_noise_scale = self.blend_noise_scale;
         let blend_noise_strength = self.blend_noise_strength;
-        let ground_colors: Vec<Color> = (0..6)
-            .map(|i| self.ground_colors[i])
-            .collect();
-        let scales: Vec<f32> = (0..15)
-            .map(|i| self.texture_scales[i])
-            .collect();
+        let ground_colors: Vec<Color> = (0..6).map(|i| self.ground_colors[i]).collect();
+        let scales: Vec<f32> = (0..15).map(|i| self.texture_scales[i]).collect();
         let textures = self.get_texture_slots();
         let shadow_color = self.shadow_color;
         let shadow_bands = self.shadow_bands;
@@ -645,22 +641,9 @@ impl PixyTerrain {
             "cross_section_enabled" => cross_section_enabled,
         ]);
 
-        // Ground colors
-        for (i, name) in GROUND_ALBEDO_NAMES.iter().enumerate() {
-            mat.set_shader_parameter(*name, &ground_colors[i].to_variant());
-        }
-
-        // Texture scales
-        for (i, name) in TEXTURE_SCALE_NAMES.iter().enumerate() {
-            mat.set_shader_parameter(*name, &scales[i].to_variant());
-        }
-
-        // Textures (16 slots)
-        for (i, name) in TEXTURE_UNIFORM_NAMES.iter().enumerate() {
-            if let Some(ref tex) = textures[i] {
-                mat.set_shader_parameter(*name, &tex.to_variant());
-            }
-        }
+        sync_shader_array!(mat, GROUND_ALBEDO_NAMES, ground_colors);
+        sync_shader_array!(mat, TEXTURE_SCALE_NAMES, scales);
+        sync_shader_array!(mat, TEXTURE_UNIFORM_NAMES, textures, optional);
 
         self.is_batch_updating = false;
     }
@@ -682,15 +665,13 @@ impl PixyTerrain {
 
         self.ensure_array_sizes();
 
-        let sprites: Vec<Option<Gd<Texture2D>>> =
-            (0..6).map(|i| self.get_grass_sprite_or_default(i)).collect();
-
-        let ground_colors: Vec<Color> = (0..6)
-            .map(|i| self.ground_colors[i])
+        let sprites: Vec<Option<Gd<Texture2D>>> = (0..6)
+            .map(|i| self.get_grass_sprite_or_default(i))
             .collect();
-        let use_base_color: [bool; 6] = std::array::from_fn(|i| {
-            get_variant_texture(&self.textures, i).is_none()
-        });
+
+        let ground_colors: Vec<Color> = (0..6).map(|i| self.ground_colors[i]).collect();
+        let use_base_color: [bool; 6] =
+            std::array::from_fn(|i| get_variant_texture(&self.textures, i).is_none());
         let tex_has_grass = self.tex_has_grass_array();
 
         let shadow_color = self.shadow_color;
@@ -720,27 +701,10 @@ impl PixyTerrain {
             "wall_threshold"    => wall_threshold,
         ]);
 
-        // Grass textures
-        for (i, name) in GRASS_TEXTURE_NAMES.iter().enumerate() {
-            if let Some(ref tex) = sprites[i] {
-                mat.set_shader_parameter(*name, &tex.to_variant());
-            }
-        }
-
-        // Ground colors
-        for (i, name) in GRASS_COLOR_NAMES.iter().enumerate() {
-            mat.set_shader_parameter(*name, &ground_colors[i].to_variant());
-        }
-
-        // use_base_color flags
-        for (i, name) in USE_BASE_COLOR_NAMES.iter().enumerate() {
-            mat.set_shader_parameter(*name, &use_base_color[i].to_variant());
-        }
-
-        // use_grass_tex flags
-        for (i, name) in USE_GRASS_TEX_NAMES.iter().enumerate() {
-            mat.set_shader_parameter(*name, &tex_has_grass[i].to_variant());
-        }
+        sync_shader_array!(mat, GRASS_TEXTURE_NAMES, sprites, optional);
+        sync_shader_array!(mat, GRASS_COLOR_NAMES, ground_colors);
+        sync_shader_array!(mat, USE_BASE_COLOR_NAMES, use_base_color);
+        sync_shader_array!(mat, USE_GRASS_TEX_NAMES, tex_has_grass);
 
         // Dylearn animation + toon lighting scalars
         sync_shader_params!(mat, [
@@ -840,13 +804,11 @@ impl PixyTerrain {
         SharedTerrainParams {
             dimensions: self.dimensions,
             cell_size: self.cell_size,
-            merge_mode: MergeMode::from_index(self.merge_mode),
             blend_mode: if self.blend_mode == 0 {
                 BlendMode::Interpolated
             } else {
                 BlendMode::Direct
             },
-            wall_threshold: self.wall_threshold,
             ridge_threshold: self.ridge_threshold,
             ledge_threshold: self.ledge_threshold,
             use_ridge_texture: self.use_ridge_texture,
@@ -865,7 +827,6 @@ impl PixyTerrain {
             shared: self.make_shared_params(),
             subdivisions: self.grass_subdivisions,
             grass_size: self.grass_size,
-            grass_sprites: std::array::from_fn(|i| self.get_grass_sprite_or_default(i)),
             ground_colors: std::array::from_fn(|i| self.ground_colors[i]),
             tex_has_grass: self.tex_has_grass_array(),
             grass_mesh: self.grass_mesh.clone(),

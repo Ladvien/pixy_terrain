@@ -7,9 +7,7 @@
 //   https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo
 use std::collections::HashMap;
 
-use godot::classes::{
-    Image, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ShaderMaterial, Texture2D,
-};
+use godot::classes::{Image, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ShaderMaterial};
 use godot::obj::InstanceId;
 use godot::prelude::*;
 
@@ -23,7 +21,6 @@ pub struct GrassConfig {
     pub shared: SharedTerrainParams,
     pub subdivisions: i32,
     pub grass_size: Vector2,
-    pub grass_sprites: [Option<Gd<Texture2D>>; 6],
     pub ground_colors: [Color; 6],
     pub tex_has_grass: [bool; 5],
     pub grass_mesh: Option<Gd<Mesh>>,
@@ -39,7 +36,6 @@ impl Default for GrassConfig {
             shared: SharedTerrainParams::default(),
             subdivisions: 3,
             grass_size: Vector2::new(1.0, 1.0),
-            grass_sprites: [None, None, None, None, None, None],
             ground_colors: [Color::from_rgba(0.4, 0.5, 0.3, 1.0); 6],
             tex_has_grass: [true; 5],
             grass_mesh: None,
@@ -292,8 +288,8 @@ impl PixyGrassPlanter {
 
                 // Ledge/ridge avoidance via interpolated UV
                 let uv = geo.uvs[tri] * u + geo.uvs[tri + 1] * v + geo.uvs[tri + 2] * w;
-                let on_ledge =
-                    uv.x > 1.0 - config.shared.ledge_threshold || uv.y > 1.0 - config.shared.ridge_threshold;
+                let on_ledge = uv.x > 1.0 - config.shared.ledge_threshold
+                    || uv.y > 1.0 - config.shared.ridge_threshold;
 
                 // Interpolate vertex colors → dominant channel
                 let c0_interp = get_dominant_color(lerp_color3(

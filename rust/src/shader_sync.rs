@@ -99,4 +99,23 @@ macro_rules! sync_shader_params {
     };
 }
 
+/// Sync an array of shader parameters from parallel name/value slices.
+macro_rules! sync_shader_array {
+    // Required values: set every element
+    ($mat:expr, $names:expr, $values:expr) => {
+        for (i, name) in $names.iter().enumerate() {
+            $mat.set_shader_parameter(*name, &($values[i]).to_variant());
+        }
+    };
+    // Optional values: only set elements that are Some
+    ($mat:expr, $names:expr, $values:expr, optional) => {
+        for (i, name) in $names.iter().enumerate() {
+            if let Some(ref val) = $values[i] {
+                $mat.set_shader_parameter(*name, &val.to_variant());
+            }
+        }
+    };
+}
+
+pub(crate) use sync_shader_array;
 pub(crate) use sync_shader_params;

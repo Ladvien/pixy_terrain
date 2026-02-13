@@ -11,8 +11,8 @@ use godot::classes::{
     Button, ButtonGroup, Camera3D, CenterContainer, CheckBox, ColorPickerButton, EditorPlugin,
     EditorResourcePicker, HBoxContainer, HSeparator, HSlider, IEditorPlugin, Input, InputEvent,
     InputEventKey, InputEventMouseButton, InputEventMouseMotion, Label, MarginContainer,
-    OptionButton, PhysicsRayQueryParameters3D, ScrollContainer, StaticBody3D,
-    VBoxContainer, VSeparator,
+    OptionButton, PhysicsRayQueryParameters3D, ScrollContainer, StaticBody3D, VBoxContainer,
+    VSeparator,
 };
 use godot::prelude::*;
 
@@ -206,7 +206,6 @@ pub struct PixyTerrainPlugin {
     // Chunk management state
     #[init(val = None)]
     selected_chunk_coords: Option<Vector2i>,
-
 }
 
 // =======================================
@@ -2057,7 +2056,7 @@ impl PixyTerrainPlugin {
                                 let new_mask = if self.should_mask_grass {
                                     Color::from_rgba(0.0, 0.0, 0.0, 0.0)
                                 } else {
-                                    Color::from_rgba(1.0, 0.0, 0.0, 0.0)
+                                    crate::marching_squares::DEFAULT_TEXTURE_COLOR
                                 };
                                 do_chunk.set(cell_coords, new_mask);
                                 undo_chunk.set(cell_coords, old);

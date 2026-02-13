@@ -80,11 +80,7 @@ pub struct PixyTerrainChunk {
     // Runtime Terrain Data Maps (working copies)
     // ═══════════════════════════════════════════
     pub height_map: Vec<Vec<f32>>,
-    pub color_map_0: Vec<Color>,
-    pub color_map_1: Vec<Color>,
-    pub wall_color_map_0: Vec<Color>,
-    pub wall_color_map_1: Vec<Color>,
-    pub grass_mask_map: Vec<Color>,
+    pub color_maps: crate::marching_squares::ColorMaps,
     pub needs_update: Vec<Vec<bool>>,
     pub cell_geometry: HashMap<[i32; 2], CellGeometry>,
 
@@ -115,11 +111,7 @@ impl PixyTerrainChunk {
             saved_wall_color_map_1: PackedColorArray::new(),
             saved_grass_mask_map: PackedColorArray::new(),
             height_map: Vec::new(),
-            color_map_0: Vec::new(),
-            color_map_1: Vec::new(),
-            wall_color_map_0: Vec::new(),
-            wall_color_map_1: Vec::new(),
-            grass_mask_map: Vec::new(),
+            color_maps: crate::marching_squares::ColorMaps::default(),
             needs_update: Vec::new(),
             cell_geometry: HashMap::new(),
             higher_poly_floors: true,
@@ -178,7 +170,7 @@ impl PixyTerrainChunk {
         }
 
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.color_map_0[(z * dim_x + x) as usize] = color;
+        self.color_maps.color_0[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
 
@@ -189,7 +181,7 @@ impl PixyTerrainChunk {
         }
 
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.color_map_1[(z * dim_x + x) as usize] = color;
+        self.color_maps.color_1[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
 
@@ -200,7 +192,7 @@ impl PixyTerrainChunk {
         }
 
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.wall_color_map_0[(z * dim_x + x) as usize] = color;
+        self.color_maps.wall_color_0[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
 
@@ -211,7 +203,7 @@ impl PixyTerrainChunk {
         }
 
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.wall_color_map_1[(z * dim_x + x) as usize] = color;
+        self.color_maps.wall_color_1[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
 
@@ -222,7 +214,7 @@ impl PixyTerrainChunk {
         }
 
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.grass_mask_map[(z * dim_x + x) as usize] = masked;
+        self.color_maps.grass_mask[(z * dim_x + x) as usize] = masked;
         self.notify_neighbors(x, z);
     }
 
@@ -232,7 +224,7 @@ impl PixyTerrainChunk {
             return Color::default();
         }
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.color_map_0[(z * dim_x + x) as usize]
+        self.color_maps.color_0[(z * dim_x + x) as usize]
     }
 
     #[func]
@@ -241,7 +233,7 @@ impl PixyTerrainChunk {
             return Color::default();
         }
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.color_map_1[(z * dim_x + x) as usize]
+        self.color_maps.color_1[(z * dim_x + x) as usize]
     }
 
     #[func]
@@ -250,7 +242,7 @@ impl PixyTerrainChunk {
             return Color::default();
         }
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.wall_color_map_0[(z * dim_x + x) as usize]
+        self.color_maps.wall_color_0[(z * dim_x + x) as usize]
     }
 
     #[func]
@@ -259,7 +251,7 @@ impl PixyTerrainChunk {
             return Color::default();
         }
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.wall_color_map_1[(z * dim_x + x) as usize]
+        self.color_maps.wall_color_1[(z * dim_x + x) as usize]
     }
 
     #[func]
@@ -268,7 +260,7 @@ impl PixyTerrainChunk {
             return Color::default();
         }
         let dim_x = self.terrain_config.shared.dimensions.x;
-        self.grass_mask_map[(z * dim_x + x) as usize]
+        self.color_maps.grass_mask[(z * dim_x + x) as usize]
     }
 
     #[func]
@@ -434,11 +426,10 @@ impl PixyTerrainChunk {
             }
         }
 
-        if !self.color_map_0.is_empty() && self.color_map_0.len() != expected_total {
+        if !self.color_maps.color_0.is_empty() && self.color_maps.color_0.len() != expected_total {
             godot_warn!(
-                "sync_to_packed color_map_0 size mismatch: {} vs
-  {}",
-                self.color_map_0.len(),
+                "sync_to_packed color_0 size mismatch: {} vs {}",
+                self.color_maps.color_0.len(),
                 expected_total
             );
             return;
@@ -458,11 +449,11 @@ impl PixyTerrainChunk {
         }
 
         // Color maps
-        self.saved_color_map_0 = Self::vec_color_to_packed(&self.color_map_0);
-        self.saved_color_map_1 = Self::vec_color_to_packed(&self.color_map_1);
-        self.saved_wall_color_map_0 = Self::vec_color_to_packed(&self.wall_color_map_0);
-        self.saved_wall_color_map_1 = Self::vec_color_to_packed(&self.wall_color_map_1);
-        self.saved_grass_mask_map = Self::vec_color_to_packed(&self.grass_mask_map);
+        self.saved_color_map_0 = Self::vec_color_to_packed(&self.color_maps.color_0);
+        self.saved_color_map_1 = Self::vec_color_to_packed(&self.color_maps.color_1);
+        self.saved_wall_color_map_0 = Self::vec_color_to_packed(&self.color_maps.wall_color_0);
+        self.saved_wall_color_map_1 = Self::vec_color_to_packed(&self.color_maps.wall_color_1);
+        self.saved_grass_mask_map = Self::vec_color_to_packed(&self.color_maps.grass_mask);
     }
 
     fn restore_from_packed(&mut self) -> bool {
@@ -484,13 +475,16 @@ impl PixyTerrainChunk {
             self.height_map.push(row);
         }
 
-        self.color_map_0 = Self::packed_to_vec_color(&self.saved_color_map_0, expected_total);
-        self.color_map_1 = Self::packed_to_vec_color(&self.saved_color_map_1, expected_total);
-        self.wall_color_map_0 =
+        self.color_maps.color_0 =
+            Self::packed_to_vec_color(&self.saved_color_map_0, expected_total);
+        self.color_maps.color_1 =
+            Self::packed_to_vec_color(&self.saved_color_map_1, expected_total);
+        self.color_maps.wall_color_0 =
             Self::packed_to_vec_color(&self.saved_wall_color_map_0, expected_total);
-        self.wall_color_map_1 =
+        self.color_maps.wall_color_1 =
             Self::packed_to_vec_color(&self.saved_wall_color_map_1, expected_total);
-        self.grass_mask_map = Self::packed_to_vec_color(&self.saved_grass_mask_map, expected_total);
+        self.color_maps.grass_mask =
+            Self::packed_to_vec_color(&self.saved_grass_mask_map, expected_total);
 
         godot_print!(
             "Restored data from saved arrays for chunk ({}, {})",
@@ -513,7 +507,7 @@ impl PixyTerrainChunk {
         if packed.len() == expected {
             (0..expected).map(|i| packed[i]).collect()
         } else {
-            vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); expected]
+            vec![marching_squares::DEFAULT_TEXTURE_COLOR; expected]
         }
     }
 
@@ -540,14 +534,15 @@ impl PixyTerrainChunk {
             if self.height_map.is_empty() {
                 self.generate_height_map_with_noise(noise);
             }
-            if self.color_map_0.is_empty() || self.color_map_1.is_empty() {
-                self.generate_color_maps();
-            }
-            if self.wall_color_map_0.is_empty() || self.wall_color_map_1.is_empty() {
-                self.generate_wall_color_maps();
-            }
-            if self.grass_mask_map.is_empty() {
-                self.generate_grass_mask_map();
+            if self.color_maps.color_0.is_empty()
+                || self.color_maps.color_1.is_empty()
+                || self.color_maps.wall_color_0.is_empty()
+                || self.color_maps.wall_color_1.is_empty()
+                || self.color_maps.grass_mask.is_empty()
+            {
+                let dim = self.get_terrain_dimensions();
+                let total = (dim.x * dim.z) as usize;
+                self.color_maps = crate::marching_squares::ColorMaps::new_default(total);
             }
         }
 
@@ -606,26 +601,6 @@ impl PixyTerrainChunk {
                 }
             }
         }
-    }
-
-    pub fn generate_color_maps(&mut self) {
-        let dim = self.get_terrain_dimensions();
-        let total = (dim.x * dim.z) as usize;
-        self.color_map_0 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
-        self.color_map_1 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
-    }
-
-    pub fn generate_wall_color_maps(&mut self) {
-        let dim = self.get_terrain_dimensions();
-        let total = (dim.x * dim.z) as usize;
-        self.wall_color_map_0 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
-        self.wall_color_map_1 = vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total];
-    }
-
-    pub fn generate_grass_mask_map(&mut self) {
-        let dim = self.get_terrain_dimensions();
-        let total = (dim.x * dim.z) as usize;
-        self.grass_mask_map = vec![Color::from_rgba(1.0, 1.0, 1.0, 1.0); total];
     }
 
     pub fn regenerate_mesh(&mut self) {
@@ -706,29 +681,19 @@ impl PixyTerrainChunk {
         };
 
         let mut ctx = CellContext {
-            heights: [0.0; 4],
-            edges: [true; 4],
-            profiles: Default::default(),
-            rotation: 0,
-            cell_coords: Vector2i::ZERO,
-            dimensions: dim,
-            cell_size,
-            merge_threshold,
-            higher_poly_floors: self.higher_poly_floors,
-            color_map_0: std::mem::take(&mut self.color_map_0),
-            color_map_1: std::mem::take(&mut self.color_map_1),
-            wall_color_map_0: std::mem::take(&mut self.wall_color_map_0),
-            wall_color_map_1: std::mem::take(&mut self.wall_color_map_1),
-            grass_mask_map: std::mem::take(&mut self.grass_mask_map),
-            color_state: marching_squares::CellColorState::default(),
-            blend_mode,
-            use_ridge_texture,
-            ridge_threshold,
-            is_new_chunk: self.is_new_chunk,
-            floor_mode: true,
-            lower_threshold: 0.3,
-            upper_threshold: 0.7,
-            chunk_position,
+            config: marching_squares::CellConfig {
+                dimensions: dim,
+                cell_size,
+                merge_threshold,
+                higher_poly_floors: self.higher_poly_floors,
+                blend_mode,
+                use_ridge_texture,
+                ridge_threshold,
+                is_new_chunk: self.is_new_chunk,
+                chunk_position,
+            },
+            color_maps: std::mem::take(&mut self.color_maps),
+            ..Default::default()
         };
 
         for z in 0..(dim.z - 1) {
@@ -777,11 +742,7 @@ impl PixyTerrainChunk {
         }
 
         // Move color maps back
-        self.color_map_0 = ctx.color_map_0;
-        self.color_map_1 = ctx.color_map_1;
-        self.wall_color_map_0 = ctx.wall_color_map_0;
-        self.wall_color_map_1 = ctx.wall_color_map_1;
-        self.grass_mask_map = ctx.grass_mask_map;
+        self.color_maps = ctx.color_maps;
 
         if self.is_new_chunk {
             self.is_new_chunk = false;

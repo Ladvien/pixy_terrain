@@ -121,34 +121,7 @@ mod tests {
     use crate::marching_squares::types::*;
 
     fn default_context() -> CellContext {
-        let dim_x = 3;
-        let dim_z = 3;
-        let total = (dim_x * dim_z) as usize;
-        CellContext {
-            heights: [0.0; 4],
-            edges: [true; 4],
-            profiles: Default::default(),
-            rotation: 0,
-            cell_coords: Vector2i::new(0, 0),
-            dimensions: Vector3i::new(dim_x, 32, dim_z),
-            cell_size: Vector2::new(2.0, 2.0),
-            merge_threshold: 1.3,
-            higher_poly_floors: true,
-            color_map_0: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            color_map_1: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            wall_color_map_0: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            wall_color_map_1: vec![Color::from_rgba(1.0, 0.0, 0.0, 0.0); total],
-            grass_mask_map: vec![Color::from_rgba(1.0, 1.0, 1.0, 1.0); total],
-            color_state: CellColorState::default(),
-            blend_mode: BlendMode::Interpolated,
-            use_ridge_texture: false,
-            ridge_threshold: 1.0,
-            is_new_chunk: false,
-            floor_mode: true,
-            lower_threshold: 0.3,
-            upper_threshold: 0.7,
-            chunk_position: Vector3::ZERO,
-        }
+        CellContext::test_default(3, 3)
     }
 
     fn validate_case(heights: [f32; 4], label: &str) {
@@ -157,7 +130,7 @@ mod tests {
         let mut geo = CellGeometry::default();
         generate_cell(&mut ctx, &mut geo);
 
-        let result = validate_cell_watertight(&geo, 0, 0, ctx.cell_size);
+        let result = validate_cell_watertight(&geo, 0, 0, ctx.config.cell_size);
         if !result.is_watertight {
             for (a, b) in &result.open_edges {
                 eprintln!(
@@ -382,7 +355,7 @@ mod tests {
                         let mut geo = CellGeometry::default();
                         generate_cell(&mut ctx, &mut geo);
 
-                        let result = validate_cell_watertight(&geo, 0, 0, ctx.cell_size);
+                        let result = validate_cell_watertight(&geo, 0, 0, ctx.config.cell_size);
                         if !result.is_watertight {
                             failures.push((heights, result.open_edges.clone()));
                         }
@@ -638,10 +611,10 @@ mod tests {
         heights: [f32; 4],
         threshold: f32,
     ) -> Vec<(String, Vector3, Vector3)> {
-        let cell_size = Vector2::new(2.0, 2.0);
+        let _cell_size = Vector2::new(2.0, 2.0);
         let mut ctx = default_context();
         ctx.heights = heights;
-        ctx.merge_threshold = threshold;
+        ctx.config.merge_threshold = threshold;
         let mut geo = CellGeometry::default();
         generate_cell(&mut ctx, &mut geo);
 
@@ -694,7 +667,7 @@ mod tests {
 
             // Build expected canonical edges for this boundary
             let is_merged = (h1 - h2).abs() < threshold;
-            let mid_t = 1.0; // midpoint in world coords = 1.0 (cell_size * 0.5)
+            let _mid_t = 1.0; // midpoint in world coords = 1.0 (cell_size * 0.5)
 
             // World coordinates of corners and midpoint
             let (c1, c2, mid_upper, mid_lower) = if *is_z_const {

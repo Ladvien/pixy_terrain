@@ -4,7 +4,7 @@ use godot::prelude::*;
 // =====================
 
 pub(super) const BLEND_EDGE_SENSITIVITY: f32 = 1.25;
-pub(super) const DEFAULT_TEXTURE_COLOR: Color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
+pub const DEFAULT_TEXTURE_COLOR: Color = Color::from_rgba(1.0, 0.0, 0.0, 0.0);
 pub(super) const DOMINANT_CHANNEL_THRESHOLD: f32 = 0.99;
 pub(super) const MIN_WEIGHT_THRESHOLD: f32 = 0.001;
 pub(super) const MIN_HEIGHT_RANGE: f32 = 0.001;
@@ -53,18 +53,6 @@ impl MergeMode {
             4 => MergeMode::Spherical,
             _ => MergeMode::Polyhedron,
         }
-    }
-    pub fn to_index(self) -> i32 {
-        match self {
-            MergeMode::Cubic => 0,
-            MergeMode::Polyhedron => 1,
-            MergeMode::RoundedPolyhedron => 2,
-            MergeMode::SemiRound => 3,
-            MergeMode::Spherical => 4,
-        }
-    }
-    pub fn is_round(self) -> bool {
-        matches!(self, MergeMode::SemiRound | MergeMode::Spherical)
     }
 }
 
@@ -163,28 +151,37 @@ pub struct CellGeometry {
     pub is_floor: Vec<bool>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ColorMaps {
+    pub color_0: Vec<Color>,
+    pub color_1: Vec<Color>,
+    pub wall_color_0: Vec<Color>,
+    pub wall_color_1: Vec<Color>,
+    pub grass_mask: Vec<Color>,
+}
+
+impl ColorMaps {
+    pub fn new_default(total: usize) -> Self {
+        Self {
+            color_0: vec![DEFAULT_TEXTURE_COLOR; total],
+            color_1: vec![DEFAULT_TEXTURE_COLOR; total],
+            wall_color_0: vec![DEFAULT_TEXTURE_COLOR; total],
+            wall_color_1: vec![DEFAULT_TEXTURE_COLOR; total],
+            grass_mask: vec![Color::from_rgba(1.0, 1.0, 1.0, 1.0); total],
+        }
+    }
+
+    /// Get TextureIndex for a corner by map index
+    pub fn texture_at(&self, idx: usize) -> TextureIndex {
+        TextureIndex::from_color_pair(self.color_0[idx], self.color_1[idx])
+    }
+}
+
 /// Convert a texture index (0-15) to a pair of vertex colors.
 /// Each color has exactly one non-zero RGBA channel.
 /// The terrain shader uses the combination to encode 4x4 = 16 textures.
 pub fn texture_index_to_colors(idx: i32) -> (Color, Color) {
-    let c0_channel = idx / 4;
-    let c1_channel = idx % 4;
-
-    let c0 = match c0_channel {
-        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
-        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
-        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
-        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-    };
-    let c1 = match c1_channel {
-        0 => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-        1 => Color::from_rgba(0.0, 1.0, 0.0, 0.0),
-        2 => Color::from_rgba(0.0, 0.0, 1.0, 0.0),
-        3 => Color::from_rgba(0.0, 0.0, 0.0, 1.0),
-        _ => Color::from_rgba(1.0, 0.0, 0.0, 0.0),
-    };
-    (c0, c1)
+    TextureIndex(idx as u8).to_color_pair()
 }
 
 // ================================

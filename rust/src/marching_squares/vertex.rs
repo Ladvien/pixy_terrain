@@ -56,12 +56,12 @@ fn compute_vertex_color(
     z: f32,
     diagonal_midpoint: bool,
 ) -> Color {
-    if ctx.is_new_chunk {
+    if ctx.config.is_new_chunk {
         return DEFAULT_TEXTURE_COLOR;
     }
 
     if diagonal_midpoint {
-        if ctx.blend_mode == BlendMode::Direct {
+        if ctx.config.blend_mode == BlendMode::Direct {
             return params.source_map[corners[0]];
         }
         let ad_color = lerp_color(
@@ -86,7 +86,7 @@ fn compute_vertex_color(
     }
 
     if ctx.color_state.is_boundary {
-        if ctx.blend_mode == BlendMode::Direct {
+        if ctx.config.blend_mode == BlendMode::Direct {
             return params.source_map[corners[0]];
         }
         let height_range = ctx.color_state.max_height - ctx.color_state.min_height;
@@ -123,7 +123,7 @@ fn compute_vertex_color(
         params.source_map[corners[3]],
         x,
     );
-    if ctx.blend_mode != BlendMode::Direct {
+    if ctx.config.blend_mode != BlendMode::Direct {
         get_dominant_color(lerp_color(ab_color, cd_color, z))
     } else {
         params.source_map[corners[0]]
@@ -189,27 +189,27 @@ pub fn add_point(
     } else {
         Vector2::new(1.0, 1.0)
     };
-    let near_cliff_top = uv.y > 1.0 - ctx.ridge_threshold;
-    let is_ridge = ctx.floor_mode && ctx.use_ridge_texture && near_cliff_top;
+    let near_cliff_top = uv.y > 1.0 - ctx.config.ridge_threshold;
+    let is_ridge = ctx.floor_mode && ctx.config.use_ridge_texture && near_cliff_top;
     let is_wall_geometry = !ctx.floor_mode;
     let use_wall_colors = is_wall_geometry || is_ridge;
 
     let cc = ctx.cell_coords;
-    let dim_x = ctx.dimensions.x;
+    let dim_x = ctx.config.dimensions.x;
     let corners = ctx.corner_indices();
 
-    if ctx.is_new_chunk {
+    if ctx.config.is_new_chunk {
         let new_color = DEFAULT_TEXTURE_COLOR;
-        ctx.color_map_0[corners[0]] = new_color;
-        ctx.color_map_1[corners[0]] = new_color;
-        ctx.wall_color_map_0[corners[0]] = new_color;
-        ctx.wall_color_map_1[corners[0]] = new_color;
+        ctx.color_maps.color_0[corners[0]] = new_color;
+        ctx.color_maps.color_1[corners[0]] = new_color;
+        ctx.color_maps.wall_color_0[corners[0]] = new_color;
+        ctx.color_maps.wall_color_1[corners[0]] = new_color;
     }
 
     let (source_map_0, source_map_1) = if use_wall_colors {
-        (&ctx.wall_color_map_0, &ctx.wall_color_map_1)
+        (&ctx.color_maps.wall_color_0, &ctx.color_maps.wall_color_1)
     } else {
-        (&ctx.color_map_0, &ctx.color_map_1)
+        (&ctx.color_maps.color_0, &ctx.color_maps.color_1)
     };
 
     let (lower_0, upper_0) = if use_wall_colors {
@@ -240,8 +240,8 @@ pub fn add_point(
         source_map: source_map_0,
         lower_color: lower_0,
         upper_color: upper_0,
-        lower_threshold: ctx.lower_threshold,
-        upper_threshold: ctx.upper_threshold,
+        lower_threshold: COLOR_1_LOWER_THRESHOLD,
+        upper_threshold: COLOR_1_UPPER_THRESHOLD,
     };
 
     let params_1 = ColorSampleParams {
@@ -273,14 +273,14 @@ pub fn add_point(
     );
 
     // Grass mask
-    let mut grass_mask = ctx.grass_mask_map[(cc.y * dim_x + cc.x) as usize];
+    let mut grass_mask = ctx.color_maps.grass_mask[(cc.y * dim_x + cc.x) as usize];
     grass_mask.g = if is_ridge { 1.0 } else { 0.0 };
     grass_mask.b = if ctx.floor_mode { 1.0 } else { 0.0 };
 
     // Material blend
     let mut material_blend =
         ctx.calculate_material_blend_data(x, height, source_map_0, source_map_1);
-    let blend_threshold = ctx.merge_threshold * BLEND_EDGE_SENSITIVITY;
+    let blend_threshold = ctx.config.merge_threshold * BLEND_EDGE_SENSITIVITY;
     let all_edges_merge = {
         let ab_merged = (ctx.ay() - ctx.by()).abs() < blend_threshold;
         let ac_merged = (ctx.ay() - ctx.cy()).abs() < blend_threshold;
@@ -295,9 +295,9 @@ pub fn add_point(
 
     // Vertex position
     let vertex = Vector3::new(
-        (cc.x as f32 + x) * ctx.cell_size.x,
+        (cc.x as f32 + x) * ctx.config.cell_size.x,
         safe_height,
-        (cc.y as f32 + z) * ctx.cell_size.y,
+        (cc.y as f32 + z) * ctx.config.cell_size.y,
     );
 
     // Final NaN check
@@ -308,11 +308,11 @@ pub fn add_point(
             cc.y
         );
         let fallback = Vector3::new(
-            (cc.x as f32 + 0.5) * ctx.cell_size.x,
+            (cc.x as f32 + 0.5) * ctx.config.cell_size.x,
             safe_height,
-            (cc.y as f32 + 0.5) * ctx.cell_size.y,
+            (cc.y as f32 + 0.5) * ctx.config.cell_size.y,
         );
-        let uv2 = Vector2::new(fallback.x, fallback.z) / ctx.cell_size;
+        let uv2 = Vector2::new(fallback.x, fallback.z) / ctx.config.cell_size;
         push_vertex(
             geometry,
             fallback,
@@ -329,9 +329,9 @@ pub fn add_point(
 
     // UV2
     let uv2 = if ctx.floor_mode {
-        Vector2::new(vertex.x, vertex.z) / ctx.cell_size
+        Vector2::new(vertex.x, vertex.z) / ctx.config.cell_size
     } else {
-        let global_position = vertex + ctx.chunk_position;
+        let global_position = vertex + ctx.config.chunk_position;
         Vector2::new(global_position.x, global_position.y)
             + Vector2::new(global_position.z, global_position.y)
     };

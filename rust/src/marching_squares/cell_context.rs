@@ -25,52 +25,53 @@ pub struct CellColorState {
     pub material_c: TextureIndex,
 }
 
-impl CellColorState {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
+/// Immutable configuration that stays constant across all cells in a generation pass.
+#[derive(Clone, Debug, Default)]
+pub struct CellConfig {
+    pub dimensions: Vector3i,
+    pub cell_size: Vector2,
+    pub merge_threshold: f32,
+    pub higher_poly_floors: bool,
+    pub blend_mode: BlendMode,
+    pub use_ridge_texture: bool,
+    pub ridge_threshold: f32,
+    pub is_new_chunk: bool,
+    pub chunk_position: Vector3,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct CellContext {
-    // Grid
+    // Per-cell mutable state
     pub heights: [f32; 4],
     pub edges: [bool; 4],
     pub profiles: [BoundaryProfile; 4],
     pub rotation: usize,
     pub cell_coords: Vector2i,
-    pub dimensions: Vector3i,
-    pub cell_size: Vector2,
-    pub merge_threshold: f32,
-    pub higher_poly_floors: bool,
-
-    // Colors
-    pub color_map_0: Vec<Color>,
-    pub color_map_1: Vec<Color>,
-    pub wall_color_map_0: Vec<Color>,
-
-    pub wall_color_map_1: Vec<Color>,
-    pub grass_mask_map: Vec<Color>,
-
     pub color_state: CellColorState,
-
-    // Blend mode from terrain system
-    pub blend_mode: BlendMode,
-    pub use_ridge_texture: bool,
-    pub ridge_threshold: f32,
-
-    // Whether this is a new (freshly created) chunk
-    pub is_new_chunk: bool,
-
-    // Floor mode toggle: true = floor geometry, false = wall geometry
     pub floor_mode: bool,
 
-    // Blend thresholds
-    pub lower_threshold: f32,
-    pub upper_threshold: f32,
+    // Shared across all cells in a generation pass
+    pub config: CellConfig,
+    pub color_maps: ColorMaps,
+}
 
-    // Chunk world position for wall UV2 offset
-    pub chunk_position: Vector3,
+#[cfg(test)]
+impl CellContext {
+    /// Shared test helper for creating a default CellContext with standard test parameters.
+    pub fn test_default(dim_x: i32, dim_z: i32) -> Self {
+        let total = (dim_x * dim_z) as usize;
+        Self {
+            config: CellConfig {
+                dimensions: Vector3i::new(dim_x, 32, dim_z),
+                cell_size: Vector2::new(2.0, 2.0),
+                merge_threshold: 1.3,
+                higher_poly_floors: true,
+                ..Default::default()
+            },
+            color_maps: ColorMaps::new_default(total),
+            ..Default::default()
+        }
+    }
 }
 
 // ================================
@@ -109,13 +110,13 @@ impl CellContext {
         self.rotation = ((self.rotation as i32 + 4 + rotations) % 4) as usize
     }
     pub fn is_higher(&self, a: f32, b: f32) -> bool {
-        a - b > self.merge_threshold
+        a - b > self.config.merge_threshold
     }
     pub fn is_lower(&self, a: f32, b: f32) -> bool {
-        a - b < -self.merge_threshold
+        a - b < -self.config.merge_threshold
     }
     pub fn is_merged(&self, a: f32, b: f32) -> bool {
-        (a - b).abs() < self.merge_threshold
+        (a - b).abs() < self.config.merge_threshold
     }
 
     /// Compute boundary profiles from canonical (unrotated) heights.
@@ -128,10 +129,10 @@ impl CellContext {
             self.heights[2],
             self.heights[3],
         );
-        self.profiles[0] = compute_boundary_profile(a, b, self.merge_threshold); // AB
-        self.profiles[1] = compute_boundary_profile(b, d, self.merge_threshold); // BD
-        self.profiles[2] = compute_boundary_profile(c, d, self.merge_threshold); // CD
-        self.profiles[3] = compute_boundary_profile(a, c, self.merge_threshold);
+        self.profiles[0] = compute_boundary_profile(a, b, self.config.merge_threshold); // AB
+        self.profiles[1] = compute_boundary_profile(b, d, self.config.merge_threshold); // BD
+        self.profiles[2] = compute_boundary_profile(c, d, self.config.merge_threshold); // CD
+        self.profiles[3] = compute_boundary_profile(a, c, self.config.merge_threshold);
         // AC
     }
 
@@ -180,12 +181,9 @@ impl CellContext {
     pub fn start_wall(&mut self) {
         self.floor_mode = false;
     }
-    pub fn color_index(&self, x: i32, z: i32) -> usize {
-        (z * self.dimensions.x + x) as usize
-    }
     pub(super) fn corner_indices(&self) -> [usize; 4] {
         let cc = self.cell_coords;
-        let dim_x = self.dimensions.x;
+        let dim_x = self.config.dimensions.x;
         [
             (cc.y * dim_x + cc.x) as usize,           // A
             (cc.y * dim_x + cc.x + 1) as usize,       // B
@@ -214,40 +212,23 @@ impl CellContext {
         }
 
         // Floor boundary colors
-        self.color_state.floor_lower_color_0 = self.color_map_0[corners[min_idx]];
-        self.color_state.floor_upper_color_0 = self.color_map_0[corners[max_idx]];
-        self.color_state.floor_lower_color_1 = self.color_map_1[corners[min_idx]];
-        self.color_state.floor_upper_color_1 = self.color_map_1[corners[max_idx]];
+        self.color_state.floor_lower_color_0 = self.color_maps.color_0[corners[min_idx]];
+        self.color_state.floor_upper_color_0 = self.color_maps.color_0[corners[max_idx]];
+        self.color_state.floor_lower_color_1 = self.color_maps.color_1[corners[min_idx]];
+        self.color_state.floor_upper_color_1 = self.color_maps.color_1[corners[max_idx]];
 
         // Wall boundary colors
-        self.color_state.wall_lower_color_0 = self.wall_color_map_0[corners[min_idx]];
-        self.color_state.wall_upper_color_0 = self.wall_color_map_0[corners[max_idx]];
+        self.color_state.wall_lower_color_0 = self.color_maps.wall_color_0[corners[min_idx]];
+        self.color_state.wall_upper_color_0 = self.color_maps.wall_color_0[corners[max_idx]];
 
-        self.color_state.wall_lower_color_1 = self.wall_color_map_1[corners[min_idx]];
-        self.color_state.wall_upper_color_1 = self.wall_color_map_1[corners[max_idx]];
+        self.color_state.wall_lower_color_1 = self.color_maps.wall_color_1[corners[min_idx]];
+        self.color_state.wall_upper_color_1 = self.color_maps.wall_color_1[corners[max_idx]];
     }
 
     pub(super) fn calculate_cell_material_pair(&mut self) {
         let corners = self.corner_indices();
-        let texture_a = TextureIndex::from_color_pair(
-            self.color_map_0[corners[0]],
-            self.color_map_1[corners[0]],
-        );
-
-        let texture_b = TextureIndex::from_color_pair(
-            self.color_map_0[corners[1]],
-            self.color_map_1[corners[1]],
-        );
-
-        let texture_c = TextureIndex::from_color_pair(
-            self.color_map_0[corners[2]],
-            self.color_map_1[corners[2]],
-        );
-
-        let texture_d = TextureIndex::from_color_pair(
-            self.color_map_0[corners[3]],
-            self.color_map_1[corners[3]],
-        );
+        let [texture_a, texture_b, texture_c, texture_d] =
+            corners.map(|i| self.color_maps.texture_at(i));
 
         let mut counts = [0u8; 16];
         for t in [texture_a, texture_b, texture_c, texture_d] {
