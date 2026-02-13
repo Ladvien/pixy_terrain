@@ -91,4 +91,60 @@ mod tests {
             "wall_depth_bias must be a uniform so it's tunable from the inspector."
         );
     }
+
+    // ---------------------------------------------------------------
+    // Rust ↔ GLSL constant cross-validation
+    //
+    // These constants must agree between Rust (types.rs) and
+    // GLSL (mst_terrain.gdshader). Since they can't share source,
+    // we parse the shader at test time and verify matching values.
+    // ---------------------------------------------------------------
+
+    /// Extract a float constant value from a GLSL `const float NAME = VALUE;` line.
+    fn parse_glsl_const(shader: &str, name: &str) -> f32 {
+        let pattern = format!("const float {} = ", name);
+        let line = shader
+            .lines()
+            .find(|l| l.contains(&pattern))
+            .unwrap_or_else(|| panic!("GLSL constant '{}' not found in shader", name));
+        let after_eq = line.split('=').nth(1).unwrap().trim();
+        // Strip trailing comments first, then semicolons
+        let value_str = after_eq.split("//").next().unwrap().trim();
+        let value_str = value_str.trim_end_matches(';').trim();
+        value_str
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("Failed to parse '{}' as f32: {}", value_str, e))
+    }
+
+    #[test]
+    fn test_material_pack_scale_matches_glsl() {
+        let shader = read_terrain_shader();
+        let glsl_value = parse_glsl_const(&shader, "MAT_PACK_STRIDE");
+        assert_eq!(
+            glsl_value, 16.0,
+            "GLSL MAT_PACK_STRIDE must be 16.0, matching Rust MATERIAL_PACK_SCALE"
+        );
+    }
+
+    #[test]
+    fn test_material_index_scale_matches_glsl() {
+        let shader = read_terrain_shader();
+        let glsl_value = parse_glsl_const(&shader, "MAT_INDEX_SCALE");
+        assert_eq!(
+            glsl_value, 15.0,
+            "GLSL MAT_INDEX_SCALE must be 15.0, matching Rust MATERIAL_INDEX_SCALE"
+        );
+    }
+
+    #[test]
+    fn test_wall_blend_sentinel_exceeds_vertex_color_flag() {
+        let shader = read_terrain_shader();
+        let glsl_flag = parse_glsl_const(&shader, "VERTEX_COLOR_FLAG");
+        // Rust WALL_BLEND_SENTINEL (2.0) must exceed GLSL VERTEX_COLOR_FLAG (1.5)
+        // so the shader's `>= VERTEX_COLOR_FLAG` check triggers correctly.
+        assert!(
+            2.0 > glsl_flag,
+            "Rust WALL_BLEND_SENTINEL (2.0) must be greater than GLSL VERTEX_COLOR_FLAG ({glsl_flag})"
+        );
+    }
 }

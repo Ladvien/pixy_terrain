@@ -8,11 +8,17 @@ pub(super) const DEFAULT_TEXTURE_COLOR: Color = Color::from_rgba(1.0, 0.0, 0.0, 
 pub(super) const DOMINANT_CHANNEL_THRESHOLD: f32 = 0.99;
 pub(super) const MIN_WEIGHT_THRESHOLD: f32 = 0.001;
 pub(super) const MIN_HEIGHT_RANGE: f32 = 0.001;
+/// Must match `MAT_PACK_STRIDE` in mst_terrain.gdshader.
+/// Material B is packed at stride 16 within CUSTOM2.r.
 pub(super) const MATERIAL_PACK_SCALE: f32 = 16.0;
 pub(super) const MATERIAL_PACK_NORMALIZE: f32 = 255.0;
+/// Must match `MAT_INDEX_SCALE` in mst_terrain.gdshader.
+/// Material indices are normalized to 0..1 as index/15.
 pub(super) const MATERIAL_INDEX_SCALE: f32 = 15.0;
 pub(super) const COLOR_1_LOWER_THRESHOLD: f32 = 0.3;
 pub(super) const COLOR_1_UPPER_THRESHOLD: f32 = 0.7;
+/// Written to CUSTOM2.a to signal vertex-color blending mode.
+/// Must be greater than `VERTEX_COLOR_FLAG` (1.5) in mst_terrain.gdshader.
 pub(super) const WALL_BLEND_SENTINEL: f32 = 2.0;
 
 // =====================

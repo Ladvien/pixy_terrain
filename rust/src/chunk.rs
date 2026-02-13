@@ -15,29 +15,22 @@ use godot::prelude::*;
 
 use crate::grass_planter::{GrassConfig, PixyGrassPlanter};
 use crate::marching_squares::{
-    self, validate_cell_watertight, BlendMode, CellContext, CellGeometry, MergeMode,
+    self, validate_cell_watertight, CellContext, CellGeometry, MergeMode,
 };
+use crate::shared_params::SharedTerrainParams;
 
 /// Cached terrain configuration (avoids needing to bind terrain during chunk operations)
 /// Passed from terrain to chunk at initialization time to break the borrow cycle
 #[derive(Clone, Debug)]
 pub struct TerrainConfig {
-    pub dimensions: Vector3i,
-    pub cell_size: Vector2,
-    pub blend_mode: BlendMode,
-    pub use_ridge_texture: bool,
-    pub ridge_threshold: f32,
+    pub shared: SharedTerrainParams,
     pub extra_collision_layer: i32,
 }
 
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            dimensions: Vector3i::new(33, 32, 33),
-            cell_size: Vector2::new(2.0, 2.0),
-            blend_mode: BlendMode::Direct,
-            use_ridge_texture: false,
-            ridge_threshold: 1.0,
+            shared: SharedTerrainParams::default(),
             extra_collision_layer: 9,
         }
     }
@@ -184,7 +177,7 @@ impl PixyTerrainChunk {
             return;
         }
 
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.color_map_0[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
@@ -195,7 +188,7 @@ impl PixyTerrainChunk {
             return;
         }
 
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.color_map_1[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
@@ -206,7 +199,7 @@ impl PixyTerrainChunk {
             return;
         }
 
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.wall_color_map_0[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
@@ -217,7 +210,7 @@ impl PixyTerrainChunk {
             return;
         }
 
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.wall_color_map_1[(z * dim_x + x) as usize] = color;
         self.notify_neighbors(x, z);
     }
@@ -228,7 +221,7 @@ impl PixyTerrainChunk {
             return;
         }
 
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.grass_mask_map[(z * dim_x + x) as usize] = masked;
         self.notify_neighbors(x, z);
     }
@@ -238,7 +231,7 @@ impl PixyTerrainChunk {
         if !self.is_in_bounds(x, z) {
             return Color::default();
         }
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.color_map_0[(z * dim_x + x) as usize]
     }
 
@@ -247,7 +240,7 @@ impl PixyTerrainChunk {
         if !self.is_in_bounds(x, z) {
             return Color::default();
         }
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.color_map_1[(z * dim_x + x) as usize]
     }
 
@@ -256,7 +249,7 @@ impl PixyTerrainChunk {
         if !self.is_in_bounds(x, z) {
             return Color::default();
         }
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.wall_color_map_0[(z * dim_x + x) as usize]
     }
 
@@ -265,7 +258,7 @@ impl PixyTerrainChunk {
         if !self.is_in_bounds(x, z) {
             return Color::default();
         }
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.wall_color_map_1[(z * dim_x + x) as usize]
     }
 
@@ -274,13 +267,13 @@ impl PixyTerrainChunk {
         if !self.is_in_bounds(x, z) {
             return Color::default();
         }
-        let dim_x = self.terrain_config.dimensions.x;
+        let dim_x = self.terrain_config.shared.dimensions.x;
         self.grass_mask_map[(z * dim_x + x) as usize]
     }
 
     #[func]
     pub fn validate_mesh_gaps(&self) -> i32 {
-        let cell_size = self.terrain_config.cell_size;
+        let cell_size = self.terrain_config.shared.cell_size;
         let mut total_gaps = 0i32;
         for (key, geo) in &self.cell_geometry {
             let cell_x = key[0];
@@ -324,18 +317,18 @@ impl PixyTerrainChunk {
     }
 
     fn get_cell_size(&self) -> Vector2 {
-        self.terrain_config.cell_size
+        self.terrain_config.shared.cell_size
     }
 
-    fn get_blend_mode(&self) -> BlendMode {
-        self.terrain_config.blend_mode
+    fn get_blend_mode(&self) -> crate::marching_squares::BlendMode {
+        self.terrain_config.shared.blend_mode
     }
 
     fn get_use_ridge_texture(&self) -> bool {
-        self.terrain_config.use_ridge_texture
+        self.terrain_config.shared.use_ridge_texture
     }
     fn get_ridge_threshold(&self) -> f32 {
-        self.terrain_config.ridge_threshold
+        self.terrain_config.shared.ridge_threshold
     }
 
     pub fn get_height_at(&self, x: i32, z: i32) -> Option<f32> {
@@ -366,13 +359,13 @@ impl PixyTerrainChunk {
 
     fn get_dimensions_xz(&self) -> (i32, i32) {
         (
-            self.terrain_config.dimensions.x,
-            self.terrain_config.dimensions.z,
+            self.terrain_config.shared.dimensions.x,
+            self.terrain_config.shared.dimensions.z,
         )
     }
 
     fn get_terrain_dimensions(&self) -> Vector3i {
-        self.terrain_config.dimensions
+        self.terrain_config.shared.dimensions
     }
 
     pub fn notify_needs_update(&mut self, z: i32, x: i32) {

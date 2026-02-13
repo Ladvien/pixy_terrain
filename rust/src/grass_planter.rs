@@ -13,21 +13,16 @@ use godot::classes::{
 use godot::obj::InstanceId;
 use godot::prelude::*;
 
-use crate::marching_squares::{get_dominant_color, CellGeometry, MergeMode};
+use crate::marching_squares::{get_dominant_color, CellGeometry};
+use crate::shared_params::SharedTerrainParams;
 
 /// Cached grass configuration snapshot.
 /// Passed from terrain → chunk → grass planter at init to break borrow cycles.
 #[derive(Clone)]
 pub struct GrassConfig {
-    pub dimensions: Vector3i,
+    pub shared: SharedTerrainParams,
     pub subdivisions: i32,
     pub grass_size: Vector2,
-    pub cell_size: Vector2,
-    pub wall_threshold: f32,
-    pub merge_mode: MergeMode,
-    pub animation_fps: i32,
-    pub ledge_threshold: f32,
-    pub ridge_threshold: f32,
     pub grass_sprites: [Option<Gd<Texture2D>>; 6],
     pub ground_colors: [Color; 6],
     pub tex_has_grass: [bool; 5],
@@ -41,15 +36,9 @@ pub struct GrassConfig {
 impl Default for GrassConfig {
     fn default() -> Self {
         Self {
-            dimensions: Vector3i::new(33, 32, 33),
+            shared: SharedTerrainParams::default(),
             subdivisions: 3,
             grass_size: Vector2::new(1.0, 1.0),
-            cell_size: Vector2::new(2.0, 2.0),
-            wall_threshold: 0.0,
-            merge_mode: MergeMode::Polyhedron,
-            animation_fps: 0,
-            ledge_threshold: 0.25,
-            ridge_threshold: 1.0,
             grass_sprites: [None, None, None, None, None, None],
             ground_colors: [Color::from_rgba(0.4, 0.5, 0.3, 1.0); 6],
             tex_has_grass: [true; 5],
@@ -91,8 +80,8 @@ impl PixyGrassPlanter {
             return;
         };
 
-        let dim_x = config.dimensions.x - 1;
-        let dim_z = config.dimensions.z - 1;
+        let dim_x = config.shared.dimensions.x - 1;
+        let dim_z = config.shared.dimensions.z - 1;
         let subs = config.subdivisions;
         let instance_count = (dim_x * dim_z * subs * subs) as i32;
         let grass_material = config.grass_material.clone();
@@ -189,8 +178,8 @@ impl PixyGrassPlanter {
         };
 
         if let Some(ref img) = config.ground_images[img_index] {
-            let total_x = config.dimensions.x as f32 * config.cell_size.x;
-            let total_z = config.dimensions.z as f32 * config.cell_size.y;
+            let total_x = config.shared.dimensions.x as f32 * config.shared.cell_size.x;
+            let total_z = config.shared.dimensions.z as f32 * config.shared.cell_size.y;
 
             let mut uv_x = (world_x / total_x).clamp(0.0, 1.0) * tex_scale;
             let mut uv_y = (world_z / total_z).clamp(0.0, 1.0) * tex_scale;
@@ -223,7 +212,7 @@ impl PixyGrassPlanter {
 
         let subs = config.subdivisions;
         let count = (subs * subs) as i32;
-        let dim_x = config.dimensions.x - 1;
+        let dim_x = config.shared.dimensions.x - 1;
         let mut index = (cell_coords.y * dim_x + cell_coords.x) * count;
         let end_index = index + count;
 
@@ -232,9 +221,9 @@ impl PixyGrassPlanter {
         for z in 0..subs {
             for x in 0..subs {
                 let jx = (cell_coords.x as f32 + (x as f32 + rand_f32()) / subs as f32)
-                    * config.cell_size.x;
+                    * config.shared.cell_size.x;
                 let jz = (cell_coords.y as f32 + (z as f32 + rand_f32()) / subs as f32)
-                    * config.cell_size.y;
+                    * config.shared.cell_size.y;
                 points.push(Vector2::new(jx, jz));
             }
         }
@@ -304,7 +293,7 @@ impl PixyGrassPlanter {
                 // Ledge/ridge avoidance via interpolated UV
                 let uv = geo.uvs[tri] * u + geo.uvs[tri + 1] * v + geo.uvs[tri + 2] * w;
                 let on_ledge =
-                    uv.x > 1.0 - config.ledge_threshold || uv.y > 1.0 - config.ridge_threshold;
+                    uv.x > 1.0 - config.shared.ledge_threshold || uv.y > 1.0 - config.shared.ridge_threshold;
 
                 // Interpolate vertex colors → dominant channel
                 let c0_interp = get_dominant_color(lerp_color3(
@@ -414,8 +403,8 @@ impl PixyGrassPlanter {
             self.setup();
         }
 
-        let dim_x = self.grass_config.as_ref().unwrap().dimensions.x - 1;
-        let dim_z = self.grass_config.as_ref().unwrap().dimensions.z - 1;
+        let dim_x = self.grass_config.as_ref().unwrap().shared.dimensions.x - 1;
+        let dim_z = self.grass_config.as_ref().unwrap().shared.dimensions.z - 1;
 
         for z in 0..dim_z {
             for x in 0..dim_x {

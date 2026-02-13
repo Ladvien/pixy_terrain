@@ -1,0 +1,32 @@
+   0.026169166s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint: stale: changed "/Users/ladvien/pixy/pixy_terrain/rust/src/grass_planter.rs"
+   0.026188416s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint:           (vs) "/Users/ladvien/pixy/pixy_terrain/rust/target/debug/.fingerprint/pixy_terrain-4a9c876019213e45/dep-lib-pixy_terrain"
+   0.026194041s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1770984360, nanos: 583865140 } < FileTime { seconds: 1770985797, nanos: 750822457 }
+   0.026758833s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint: fingerprint dirty for pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("pixy_terrain", ["cdylib"], "/Users/ladvien/pixy/pixy_terrain/rust/src/lib.rs", Edition2021) }
+   0.026886333s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "/Users/ladvien/pixy/pixy_terrain/rust/target/debug/.fingerprint/pixy_terrain-4a9c876019213e45/dep-lib-pixy_terrain", reference_mtime: FileTime { seconds: 1770984360, nanos: 583865140 }, stale: "/Users/ladvien/pixy/pixy_terrain/rust/src/grass_planter.rs", stale_mtime: FileTime { seconds: 1770985797, nanos: 750822457 } }))
+   0.030603875s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint: fingerprint error for pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("pixy_terrain", ["cdylib"], "/Users/ladvien/pixy/pixy_terrain/rust/src/lib.rs", Edition2021) }
+   0.030610541s  INFO prepare_target{force=false package_id=pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust) target="pixy_terrain"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/ladvien/pixy/pixy_terrain/rust/target/debug/.fingerprint/pixy_terrain-2e02470034d87c7f/test-lib-pixy_terrain`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+    Checking pixy_terrain v0.0.1 (/Users/ladvien/pixy/pixy_terrain/rust)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.90s

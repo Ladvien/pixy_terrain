@@ -17,6 +17,7 @@ use godot::prelude::*;
 use crate::chunk::{PixyTerrainChunk, TerrainConfig};
 use crate::grass_planter::GrassConfig;
 use crate::marching_squares::{BlendMode, MergeMode};
+use crate::shared_params::SharedTerrainParams;
 
 /// Path to the terrain shader file.
 const TERRAIN_SHADER_PATH: &str =
@@ -25,55 +26,6 @@ const TERRAIN_SHADER_PATH: &str =
 /// Path to the default ground noise texture.
 const DEFAULT_GROUND_TEXTURE_PATH: &str =
     "res://addons/pixy_terrain/resources/textures/default_ground_noise.tres";
-
-/// Texture uniform names in the shader (16 slots, index 0-15).
-const TEXTURE_UNIFORM_NAMES: [&str; 16] = [
-    "vc_tex_rr",
-    "vc_tex_rg",
-    "vc_tex_rb",
-    "vc_tex_ra",
-    "vc_tex_gr",
-    "vc_tex_gg",
-    "vc_tex_gb",
-    "vc_tex_ga",
-    "vc_tex_br",
-    "vc_tex_bg",
-    "vc_tex_bb",
-    "vc_tex_ba",
-    "vc_tex_ar",
-    "vc_tex_ag",
-    "vc_tex_ab",
-    "vc_tex_aa",
-];
-
-/// Ground albedo uniform names in the shader (6 slots matching texture slots 1-6).
-const GROUND_ALBEDO_NAMES: [&str; 6] = [
-    "ground_albedo",
-    "ground_albedo_2",
-    "ground_albedo_3",
-    "ground_albedo_4",
-    "ground_albedo_5",
-    "ground_albedo_6",
-];
-
-/// Texture scale uniform names (15 slots, indices 1-15).
-const TEXTURE_SCALE_NAMES: [&str; 15] = [
-    "texture_scale_1",
-    "texture_scale_2",
-    "texture_scale_3",
-    "texture_scale_4",
-    "texture_scale_5",
-    "texture_scale_6",
-    "texture_scale_7",
-    "texture_scale_8",
-    "texture_scale_9",
-    "texture_scale_10",
-    "texture_scale_11",
-    "texture_scale_12",
-    "texture_scale_13",
-    "texture_scale_14",
-    "texture_scale_15",
-];
 
 #[derive(GodotClass)]
 #[class(base=Node3D, init, tool)]
@@ -84,6 +36,7 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Core Settings
     // ═══════════════════════════════════════════
+    #[export_group(name = "Core")]
     #[export]
     #[init(val = Vector3i::new(33, 32, 33))]
     pub dimensions: Vector3i,
@@ -126,6 +79,7 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Blending Settings
     // ═══════════════════════════════════════════
+    #[export_group(name = "Blending")]
     #[export]
     #[init(val = 5.0)]
     pub blend_sharpness: f32,
@@ -139,113 +93,22 @@ pub struct PixyTerrain {
     pub blend_noise_strength: f32,
 
     // ═══════════════════════════════════════════
-    // Texture Settings (15 texture slots)
+    // Texture Settings (array exports)
     // ═══════════════════════════════════════════
+    #[export_group(name = "Textures")]
     #[export]
-    pub ground_texture: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_2: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_3: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_4: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_5: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_6: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_7: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_8: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_9: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_10: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_11: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_12: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_13: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_14: Option<Gd<Texture2D>>,
-    #[export]
-    pub texture_15: Option<Gd<Texture2D>>,
+    pub textures: VarArray,
 
-    // ═══════════════════════════════════════════
-    // Per-Texture UV Scales
-    // ═══════════════════════════════════════════
     #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_1: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_2: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_3: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_4: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_5: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_6: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_7: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_8: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_9: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_10: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_11: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_12: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_13: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_14: f32,
-    #[export]
-    #[init(val = 1.0)]
-    pub texture_scale_15: f32,
+    pub texture_scales: PackedFloat32Array,
 
-    // ═══════════════════════════════════════════
-    // Ground Colors (6 slots matching texture slots 1-6)
-    // ═══════════════════════════════════════════
     #[export]
-    #[init(val = Color::from_rgba(0.3922, 0.4706, 0.3176, 1.0))]
-    pub ground_color: Color,
-    #[export]
-    #[init(val = Color::from_rgba(0.3216, 0.4824, 0.3843, 1.0))]
-    pub ground_color_2: Color,
-    #[export]
-    #[init(val = Color::from_rgba(0.3725, 0.4235, 0.2941, 1.0))]
-    pub ground_color_3: Color,
-    #[export]
-    #[init(val = Color::from_rgba(0.3922, 0.4745, 0.2549, 1.0))]
-    pub ground_color_4: Color,
-    #[export]
-    #[init(val = Color::from_rgba(0.2902, 0.4941, 0.3647, 1.0))]
-    pub ground_color_5: Color,
-    #[export]
-    #[init(val = Color::from_rgba(0.4431, 0.4471, 0.3647, 1.0))]
-    pub ground_color_6: Color,
+    pub ground_colors: PackedColorArray,
 
     // ═══════════════════════════════════════════
     // Shading Settings
     // ═══════════════════════════════════════════
+    #[export_group(name = "Shading")]
     #[export]
     #[init(val = Color::from_rgba(0.0, 0.0, 0.0, 1.0))]
     pub shadow_color: Color,
@@ -261,18 +124,9 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Grass Settings
     // ═══════════════════════════════════════════
+    #[export_group(name = "Grass")]
     #[export]
-    pub grass_sprite: Option<Gd<Texture2D>>,
-    #[export]
-    pub grass_sprite_tex_2: Option<Gd<Texture2D>>,
-    #[export]
-    pub grass_sprite_tex_3: Option<Gd<Texture2D>>,
-    #[export]
-    pub grass_sprite_tex_4: Option<Gd<Texture2D>>,
-    #[export]
-    pub grass_sprite_tex_5: Option<Gd<Texture2D>>,
-    #[export]
-    pub grass_sprite_tex_6: Option<Gd<Texture2D>>,
+    pub grass_sprites: VarArray,
 
     #[export]
     #[init(val = 0)]
@@ -313,6 +167,7 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Grass Animation (Dylearn-based)
     // ═══════════════════════════════════════════
+    #[export_subgroup(name = "Animation")]
     #[export]
     #[init(val = 5.0)]
     pub grass_framerate: f32,
@@ -333,6 +188,7 @@ pub struct PixyTerrain {
     #[init(val = 0.3)]
     pub fake_perspective_scale: f32,
 
+    #[export_subgroup(name = "View Sway")]
     #[export]
     #[init(val = true)]
     pub view_space_sway: bool,
@@ -345,6 +201,7 @@ pub struct PixyTerrain {
     #[init(val = 10.0)]
     pub view_sway_angle: f32,
 
+    #[export_subgroup(name = "Displacement")]
     #[export]
     #[init(val = true)]
     pub character_displacement_enabled: bool,
@@ -372,6 +229,7 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Cross-Section (Y-clip)
     // ═══════════════════════════════════════════
+    #[export_group(name = "Cross-Section")]
     #[export]
     #[init(val = false)]
     pub cross_section_enabled: bool,
@@ -383,6 +241,7 @@ pub struct PixyTerrain {
     // ═══════════════════════════════════════════
     // Grass Toon Lighting (Dylearn-based)
     // ═══════════════════════════════════════════
+    #[export_group(name = "Toon Lighting")]
     #[export]
     #[init(val = 3)]
     pub grass_toon_cuts: i32,
@@ -485,11 +344,11 @@ impl PixyTerrain {
         // Register fallback global shader parameters (no-ops if already present)
         Self::ensure_environment_globals();
 
+        // Pad arrays to correct lengths on scene load
+        self.ensure_array_sizes();
+
         // Create/load terrain material and shared grass material
-        self.ensure_terrain_material();
-        self.ensure_grass_material();
-        self.force_batch_update();
-        self.force_grass_material_update();
+        self.ensure_materials_and_sync();
 
         // Discover existing chunk children
         self.chunks.clear();
@@ -640,6 +499,13 @@ impl PixyTerrain {
     }
 
     /// Ensure terrain material exists, creating it from shader if needed.
+    fn ensure_materials_and_sync(&mut self) {
+        self.ensure_terrain_material();
+        self.ensure_grass_material();
+        self.force_batch_update();
+        self.force_grass_material_update();
+    }
+
     pub fn ensure_terrain_material(&mut self) {
         if self.terrain_material.is_some() {
             return;
@@ -729,11 +595,16 @@ impl PixyTerrain {
     /// Sync all shader parameters from terrain exports to the terrain material.
     #[func]
     pub fn force_batch_update(&mut self) {
+        use crate::shader_sync::*;
+
         if self.terrain_material.is_none() {
             return;
         }
 
         self.is_batch_updating = true;
+
+        // Ensure arrays are sized before reading
+        self.ensure_array_sizes();
 
         // Collect all values before borrowing material
         let dimensions = self.dimensions;
@@ -744,26 +615,35 @@ impl PixyTerrain {
         let blend_sharpness = self.blend_sharpness;
         let blend_noise_scale = self.blend_noise_scale;
         let blend_noise_strength = self.blend_noise_strength;
-        let ground_colors = self.get_ground_colors();
-        let scales = self.get_texture_scales();
+        let ground_colors: Vec<Color> = (0..6)
+            .map(|i| self.ground_colors[i])
+            .collect();
+        let scales: Vec<f32> = (0..15)
+            .map(|i| self.texture_scales[i])
+            .collect();
         let textures = self.get_texture_slots();
         let shadow_color = self.shadow_color;
         let shadow_bands = self.shadow_bands;
         let shadow_intensity = self.shadow_intensity;
+        let cross_section_enabled = self.cross_section_enabled;
 
         let mat = self.terrain_material.as_mut().unwrap();
 
-        // Core geometry params
-        mat.set_shader_parameter("chunk_size", &dimensions.to_variant());
-        mat.set_shader_parameter("cell_size", &cell_size.to_variant());
-        mat.set_shader_parameter("wall_threshold", &wall_threshold.to_variant());
-
-        // Blend settings
-        mat.set_shader_parameter("use_hard_textures", &use_hard.to_variant());
-        mat.set_shader_parameter("blend_mode", &blend_mode.to_variant());
-        mat.set_shader_parameter("blend_sharpness", &blend_sharpness.to_variant());
-        mat.set_shader_parameter("blend_noise_scale", &blend_noise_scale.to_variant());
-        mat.set_shader_parameter("blend_noise_strength", &blend_noise_strength.to_variant());
+        // Scalar params
+        sync_shader_params!(mat, [
+            "chunk_size"           => dimensions,
+            "cell_size"            => cell_size,
+            "wall_threshold"       => wall_threshold,
+            "use_hard_textures"    => use_hard,
+            "blend_mode"           => blend_mode,
+            "blend_sharpness"      => blend_sharpness,
+            "blend_noise_scale"    => blend_noise_scale,
+            "blend_noise_strength" => blend_noise_strength,
+            "shadow_color"         => shadow_color,
+            "bands"                => shadow_bands,
+            "shadow_intensity"     => shadow_intensity,
+            "cross_section_enabled" => cross_section_enabled,
+        ]);
 
         // Ground colors
         for (i, name) in GROUND_ALBEDO_NAMES.iter().enumerate() {
@@ -782,22 +662,13 @@ impl PixyTerrain {
             }
         }
 
-        // Shading
-        mat.set_shader_parameter("shadow_color", &shadow_color.to_variant());
-        mat.set_shader_parameter("bands", &shadow_bands.to_variant());
-        mat.set_shader_parameter("shadow_intensity", &shadow_intensity.to_variant());
-
-        // Cross-section initial state
-        mat.set_shader_parameter(
-            "cross_section_enabled",
-            &self.cross_section_enabled.to_variant(),
-        );
-
         self.is_batch_updating = false;
     }
 
     /// Sync all grass shader parameters from terrain fields to the shared grass material.
     pub fn force_grass_material_update(&mut self) {
+        use crate::shader_sync::*;
+
         if self.grass_material.is_none() {
             return;
         }
@@ -809,45 +680,21 @@ impl PixyTerrain {
         );
         let wall_threshold = self.wall_threshold;
 
-        let sprites = [
-            self.get_grass_sprite_or_default(0),
-            self.get_grass_sprite_or_default(1),
-            self.get_grass_sprite_or_default(2),
-            self.get_grass_sprite_or_default(3),
-            self.get_grass_sprite_or_default(4),
-            self.get_grass_sprite_or_default(5),
-        ];
+        self.ensure_array_sizes();
 
-        let ground_colors = [
-            self.ground_color,
-            self.ground_color_2,
-            self.ground_color_3,
-            self.ground_color_4,
-            self.ground_color_5,
-            self.ground_color_6,
-        ];
+        let sprites: Vec<Option<Gd<Texture2D>>> =
+            (0..6).map(|i| self.get_grass_sprite_or_default(i)).collect();
 
-        let use_base_color = [
-            self.ground_texture.is_none(),
-            self.texture_2.is_none(),
-            self.texture_3.is_none(),
-            self.texture_4.is_none(),
-            self.texture_5.is_none(),
-            self.texture_6.is_none(),
-        ];
-
-        let tex_has_grass = [
-            self.tex2_has_grass,
-            self.tex3_has_grass,
-            self.tex4_has_grass,
-            self.tex5_has_grass,
-            self.tex6_has_grass,
-        ];
+        let ground_colors: Vec<Color> = (0..6)
+            .map(|i| self.ground_colors[i])
+            .collect();
+        let use_base_color: [bool; 6] = std::array::from_fn(|i| {
+            get_variant_texture(&self.textures, i).is_none()
+        });
+        let tex_has_grass = self.tex_has_grass_array();
 
         let shadow_color = self.shadow_color;
         let grass_size = self.grass_size;
-
-        // Dylearn animation uniforms
         let grass_framerate = self.grass_framerate;
         let grass_quantised = self.grass_quantised;
         let world_space_sway = self.world_space_sway;
@@ -860,8 +707,6 @@ impl PixyTerrain {
         let player_displacement_angle_z = self.player_displacement_angle_z;
         let player_displacement_angle_x = self.player_displacement_angle_x;
         let radius_exponent = self.radius_exponent;
-
-        // Dylearn toon lighting uniforms
         let grass_toon_cuts = self.grass_toon_cuts;
         let grass_toon_wrap = self.grass_toon_wrap;
         let grass_toon_steepness = self.grass_toon_steepness;
@@ -869,88 +714,54 @@ impl PixyTerrain {
 
         let mat = self.grass_material.as_mut().unwrap();
 
-        // Core settings (kept)
-        mat.set_shader_parameter("is_merge_round", &is_merge_round.to_variant());
-        mat.set_shader_parameter("wall_threshold", &wall_threshold.to_variant());
+        // Core settings
+        sync_shader_params!(mat, [
+            "is_merge_round"    => is_merge_round,
+            "wall_threshold"    => wall_threshold,
+        ]);
 
-        // Grass textures (kept)
-        let texture_names = [
-            "grass_texture",
-            "grass_texture_2",
-            "grass_texture_3",
-            "grass_texture_4",
-            "grass_texture_5",
-            "grass_texture_6",
-        ];
-        for (i, name) in texture_names.iter().enumerate() {
+        // Grass textures
+        for (i, name) in GRASS_TEXTURE_NAMES.iter().enumerate() {
             if let Some(ref tex) = sprites[i] {
                 mat.set_shader_parameter(*name, &tex.to_variant());
             }
         }
 
-        // Ground colors (kept)
-        mat.set_shader_parameter("grass_base_color", &ground_colors[0].to_variant());
-        let color_names = [
-            "grass_color_2",
-            "grass_color_3",
-            "grass_color_4",
-            "grass_color_5",
-            "grass_color_6",
-        ];
-        for (i, name) in color_names.iter().enumerate() {
-            mat.set_shader_parameter(*name, &ground_colors[i + 1].to_variant());
+        // Ground colors
+        for (i, name) in GRASS_COLOR_NAMES.iter().enumerate() {
+            mat.set_shader_parameter(*name, &ground_colors[i].to_variant());
         }
 
-        // use_base_color flags (kept)
-        mat.set_shader_parameter("use_base_color", &use_base_color[0].to_variant());
-        mat.set_shader_parameter("use_base_color_2", &use_base_color[1].to_variant());
-        mat.set_shader_parameter("use_base_color_3", &use_base_color[2].to_variant());
-        mat.set_shader_parameter("use_base_color_4", &use_base_color[3].to_variant());
-        mat.set_shader_parameter("use_base_color_5", &use_base_color[4].to_variant());
-        mat.set_shader_parameter("use_base_color_6", &use_base_color[5].to_variant());
+        // use_base_color flags
+        for (i, name) in USE_BASE_COLOR_NAMES.iter().enumerate() {
+            mat.set_shader_parameter(*name, &use_base_color[i].to_variant());
+        }
 
-        // use_grass_tex flags (kept)
-        mat.set_shader_parameter("use_grass_tex_2", &tex_has_grass[0].to_variant());
-        mat.set_shader_parameter("use_grass_tex_3", &tex_has_grass[1].to_variant());
-        mat.set_shader_parameter("use_grass_tex_4", &tex_has_grass[2].to_variant());
-        mat.set_shader_parameter("use_grass_tex_5", &tex_has_grass[3].to_variant());
-        mat.set_shader_parameter("use_grass_tex_6", &tex_has_grass[4].to_variant());
+        // use_grass_tex flags
+        for (i, name) in USE_GRASS_TEX_NAMES.iter().enumerate() {
+            mat.set_shader_parameter(*name, &tex_has_grass[i].to_variant());
+        }
 
-        // Dylearn animation parameters (new)
-        mat.set_shader_parameter("framerate", &grass_framerate.to_variant());
-        mat.set_shader_parameter("quantised", &grass_quantised.to_variant());
-        mat.set_shader_parameter("world_space_sway", &world_space_sway.to_variant());
-        mat.set_shader_parameter("world_sway_angle", &world_sway_angle.to_variant());
-        mat.set_shader_parameter(
-            "fake_perspective_scale",
-            &fake_perspective_scale.to_variant(),
-        );
-        mat.set_shader_parameter("view_space_sway", &view_space_sway.to_variant());
-        mat.set_shader_parameter("view_sway_speed", &view_sway_speed.to_variant());
-        mat.set_shader_parameter("view_sway_angle", &view_sway_angle.to_variant());
-        mat.set_shader_parameter(
-            "character_displacement",
-            &character_displacement.to_variant(),
-        );
-        mat.set_shader_parameter(
-            "player_displacement_angle_z",
-            &player_displacement_angle_z.to_variant(),
-        );
-        mat.set_shader_parameter(
-            "player_displacement_angle_x",
-            &player_displacement_angle_x.to_variant(),
-        );
-        mat.set_shader_parameter("radius_exponent", &radius_exponent.to_variant());
-
-        // Dylearn toon lighting parameters
-        mat.set_shader_parameter("cuts", &grass_toon_cuts.to_variant());
-        mat.set_shader_parameter("wrap", &grass_toon_wrap.to_variant());
-        mat.set_shader_parameter("steepness", &grass_toon_steepness.to_variant());
-        mat.set_shader_parameter(
-            "threshold_gradient_size",
-            &grass_threshold_gradient_size.to_variant(),
-        );
-        mat.set_shader_parameter("shadow_color", &shadow_color.to_variant());
+        // Dylearn animation + toon lighting scalars
+        sync_shader_params!(mat, [
+            "framerate"                  => grass_framerate,
+            "quantised"                  => grass_quantised,
+            "world_space_sway"           => world_space_sway,
+            "world_sway_angle"           => world_sway_angle,
+            "fake_perspective_scale"     => fake_perspective_scale,
+            "view_space_sway"            => view_space_sway,
+            "view_sway_speed"            => view_sway_speed,
+            "view_sway_angle"            => view_sway_angle,
+            "character_displacement"     => character_displacement,
+            "player_displacement_angle_z" => player_displacement_angle_z,
+            "player_displacement_angle_x" => player_displacement_angle_x,
+            "radius_exponent"            => radius_exponent,
+            "cuts"                       => grass_toon_cuts,
+            "wrap"                       => grass_toon_wrap,
+            "steepness"                  => grass_toon_steepness,
+            "threshold_gradient_size"    => grass_threshold_gradient_size,
+            "shadow_color"               => shadow_color,
+        ]);
 
         // Update QuadMesh size
         if let Some(ref mut quad) = self.grass_quad_mesh {
@@ -959,136 +770,53 @@ impl PixyTerrain {
         }
     }
 
-    fn get_ground_colors(&self) -> [Color; 6] {
-        [
-            self.ground_color,
-            self.ground_color_2,
-            self.ground_color_3,
-            self.ground_color_4,
-            self.ground_color_5,
-            self.ground_color_6,
-        ]
-    }
-
-    fn get_texture_scales(&self) -> [f32; 15] {
-        [
-            self.texture_scale_1,
-            self.texture_scale_2,
-            self.texture_scale_3,
-            self.texture_scale_4,
-            self.texture_scale_5,
-            self.texture_scale_6,
-            self.texture_scale_7,
-            self.texture_scale_8,
-            self.texture_scale_9,
-            self.texture_scale_10,
-            self.texture_scale_11,
-            self.texture_scale_12,
-            self.texture_scale_13,
-            self.texture_scale_14,
-            self.texture_scale_15,
-        ]
+    /// Pad arrays to correct lengths on scene load or first use.
+    fn ensure_array_sizes(&mut self) {
+        let nil = Variant::nil();
+        while self.textures.len() < 15 {
+            self.textures.push(&nil);
+        }
+        while self.texture_scales.len() < 15 {
+            self.texture_scales.push(1.0);
+        }
+        let default_colors = [
+            Color::from_rgba(0.3922, 0.4706, 0.3176, 1.0),
+            Color::from_rgba(0.3216, 0.4824, 0.3843, 1.0),
+            Color::from_rgba(0.3725, 0.4235, 0.2941, 1.0),
+            Color::from_rgba(0.3922, 0.4745, 0.2549, 1.0),
+            Color::from_rgba(0.2902, 0.4941, 0.3647, 1.0),
+            Color::from_rgba(0.4431, 0.4471, 0.3647, 1.0),
+        ];
+        while self.ground_colors.len() < 6 {
+            self.ground_colors
+                .push(default_colors[self.ground_colors.len()]);
+        }
+        while self.grass_sprites.len() < 6 {
+            self.grass_sprites.push(&nil);
+        }
     }
 
     fn get_texture_slots(&self) -> [Option<Gd<Texture2D>>; 16] {
-        [
-            self.get_ground_texture_or_default(0),
-            self.get_ground_texture_or_default(1),
-            self.get_ground_texture_or_default(2),
-            self.get_ground_texture_or_default(3),
-            self.get_ground_texture_or_default(4),
-            self.get_ground_texture_or_default(5),
-            self.get_ground_texture_or_default(6),
-            self.get_ground_texture_or_default(7),
-            self.get_ground_texture_or_default(8),
-            self.get_ground_texture_or_default(9),
-            self.get_ground_texture_or_default(10),
-            self.get_ground_texture_or_default(11),
-            self.get_ground_texture_or_default(12),
-            self.get_ground_texture_or_default(13),
-            self.get_ground_texture_or_default(14),
-            None, // Slot 15: void texture (transparent)
-        ]
+        let mut slots: [Option<Gd<Texture2D>>; 16] = Default::default();
+        for (i, slot) in slots.iter_mut().enumerate().take(15) {
+            *slot = self.get_ground_texture_or_default(i);
+        }
+        // Slot 15: void texture (transparent)
+        slots
     }
 
     fn get_ground_texture_or_default(&self, index: usize) -> Option<Gd<Texture2D>> {
-        let texture = match index {
-            0 => &self.ground_texture,
-            1 => &self.texture_2,
-            2 => &self.texture_3,
-            3 => &self.texture_4,
-            4 => &self.texture_5,
-            5 => &self.texture_6,
-            6 => &self.texture_7,
-            7 => &self.texture_8,
-            8 => &self.texture_9,
-            9 => &self.texture_10,
-            10 => &self.texture_11,
-            11 => &self.texture_12,
-            12 => &self.texture_13,
-            13 => &self.texture_14,
-            14 => &self.texture_15,
-            _ => return None,
-        };
-
-        if texture.is_some() {
-            return texture.clone();
+        if let Some(tex) = get_variant_texture(&self.textures, index) {
+            return Some(tex);
         }
-
-        // Load default ground noise texture
-        let mut loader = ResourceLoader::singleton();
-        if loader.exists(DEFAULT_GROUND_TEXTURE_PATH) {
-            let result = loader
-                .load(DEFAULT_GROUND_TEXTURE_PATH)
-                .and_then(|r| r.try_cast::<Texture2D>().ok());
-            if result.is_none() {
-                godot_warn!(
-                    "Failed to cast default ground texture at {}",
-                    DEFAULT_GROUND_TEXTURE_PATH
-                );
-            }
-            return result;
-        } else {
-            godot_warn!(
-                "Default ground texture not found at {}",
-                DEFAULT_GROUND_TEXTURE_PATH
-            );
-        }
-
-        None
-    }
-
-    #[allow(dead_code)]
-    pub fn set_shader_param(&mut self, name: &str, value: &Variant) {
-        if let Some(ref mut mat) = self.terrain_material {
-            mat.set_shader_parameter(name, value);
-        }
+        load_default_texture(DEFAULT_GROUND_TEXTURE_PATH)
     }
 
     fn get_grass_sprite_or_default(&self, index: usize) -> Option<Gd<Texture2D>> {
-        let sprite = match index {
-            0 => &self.grass_sprite,
-            1 => &self.grass_sprite_tex_2,
-            2 => &self.grass_sprite_tex_3,
-            3 => &self.grass_sprite_tex_4,
-            4 => &self.grass_sprite_tex_5,
-            5 => &self.grass_sprite_tex_6,
-            _ => return None,
-        };
-
-        if sprite.is_some() {
-            return sprite.clone();
+        if let Some(tex) = get_variant_texture(&self.grass_sprites, index) {
+            return Some(tex);
         }
-
-        let mut loader = ResourceLoader::singleton();
-        let path = "res://addons/pixy_terrain/resources/textures/grass_leaf_sprite.png";
-        if loader.exists(path) {
-            return loader
-                .load(path)
-                .and_then(|r| r.try_cast::<Texture2D>().ok());
-        }
-
-        None
+        load_default_texture("res://addons/pixy_terrain/resources/textures/grass_leaf_sprite.png")
     }
 
     fn extract_ground_image(&self, index: usize) -> Option<Gd<Image>> {
@@ -1098,77 +826,56 @@ impl PixyTerrain {
         Some(img)
     }
 
-    fn make_terrain_config(&self) -> TerrainConfig {
-        TerrainConfig {
+    pub fn tex_has_grass_array(&self) -> [bool; 5] {
+        [
+            self.tex2_has_grass,
+            self.tex3_has_grass,
+            self.tex4_has_grass,
+            self.tex5_has_grass,
+            self.tex6_has_grass,
+        ]
+    }
+
+    fn make_shared_params(&self) -> SharedTerrainParams {
+        SharedTerrainParams {
             dimensions: self.dimensions,
             cell_size: self.cell_size,
+            merge_mode: MergeMode::from_index(self.merge_mode),
             blend_mode: if self.blend_mode == 0 {
                 BlendMode::Interpolated
             } else {
                 BlendMode::Direct
             },
-            use_ridge_texture: self.use_ridge_texture,
+            wall_threshold: self.wall_threshold,
             ridge_threshold: self.ridge_threshold,
+            ledge_threshold: self.ledge_threshold,
+            use_ridge_texture: self.use_ridge_texture,
+        }
+    }
+
+    fn make_terrain_config(&self) -> TerrainConfig {
+        TerrainConfig {
+            shared: self.make_shared_params(),
             extra_collision_layer: self.extra_collision_layer,
         }
     }
 
     fn make_grass_config(&self) -> GrassConfig {
         GrassConfig {
-            dimensions: self.dimensions,
+            shared: self.make_shared_params(),
             subdivisions: self.grass_subdivisions,
             grass_size: self.grass_size,
-            cell_size: self.cell_size,
-            wall_threshold: self.wall_threshold,
-            merge_mode: MergeMode::from_index(self.merge_mode),
-            animation_fps: self.animation_fps,
-            ledge_threshold: self.ledge_threshold,
-            ridge_threshold: self.ridge_threshold,
-            grass_sprites: [
-                self.get_grass_sprite_or_default(0),
-                self.get_grass_sprite_or_default(1),
-                self.get_grass_sprite_or_default(2),
-                self.get_grass_sprite_or_default(3),
-                self.get_grass_sprite_or_default(4),
-                self.get_grass_sprite_or_default(5),
-            ],
-            ground_colors: [
-                self.ground_color,
-                self.ground_color_2,
-                self.ground_color_3,
-                self.ground_color_4,
-                self.ground_color_5,
-                self.ground_color_6,
-            ],
-            tex_has_grass: [
-                self.tex2_has_grass,
-                self.tex3_has_grass,
-                self.tex4_has_grass,
-                self.tex5_has_grass,
-                self.tex6_has_grass,
-            ],
+            grass_sprites: std::array::from_fn(|i| self.get_grass_sprite_or_default(i)),
+            ground_colors: std::array::from_fn(|i| self.ground_colors[i]),
+            tex_has_grass: self.tex_has_grass_array(),
             grass_mesh: self.grass_mesh.clone(),
             grass_material: self.grass_material.clone(),
             grass_quad_mesh: self
                 .grass_quad_mesh
                 .as_ref()
                 .map(|q| q.clone().upcast::<godot::classes::Mesh>()),
-            ground_images: [
-                self.extract_ground_image(0),
-                self.extract_ground_image(1),
-                self.extract_ground_image(2),
-                self.extract_ground_image(3),
-                self.extract_ground_image(4),
-                self.extract_ground_image(5),
-            ],
-            texture_scales: [
-                self.texture_scale_1,
-                self.texture_scale_2,
-                self.texture_scale_3,
-                self.texture_scale_4,
-                self.texture_scale_5,
-                self.texture_scale_6,
-            ],
+            ground_images: std::array::from_fn(|i| self.extract_ground_image(i)),
+            texture_scales: std::array::from_fn(|i| self.texture_scales[i]),
         }
     }
 
@@ -1176,10 +883,7 @@ impl PixyTerrain {
     #[func]
     pub fn regenerate(&mut self) {
         godot_print!("PixyTerrain: regenerate()");
-        self.ensure_terrain_material();
-        self.ensure_grass_material();
-        self.force_batch_update();
-        self.force_grass_material_update();
+        self.ensure_materials_and_sync();
         self.clear();
         self.add_new_chunk(0, 0);
     }
@@ -1470,55 +1174,16 @@ impl PixyTerrain {
 
             {
                 let mut l = list_gd.bind_mut();
-                l.texture_1 = self.ground_texture.clone();
-                l.texture_2 = self.texture_2.clone();
-                l.texture_3 = self.texture_3.clone();
-                l.texture_4 = self.texture_4.clone();
-                l.texture_5 = self.texture_5.clone();
-                l.texture_6 = self.texture_6.clone();
-                l.texture_7 = self.texture_7.clone();
-                l.texture_8 = self.texture_8.clone();
-                l.texture_9 = self.texture_9.clone();
-                l.texture_10 = self.texture_10.clone();
-                l.texture_11 = self.texture_11.clone();
-                l.texture_12 = self.texture_12.clone();
-                l.texture_13 = self.texture_13.clone();
-                l.texture_14 = self.texture_14.clone();
-                l.texture_15 = self.texture_15.clone();
-                l.scale_1 = self.texture_scale_1;
-                l.scale_2 = self.texture_scale_2;
-                l.scale_3 = self.texture_scale_3;
-                l.scale_4 = self.texture_scale_4;
-                l.scale_5 = self.texture_scale_5;
-                l.scale_6 = self.texture_scale_6;
-                l.scale_7 = self.texture_scale_7;
-                l.scale_8 = self.texture_scale_8;
-                l.scale_9 = self.texture_scale_9;
-                l.scale_10 = self.texture_scale_10;
-                l.scale_11 = self.texture_scale_11;
-                l.scale_12 = self.texture_scale_12;
-                l.scale_13 = self.texture_scale_13;
-                l.scale_14 = self.texture_scale_14;
-                l.scale_15 = self.texture_scale_15;
-                l.grass_sprite_1 = self.grass_sprite.clone();
-                l.grass_sprite_2 = self.grass_sprite_tex_2.clone();
-                l.grass_sprite_3 = self.grass_sprite_tex_3.clone();
-                l.grass_sprite_4 = self.grass_sprite_tex_4.clone();
-                l.grass_sprite_5 = self.grass_sprite_tex_5.clone();
-                l.grass_sprite_6 = self.grass_sprite_tex_6.clone();
-                l.grass_color_1 = self.ground_color;
-                l.grass_color_2 = self.ground_color_2;
-                l.grass_color_3 = self.ground_color_3;
-                l.grass_color_4 = self.ground_color_4;
-                l.grass_color_5 = self.ground_color_5;
-                l.grass_color_6 = self.ground_color_6;
+                l.textures = self.textures.clone();
+                l.texture_scales = self.texture_scales.clone();
+                l.ground_colors = self.ground_colors.clone();
+                l.grass_sprites = self.grass_sprites.clone();
                 l.has_grass_2 = self.tex2_has_grass;
                 l.has_grass_3 = self.tex3_has_grass;
                 l.has_grass_4 = self.tex4_has_grass;
                 l.has_grass_5 = self.tex5_has_grass;
                 l.has_grass_6 = self.tex6_has_grass;
             }
-
             preset.bind_mut().textures = Some(list_gd);
             godot_print!("PixyTerrain: Saved texture settings to preset");
         }
@@ -1538,56 +1203,15 @@ impl PixyTerrain {
             return;
         };
         let l = list_gd.bind();
-
-        self.ground_texture = l.texture_1.clone();
-        self.texture_2 = l.texture_2.clone();
-        self.texture_3 = l.texture_3.clone();
-        self.texture_4 = l.texture_4.clone();
-        self.texture_5 = l.texture_5.clone();
-        self.texture_6 = l.texture_6.clone();
-        self.texture_7 = l.texture_7.clone();
-        self.texture_8 = l.texture_8.clone();
-        self.texture_9 = l.texture_9.clone();
-        self.texture_10 = l.texture_10.clone();
-        self.texture_11 = l.texture_11.clone();
-        self.texture_12 = l.texture_12.clone();
-        self.texture_13 = l.texture_13.clone();
-        self.texture_14 = l.texture_14.clone();
-        self.texture_15 = l.texture_15.clone();
-        self.texture_scale_1 = l.scale_1;
-        self.texture_scale_2 = l.scale_2;
-        self.texture_scale_3 = l.scale_3;
-        self.texture_scale_4 = l.scale_4;
-        self.texture_scale_5 = l.scale_5;
-        self.texture_scale_6 = l.scale_6;
-        self.texture_scale_7 = l.scale_7;
-        self.texture_scale_8 = l.scale_8;
-        self.texture_scale_9 = l.scale_9;
-        self.texture_scale_10 = l.scale_10;
-        self.texture_scale_11 = l.scale_11;
-        self.texture_scale_12 = l.scale_12;
-        self.texture_scale_13 = l.scale_13;
-        self.texture_scale_14 = l.scale_14;
-        self.texture_scale_15 = l.scale_15;
-        self.grass_sprite = l.grass_sprite_1.clone();
-        self.grass_sprite_tex_2 = l.grass_sprite_2.clone();
-        self.grass_sprite_tex_3 = l.grass_sprite_3.clone();
-        self.grass_sprite_tex_4 = l.grass_sprite_4.clone();
-        self.grass_sprite_tex_5 = l.grass_sprite_5.clone();
-        self.grass_sprite_tex_6 = l.grass_sprite_6.clone();
-        self.ground_color = l.grass_color_1;
-        self.ground_color_2 = l.grass_color_2;
-        self.ground_color_3 = l.grass_color_3;
-        self.ground_color_4 = l.grass_color_4;
-        self.ground_color_5 = l.grass_color_5;
-        self.ground_color_6 = l.grass_color_6;
+        self.textures = l.textures.clone();
+        self.texture_scales = l.texture_scales.clone();
+        self.ground_colors = l.ground_colors.clone();
+        self.grass_sprites = l.grass_sprites.clone();
         self.tex2_has_grass = l.has_grass_2;
         self.tex3_has_grass = l.has_grass_3;
         self.tex4_has_grass = l.has_grass_4;
         self.tex5_has_grass = l.has_grass_5;
         self.tex6_has_grass = l.has_grass_6;
-
-        // Drop borrows before calling methods on self
         drop(l);
         drop(p);
 
@@ -1613,5 +1237,40 @@ impl PixyTerrain {
                 chunk.bind_mut().regenerate_mesh();
             }
         }
+    }
+}
+
+/// Extract a `Gd<Texture2D>` from a VarArray slot, returning None for nil/out-of-bounds.
+pub fn get_variant_texture(arr: &VarArray, i: usize) -> Option<Gd<Texture2D>> {
+    if i >= arr.len() {
+        return None;
+    }
+    let v = arr.at(i);
+    if v.is_nil() {
+        return None;
+    }
+    v.try_to::<Gd<Texture2D>>().ok()
+}
+
+/// Set a texture into a VarArray slot (nil for None).
+pub fn set_variant_texture(arr: &mut VarArray, i: usize, tex: Option<Gd<Texture2D>>) {
+    if i < arr.len() {
+        let v = match tex {
+            Some(t) => t.to_variant(),
+            None => Variant::nil(),
+        };
+        arr.set(i, &v);
+    }
+}
+
+/// Load a default texture from a resource path, returning None on failure.
+fn load_default_texture(path: &str) -> Option<Gd<Texture2D>> {
+    let mut loader = ResourceLoader::singleton();
+    if loader.exists(path) {
+        loader
+            .load(path)
+            .and_then(|r| r.try_cast::<Texture2D>().ok())
+    } else {
+        None
     }
 }

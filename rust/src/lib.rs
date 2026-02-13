@@ -6,6 +6,8 @@ mod gizmo;
 mod grass_planter;
 mod marching_squares;
 mod quick_paint;
+mod shader_sync;
+mod shared_params;
 mod terrain;
 mod texture_preset;
 

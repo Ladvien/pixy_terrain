@@ -2,6 +2,12 @@ use super::cell_context::CellContext;
 use super::types::CellGeometry;
 use super::vertex::add_point;
 
+/// True if a boundary has a visible wall (heights differ).
+#[inline]
+fn is_walled(upper: f32, lower: f32) -> bool {
+    (upper - lower).abs() > 1e-5
+}
+
 /// Case 1: Outer corner where A is the raised corner.
 pub fn add_outer_corner(
     ctx: &mut CellContext,
@@ -31,8 +37,8 @@ pub fn add_outer_corner(
     }
 
     // Walls — skip degenerate triangles when a boundary is merged (upper == lower)
-    let ac_walled = (mid_ac_upper - mid_ac).abs() > 1e-5;
-    let ab_walled = (mid_ab_upper - mid_ab).abs() > 1e-5;
+    let ac_walled = is_walled(mid_ac_upper, mid_ac);
+    let ab_walled = is_walled(mid_ab_upper, mid_ab);
 
     if ac_walled || ab_walled {
         ctx.start_wall();
@@ -106,14 +112,14 @@ pub fn add_outer_corner(
         add_point(ctx, geometry, 0.0, cy, 1.0, 0.0, 0.0, false);
 
         // BD_mid_d → CD_mid_d → CD_mid_c (connects midpoints, only if CD walled)
-        if (mid_cd_c - mid_cd_d).abs() > 1e-5 {
+        if is_walled(mid_cd_c, mid_cd_d) {
             add_point(ctx, geometry, 1.0, mid_bd_d, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_d, 1.0, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 0.0, 0.0, false);
         }
 
         // BD_mid_b → BD_mid_d → C (BD wall triangle, only if BD walled)
-        if (mid_bd_b - mid_bd_d).abs() > 1e-5 {
+        if is_walled(mid_bd_b, mid_bd_d) {
             add_point(ctx, geometry, 1.0, mid_bd_b, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 1.0, mid_bd_d, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.0, cy, 1.0, 0.0, 0.0, false);
@@ -243,7 +249,7 @@ pub fn add_edge(
             add_point(ctx, geometry, 0.0, ac_top, 0.5, uv_left, 1.0, false);
         } else {
             // T1: left triangle — split AC boundary only when AC is walled
-            if (a_x).abs() < 1e-5 && (ac_top - ac_bot).abs() > 1e-5 && (ac_top - va_y).abs() > 1e-5
+            if (a_x).abs() < 1e-5 && is_walled(ac_top, ac_bot) && is_walled(ac_top, va_y)
             {
                 // A → B → AC_mid_floor (flat half at floor level)
                 add_point(ctx, geometry, a_x, va_y, 0.0, uv_a, 0.0, false);
@@ -261,8 +267,8 @@ pub fn add_edge(
 
             // T2: right triangle — split BD boundary only when BD is walled
             if (b_x - 1.0).abs() < 1e-5
-                && (bd_top - bd_bot).abs() > 1e-5
-                && (bd_top - vb_y).abs() > 1e-5
+                && is_walled(bd_top, bd_bot)
+                && is_walled(bd_top, vb_y)
             {
                 // BD_mid_floor → AC_top → B (flat half at floor level)
                 add_point(ctx, geometry, 1.0, vb_y, 0.5, uv_right, 1.0, false);
@@ -282,8 +288,8 @@ pub fn add_edge(
 
     // Wall — skip degenerate triangles when a side is merged (top == bot)
     ctx.start_wall();
-    let ac_has_wall = (ac_top - ac_bot).abs() > 1e-5;
-    let bd_has_wall = (bd_top - bd_bot).abs() > 1e-5;
+    let ac_has_wall = is_walled(ac_top, ac_bot);
+    let bd_has_wall = is_walled(bd_top, bd_bot);
     if ac_has_wall || bd_has_wall {
         if ac_has_wall {
             add_point(ctx, geometry, 0.0, ac_bot, 0.5, 0.0, 0.0, false);
@@ -305,7 +311,7 @@ pub fn add_edge(
         let mid_cd_d = ctx.cd_height(0.5, dy >= cy); // D-side midpoint
 
         // C-side: wall_left → mid_c → C — split AC only when AC is walled
-        if (ac_top - ac_bot).abs() > 1e-5 && (ac_bot - cy).abs() > 1e-5 {
+        if is_walled(ac_top, ac_bot) && is_walled(ac_bot, cy) {
             // AC flat half at C level
             add_point(ctx, geometry, 0.0, cy, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 0.0, 0.0, false);
@@ -321,7 +327,7 @@ pub fn add_edge(
         }
 
         // D-side: wall_right → D → mid_d — split BD only when BD is walled
-        if (bd_top - bd_bot).abs() > 1e-5 && (bd_bot - dy).abs() > 1e-5 {
+        if is_walled(bd_top, bd_bot) && is_walled(bd_bot, dy) {
             // BD flat half at D level
             add_point(ctx, geometry, 1.0, dy, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 1.0, dy, 1.0, 0.0, 0.0, false);
@@ -342,7 +348,7 @@ pub fn add_edge(
         add_point(ctx, geometry, 0.5, mid_cd_d, 1.0, 0.0, 0.0, false);
 
         // Wall at CD midpoint (only when walled — midpoints differ)
-        if (mid_cd_c - mid_cd_d).abs() > 1e-5 {
+        if is_walled(mid_cd_c, mid_cd_d) {
             add_point(ctx, geometry, 0.0, ac_bot, 0.5, 1.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_d, 1.0, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 0.0, 0.0, false);
@@ -407,14 +413,14 @@ pub fn add_inner_corner(
         add_point(ctx, geometry, 0.0, cy, 1.0, 0.0, 0.0, false);
 
         // CD wall at midpoint (only if walled)
-        if (mid_cd_c - mid_cd_d).abs() > 1e-5 {
+        if is_walled(mid_cd_c, mid_cd_d) {
             add_point(ctx, geometry, 1.0, mid_bd_d, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_d, 1.0, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 0.0, 0.0, false);
         }
 
         // BD wall at midpoint (only if walled)
-        if (mid_bd_b - mid_bd_d).abs() > 1e-5 {
+        if is_walled(mid_bd_b, mid_bd_d) {
             add_point(ctx, geometry, 1.0, mid_bd_b, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 1.0, mid_bd_d, 0.5, 0.0, 0.0, false);
             add_point(ctx, geometry, 0.0, cy, 1.0, 0.0, 0.0, false);
@@ -446,7 +452,7 @@ pub fn add_inner_corner(
         add_point(ctx, geometry, 0.0, mid_ac, 0.5, 1.0, 1.0, false);
 
         // BD wall at midpoint (only if walled)
-        if (mid_bd_b - mid_bd_d).abs() > 1e-5 {
+        if is_walled(mid_bd_b, mid_bd_d) {
             add_point(ctx, geometry, 1.0, mid_bd_b, 0.5, 1.0, -1.0, false);
             add_point(ctx, geometry, 1.0, mid_bd_d, 0.5, 1.0, -1.0, false);
             add_point(ctx, geometry, 0.0, mid_ac, 0.5, 1.0, 1.0, false);
@@ -469,7 +475,7 @@ pub fn add_inner_corner(
         add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 1.0, false);
 
         // CD wall at midpoint (only if walled)
-        if (mid_cd_c - mid_cd_d).abs() > 1e-5 {
+        if is_walled(mid_cd_c, mid_cd_d) {
             add_point(ctx, geometry, 0.5, mid_cd_c, 1.0, 1.0, -1.0, false);
             add_point(ctx, geometry, 0.5, mid_cd_d, 1.0, 1.0, -1.0, false);
             add_point(ctx, geometry, 0.5, mid_ab, 0.0, 1.0, 1.0, false);
