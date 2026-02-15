@@ -93,6 +93,14 @@ This repo is structured as a **GDExtension addon**. The addon lives at `godot/ad
 - `~/pixy/pixy_tree/` — Procedural tree addon (same addon pattern)
 - `~/pixy/pixy_game/` — Game project that symlinks both addons + owns player/camera
 
+## Feature Specs
+
+Feature specs live in `slop/features/`. They document existing systems so agents have context.
+
+**Before implementing:** Read any spec in `slop/features/` that touches the system you're modifying.
+
+**After implementing:** Update the relevant spec if your change alters behavior, interface, scope, or acceptance criteria. If you add a new feature, create a new spec following the format of existing ones.
+
 ## Development Workflow
 
 1. Make changes to Rust code in `rust/src/`
