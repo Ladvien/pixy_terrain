@@ -1,6 +1,6 @@
-// Pixy Terrain — Grass billboard shader
+// Pixy Terrain — Grass cross-mesh shader
 //
-// Renders MultiMesh grass sprites as camera-facing billboards.
+// Renders MultiMesh grass sprites on 3-quad cross-meshes (star pattern).
 // Each instance carries a ground color (INSTANCE_CUSTOM.rgb) and
 // a sprite ID (INSTANCE_CUSTOM.a) to select from 6 grass textures.
 //
@@ -113,7 +113,6 @@ uniform bool quantised = true;
 	group_uniforms Animation.world_space;
 uniform bool world_space_sway = true;
 uniform float world_sway_angle : hint_range(0.0, 180.0) = 60.0;
-uniform float fake_perspective_scale : hint_range(-0.15, 0.6, 0.001) = 0.3;
 	group_uniforms Animation.view_space;
 uniform bool view_space_sway = true;
 uniform float view_sway_speed : hint_range(0.0, 5.0) = 0.1;
@@ -148,7 +147,6 @@ varying vec3 world_pos;
 varying vec3 instance_color;
 varying float instance_sprite_id;
 varying float wind_noise_sample;
-varying float player_displacement_fake_perspective;
 
 // --- Helper functions ---
 float location_seed(vec2 location) {
@@ -244,7 +242,6 @@ void vertex() {
 	mat4 player_displacement_rotation =
 		rotateAroundAxis(vec3(0.0, 0.0, 1.0), character_displacement_x * radians(player_displacement_angle_z))
 		* rotateAroundAxis(vec3(1.0, 0.0, 0.0), character_displacement_y * radians(player_displacement_angle_x));
-	player_displacement_fake_perspective = character_displacement_y;
 
 	// --- Apply rotations conditionally ---
 	if (view_space_sway) {
@@ -257,32 +254,15 @@ void vertex() {
 		VERTEX = (world_rotation * vec4(VERTEX, 1.0)).xyz;
 	}
 
-	// --- Billboard via MODELVIEW_MATRIX replacement ---
-	mat4 modified_model_view = VIEW_MATRIX * mat4(
-		vec4(INV_VIEW_MATRIX[0].xyz, 0.0),
-		vec4(INV_VIEW_MATRIX[1].xyz, 0.0),
-		vec4(INV_VIEW_MATRIX[2].xyz, 0.0),
-		MODEL_MATRIX[3]
-	);
-
+	// --- Per-instance random Y rotation (breaks visual uniformity) ---
+	float y_seed = location_seed(object_origin.xz);
+	float y_angle = y_seed * 6.28318;
+	VERTEX = (rotateAroundAxis(vec3(0.0, 1.0, 0.0), y_angle) * vec4(VERTEX, 1.0)).xyz;
 	model_origin = (MODELVIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-	MODELVIEW_MATRIX = modified_model_view;
 }
 
 void fragment() {
-	// Fake perspective UV distortion from wind and character displacement
 	vec2 uv = UV;
-	uv.x -= 0.5;
-	float _wind_noise_sample = wind_noise_sample * fake_perspective_scale;
-	if (world_space_sway) {
-		_wind_noise_sample *= dot(CAMERA_DIRECTION_WORLD.xz, wind_noise_direction);
-		uv.x *= (1.0 - uv.y) * _wind_noise_sample + 1.0;
-	}
-	if (character_displacement) {
-		uv.x *= (1.0 - uv.y) * -player_displacement_fake_perspective + 1.0;
-	}
-	uv.x += 0.5;
-	uv.x = clamp(uv.x, 0.0, 1.0);
 
 	// 6-slot texture selection from instance_sprite_id (0.0..1.0 mapped to slots 1-6)
 	vec4 grass_tex = texture(grass_texture, uv);
@@ -334,7 +314,7 @@ void fragment() {
 		}
 	}
 
-	// Flat lighting: use instance origin so the whole billboard shades uniformly
+	// Flat lighting: use instance origin so the whole cross-mesh shades uniformly
 	LIGHT_VERTEX = model_origin;
 }
 

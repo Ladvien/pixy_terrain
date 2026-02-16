@@ -21,6 +21,8 @@ shader_type spatial;
 // cull_disabled: render both sides (walls visible from underneath)
 render_mode diffuse_toon, depth_draw_opaque, cull_disabled;
 
+#include "res://addons/pixy_environment/resources/shaders/clouds.gdshaderinc"
+
 // --- Albedo uniforms ---
 // wall_threshold: dot(normal, up) cutoff separating floor from wall geometry
 // chunk_size: grid dimensions for UV tiling (textures tile once per chunk)
@@ -102,9 +104,9 @@ group_uniforms;
 // bands: number of discrete brightness steps (5 = cel-shaded, 10 = nearly smooth)
 // shadow_intensity: darkest shadow level (negative = extra dark, positive = lifted)
 group_uniforms Shading;
-uniform vec4 shadow_color : source_color;
+uniform vec4 shadow_color : source_color = vec4(0.15, 0.12, 0.20, 1.0);
 uniform int bands : hint_range(1, 10) = 5;
-uniform float shadow_intensity : hint_range(-1.0, 0.5, 0.05) = 0.00;
+uniform float shadow_intensity : hint_range(-1.0, 0.5, 0.05) = 0.05;
 group_uniforms;
 
 // --- Cross-section uniforms ---
@@ -141,7 +143,7 @@ const float VERTEX_COLOR_FLAG = 1.5;      // CUSTOM2.a above this = use 16-weigh
 const float CUSTOM2_UNPACK = 255.0;       // CUSTOM2.r was packed as (mat_a + mat_b * 16) / 255
 const float MAT_PACK_STRIDE = 16.0;       // Material B is packed at stride 16 within CUSTOM2.r
 const float MAT_INDEX_SCALE = 15.0;       // Material indices normalized to 0..1 as index/15
-const float TOON_LIGHT_MAX = 0.3;         // Brightest toon light step (mix target)
+const float TOON_LIGHT_MAX = 0.45;        // Brightest toon light step (mix target)
 
 // --- Noise: procedural value noise for blend boundary variation ---
 
@@ -579,16 +581,15 @@ void fragment() {
 // --- Toon light shader ---
 // Called once per light per pixel. Replaces smooth PBR with discrete cel-shading bands.
 void light() {
-	// Raw light intensity: Lambert (normal · light_dir) scaled by attenuation + shadows
 	float NdotL = dot(NORMAL, LIGHT) * ATTENUATION;
 
-	// Quantize to discrete steps: 5 bands → snaps to 0.0, 0.2, 0.4, 0.6, 0.8
-	float stepped = floor(NdotL * float(bands)) / float(bands);
+	// Cloud shadows on directional light only (matches grass shader pattern)
+	if (LIGHT_IS_DIRECTIONAL && NdotL > 0.0) {
+		NdotL *= get_cloud_noise(world_pos);
+	}
 
-	// Blend between tinted shadow and full albedo based on stepped brightness
+	float stepped = floor(NdotL * float(bands)) / float(bands);
 	float light_amount = max(stepped + shadow_intensity, 0.0);
 	vec3 lit_color = mix(shadow_color.rgb * ALBEDO, ALBEDO, light_amount);
-
-	// Accumulate across lights; TOON_LIGHT_MAX caps each contribution to prevent overbrightening
 	DIFFUSE_LIGHT += lit_color * LIGHT_COLOR * TOON_LIGHT_MAX;
 }

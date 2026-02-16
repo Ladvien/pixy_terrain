@@ -7,7 +7,7 @@
 //   https://github.com/DylearnDev/Dylearn-3D-Pixel-Art-Grass-Demo
 use std::collections::HashMap;
 
-use godot::classes::{Image, Mesh, MultiMesh, MultiMeshInstance3D, QuadMesh, ShaderMaterial};
+use godot::classes::{ArrayMesh, Engine, Image, Mesh, MultiMesh, MultiMeshInstance3D, ShaderMaterial};
 use godot::obj::InstanceId;
 use godot::prelude::*;
 
@@ -45,6 +45,84 @@ impl Default for GrassConfig {
             texture_scales: [1.0; 6],
         }
     }
+}
+
+/// Build a 3-quad cross mesh (star pattern at 0°, 60°, 120° around Y).
+/// Each quad spans [-half_w, half_w] in X and [0, height] in Y.
+/// UVs are standard (0,0)–(1,1) per quad.
+pub fn build_cross_mesh(size: Vector2) -> Gd<ArrayMesh> {
+    let half_w = size.x * 0.5;
+    let height = size.y;
+    let angles: [f32; 3] = [0.0, std::f32::consts::FRAC_PI_3, std::f32::consts::FRAC_PI_3 * 2.0];
+
+    let mut verts = PackedVector3Array::new();
+    let mut uvs = PackedVector2Array::new();
+    let mut normals = PackedVector3Array::new();
+    let mut indices = PackedInt32Array::new();
+
+    for (i, &angle) in angles.iter().enumerate() {
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        // Quad corners: bottom-left, bottom-right, top-right, top-left
+        let bl = Vector3::new(-half_w * cos_a, 0.0, -half_w * sin_a);
+        let br = Vector3::new(half_w * cos_a, 0.0, half_w * sin_a);
+        let tr = Vector3::new(half_w * cos_a, height, half_w * sin_a);
+        let tl = Vector3::new(-half_w * cos_a, height, -half_w * sin_a);
+
+        // Normal perpendicular to the quad plane
+        let normal = Vector3::new(-sin_a, 0.0, cos_a);
+
+        let base = (i as i32) * 4;
+        verts.push(bl);
+        verts.push(br);
+        verts.push(tr);
+        verts.push(tl);
+        normals.push(normal);
+        normals.push(normal);
+        normals.push(normal);
+        normals.push(normal);
+        uvs.push(Vector2::new(0.0, 1.0));
+        uvs.push(Vector2::new(1.0, 1.0));
+        uvs.push(Vector2::new(1.0, 0.0));
+        uvs.push(Vector2::new(0.0, 0.0));
+        // Two triangles: bl-br-tr, bl-tr-tl
+        indices.push(base);
+        indices.push(base + 1);
+        indices.push(base + 2);
+        indices.push(base);
+        indices.push(base + 2);
+        indices.push(base + 3);
+    }
+
+    let mut arrays = VarArray::new();
+    arrays.resize(
+        godot::classes::rendering_server::ArrayType::MAX.ord() as usize,
+        &Variant::nil(),
+    );
+    arrays.set(
+        godot::classes::rendering_server::ArrayType::VERTEX.ord() as usize,
+        &verts.to_variant(),
+    );
+    arrays.set(
+        godot::classes::rendering_server::ArrayType::NORMAL.ord() as usize,
+        &normals.to_variant(),
+    );
+    arrays.set(
+        godot::classes::rendering_server::ArrayType::TEX_UV.ord() as usize,
+        &uvs.to_variant(),
+    );
+    arrays.set(
+        godot::classes::rendering_server::ArrayType::INDEX.ord() as usize,
+        &indices.to_variant(),
+    );
+
+    let mut mesh = ArrayMesh::new_gd();
+    mesh.add_surface_from_arrays(
+        godot::classes::mesh::PrimitiveType::TRIANGLES,
+        &arrays,
+    );
+    mesh
 }
 
 /// Grass planter node — places MultiMesh grass blades on floor triangles.
@@ -96,19 +174,17 @@ impl PixyGrassPlanter {
         mm.set_instance_count(instance_count);
 
         // Use custom grass mesh if set, otherwise use the shared QuadMesh
+        let in_editor = Engine::singleton().is_editor_hint();
         if let Some(ref mesh) = config.grass_mesh {
-            godot_print!("GrassPlanter: Using custom grass mesh");
+            godot_print!("GrassPlanter [editor={}]: Using grass_mesh override", in_editor);
             mm.set_mesh(mesh);
         } else if let Some(ref quad) = config.grass_quad_mesh {
-            godot_print!("GrassPlanter: Using shared QuadMesh");
+            godot_print!("GrassPlanter [editor={}]: Using grass_quad_mesh (cross-mesh)", in_editor);
             mm.set_mesh(quad);
         } else {
-            godot_warn!("GrassPlanter: No grass mesh or quad mesh — using fallback (no material!)");
-            // Fallback: create a temporary QuadMesh
-            let mut quad = QuadMesh::new_gd();
-            quad.set_size(config.grass_size);
-            quad.set_center_offset(Vector3::new(0.0, config.grass_size.y / 2.0, 0.0));
-            mm.set_mesh(&quad);
+            godot_warn!("GrassPlanter [editor={}]: No mesh set — using build_cross_mesh fallback", in_editor);
+            let cross = build_cross_mesh(config.grass_size);
+            mm.set_mesh(&cross);
         }
 
         self.base_mut().set_multimesh(&mm);
@@ -345,8 +421,8 @@ impl PixyGrassPlanter {
                     let normal = edge1.cross(edge2).normalized();
 
                     let right = Vector3::FORWARD.cross(normal).normalized();
-                    let forward = normal.cross(Vector3::RIGHT).normalized();
-                    let instance_basis = Basis::from_cols(right, forward, -normal);
+                    let forward = normal.cross(right).normalized();
+                    let instance_basis = Basis::from_cols(right, normal, forward);
 
                     mm.set_instance_transform(index, Transform3D::new(instance_basis, p));
 

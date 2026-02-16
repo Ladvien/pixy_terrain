@@ -13,6 +13,7 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
+use crate::flower_planter::{FlowerConfig, PixyFlowerPlanter};
 use crate::grass_planter::{GrassConfig, PixyGrassPlanter};
 use crate::marching_squares::{
     self, validate_cell_watertight, CellContext, CellGeometry, MergeMode,
@@ -96,6 +97,7 @@ pub struct PixyTerrainChunk {
     terrain_config: TerrainConfig,
     terrain_material: Option<Gd<ShaderMaterial>>,
     grass_planter: Option<Gd<PixyGrassPlanter>>,
+    flower_planter: Option<Gd<PixyFlowerPlanter>>,
 }
 
 impl PixyTerrainChunk {
@@ -120,6 +122,7 @@ impl PixyTerrainChunk {
             terrain_config: TerrainConfig::default(),
             terrain_material: None,
             grass_planter: None,
+            flower_planter: None,
         }
     }
 }
@@ -517,6 +520,7 @@ impl PixyTerrainChunk {
         noise: Option<Gd<Noise>>,
         terrain_material: Option<Gd<ShaderMaterial>>,
         grass_config: GrassConfig,
+        flower_config: FlowerConfig,
     ) {
         self.terrain_material = terrain_material.clone();
         let dim = self.get_terrain_dimensions();
@@ -578,7 +582,40 @@ impl PixyTerrainChunk {
                 .setup_with_config(chunk_id, grass_config, true);
         }
 
-        // Regenerate mesh + grass on scene reload (rebuilds cell_geometry from restored maps)
+        // --- Flower planter ---
+        if flower_config.enabled {
+            // Reuse existing flower planter from scene save
+            if self.flower_planter.is_none() {
+                let name = GString::from("FlowerPlanter");
+                if let Some(child) = self
+                    .base()
+                    .find_child_ex(&name)
+                    .recursive(false)
+                    .owned(false)
+                    .done()
+                {
+                    if let Ok(planter) = child.try_cast::<PixyFlowerPlanter>() {
+                        self.flower_planter = Some(planter);
+                    }
+                }
+            }
+
+            // Create new flower planter if none found
+            if self.flower_planter.is_none() {
+                let mut planter = PixyFlowerPlanter::new_alloc();
+                planter.set_name("FlowerPlanter");
+                self.base_mut().add_child(&planter);
+                self.flower_planter = Some(planter);
+            }
+
+            if let Some(ref mut planter) = self.flower_planter {
+                planter
+                    .bind_mut()
+                    .setup_with_config(chunk_id, flower_config, true);
+            }
+        }
+
+        // Regenerate mesh + grass + flowers on scene reload
         if should_regenerate_mesh {
             self.regenerate_mesh();
         }
@@ -657,6 +694,13 @@ impl PixyTerrainChunk {
 
         // Regenerate grass after mesh geometry is built
         if let Some(ref mut planter) = self.grass_planter {
+            planter
+                .bind_mut()
+                .regenerate_all_cells_with_geometry(&self.cell_geometry);
+        }
+
+        // Regenerate flowers after mesh geometry is built
+        if let Some(ref mut planter) = self.flower_planter {
             planter
                 .bind_mut()
                 .regenerate_all_cells_with_geometry(&self.cell_geometry);

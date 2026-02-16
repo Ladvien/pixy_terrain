@@ -9,12 +9,13 @@
 use std::collections::HashMap;
 
 use godot::classes::{
-    rendering_server::GlobalShaderParameterType, Engine, Image, ImageTexture, Node3D, QuadMesh,
+    rendering_server::GlobalShaderParameterType, Engine, Image, ImageTexture, Mesh, Node3D,
     RenderingServer, ResourceLoader, Shader, ShaderMaterial, Texture2D,
 };
 use godot::prelude::*;
 
 use crate::chunk::{PixyTerrainChunk, TerrainConfig};
+use crate::flower_planter::FlowerConfig;
 use crate::grass_planter::GrassConfig;
 use crate::marching_squares::{BlendMode, MergeMode};
 use crate::shared_params::SharedTerrainParams;
@@ -134,9 +135,15 @@ pub struct PixyTerrain {
     #[export]
     #[init(val = 3)]
     pub grass_subdivisions: i32,
-    #[export]
-    #[init(val = Vector2::new(1.0, 1.0))]
-    pub grass_size: Vector2,
+    #[export(range = (10.0, 500.0, 1.0, suffix = "%"))]
+    #[var(set = set_grass_width)]
+    #[init(val = 100.0)]
+    pub grass_width: f32,
+
+    #[export(range = (10.0, 500.0, 1.0, suffix = "%"))]
+    #[var(set = set_grass_height)]
+    #[init(val = 100.0)]
+    pub grass_height: f32,
 
     #[export]
     #[init(val = true)]
@@ -183,10 +190,6 @@ pub struct PixyTerrain {
     #[export]
     #[init(val = 60.0)]
     pub world_sway_angle: f32,
-
-    #[export]
-    #[init(val = 0.3)]
-    pub fake_perspective_scale: f32,
 
     #[export_subgroup(name = "View Sway")]
     #[export]
@@ -259,11 +262,52 @@ pub struct PixyTerrain {
     pub grass_threshold_gradient_size: f32,
 
     // ═══════════════════════════════════════════
+    // Flower Planting
+    // ═══════════════════════════════════════════
+    #[export_group(name = "Flowers")]
+    /// Enable flower scattering on terrain
+    #[export]
+    pub flowers_enabled: bool,
+
+    /// Flower subdivisions per cell (flowers per cell = subs^2)
+    #[export(range = (1.0, 5.0, 1.0))]
+    #[init(val = 2)]
+    pub flower_subdivisions: i32,
+
+    /// 3D flower mesh (from flower.glb)
+    #[export]
+    pub flower_mesh: Option<Gd<Mesh>>,
+
+    /// Flower sprite texture
+    #[export]
+    pub flower_texture: Option<Gd<Texture2D>>,
+
+    /// Flower tint color
+    #[export]
+    #[init(val = Color::WHITE)]
+    pub flower_color: Color,
+
+    /// Base scale for flower instances
+    #[export(range = (0.1, 5.0, 0.1))]
+    #[init(val = 1.0)]
+    pub flower_size: f32,
+
+    /// Wind bend amount for flowers
+    #[export(range = (0.0, 3.0, 0.1))]
+    #[init(val = 1.0)]
+    pub flower_bendiness: f32,
+
+    /// Cel-shading light quantization steps for flowers
+    #[export(range = (1.0, 10.0, 1.0))]
+    #[init(val = 3.0)]
+    pub flower_light_steps: f32,
+
+    // ═══════════════════════════════════════════
     // Internal State (not exported)
     // ═══════════════════════════════════════════
     pub terrain_material: Option<Gd<ShaderMaterial>>,
     pub grass_material: Option<Gd<ShaderMaterial>>,
-    pub grass_quad_mesh: Option<Gd<QuadMesh>>,
+    pub grass_quad_mesh: Option<Gd<Mesh>>,
     pub is_batch_updating: bool,
 
     #[init(val = HashMap::new())]
@@ -340,6 +384,18 @@ impl INode3D for PixyTerrain {
 #[godot_api]
 impl PixyTerrain {
     #[func]
+    fn set_grass_width(&mut self, value: f32) {
+        self.grass_width = value;
+        self.refresh_grass_mesh();
+    }
+
+    #[func]
+    fn set_grass_height(&mut self, value: f32) {
+        self.grass_height = value;
+        self.refresh_grass_mesh();
+    }
+
+    #[func]
     fn _deferred_enter_tree(&mut self) {
         // Register fallback global shader parameters (no-ops if already present)
         Self::ensure_environment_globals();
@@ -363,9 +419,10 @@ impl PixyTerrain {
             }
         }
 
-        // Create configs ONCE before iteraing chunks (Avoid borrow issues)
+        // Create configs ONCE before iterating chunks (Avoid borrow issues)
         let terrain_config = self.make_terrain_config();
         let grass_config = self.make_grass_config();
+        let flower_config = self.make_flower_config();
         let noise = self.noise_hmap.clone();
         let material = self.terrain_material.clone();
 
@@ -383,6 +440,7 @@ impl PixyTerrain {
                     noise.clone(),
                     material.clone(),
                     grass_config.clone(),
+                    flower_config.clone(),
                 );
             }
         }
@@ -390,110 +448,78 @@ impl PixyTerrain {
 
     /// Register fallback global shader parameters for wind/cloud systems.
     ///
-    /// Checks whether globals are already registered (e.g. from project.godot
-    /// `[shader_globals]`) and skips registration to avoid duplicate-add errors
-    /// in Godot 4.6+. Zero-effect defaults ensure grass renders without
-    /// wind/cloud artifacts when pixy_environment is not installed.
+    /// In the editor, `global_shader_parameter_get_list` works, so we check
+    /// before adding to avoid duplicate-add errors.
+    /// At runtime, both `_get_list` and `_get` are editor-only (return empty
+    /// and print errors), so we add unconditionally. Params already loaded
+    /// from `project.godot [shader_globals]` will produce harmless
+    /// "variables.has(p_name)" warnings that can be ignored.
     fn ensure_environment_globals() {
         let mut rs = RenderingServer::singleton();
+        let is_editor = Engine::singleton().is_editor_hint();
 
-        // Skip if globals already registered (e.g. from project.godot [shader_globals])
-        let existing = rs.global_shader_parameter_get_list();
-        if existing.contains(&StringName::from("cloud_noise")) {
-            godot_print!("PixyTerrain: Registered fallback environment globals");
-            return;
+        // In editor mode, fetch existing list to avoid duplicates.
+        // At runtime this API is unavailable, so we use an empty list
+        // (meaning all params will be added unconditionally).
+        let existing: Array<StringName> = if is_editor {
+            rs.global_shader_parameter_get_list()
+        } else {
+            Array::new()
+        };
+
+        fn add_if_missing(
+            rs: &mut Gd<RenderingServer>,
+            existing: &Array<StringName>,
+            name: &str,
+            param_type: GlobalShaderParameterType,
+            value: &Variant,
+        ) {
+            let sn = StringName::from(name);
+            if !existing.contains(&sn) {
+                rs.global_shader_parameter_add(name, param_type, value);
+            }
         }
 
         // Create a 1×1 white fallback texture for sampler2D defaults.
-        // Guarantees the sampler returns 1.0 (white) on all GPU drivers,
-        // which the existing threshold math converts to zero wind / full brightness.
         let mut img = Image::create(1, 1, false, godot::classes::image::Format::RGBA8).unwrap();
         img.set_pixel(0, 0, Color::WHITE);
         let tex = ImageTexture::create_from_image(&img).unwrap();
 
         // Cloud system defaults (zero-effect: no shadow visible)
-        rs.global_shader_parameter_add(
-            "cloud_noise",
-            GlobalShaderParameterType::SAMPLER2D,
-            &tex.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_scale",
-            GlobalShaderParameterType::FLOAT,
-            &100.0_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_world_y",
-            GlobalShaderParameterType::FLOAT,
-            &50.0_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_speed",
-            GlobalShaderParameterType::FLOAT,
-            &0.02_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_contrast",
-            GlobalShaderParameterType::FLOAT,
-            &0.0_f32.to_variant(), // zero contrast → flat mid-gray → no shadow pattern
-        );
-        rs.global_shader_parameter_add(
-            "cloud_threshold",
-            GlobalShaderParameterType::FLOAT,
-            &0.0_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_direction",
-            GlobalShaderParameterType::VEC2,
-            &Vector2::new(1.0, 0.0).to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "light_direction",
-            GlobalShaderParameterType::VEC3,
-            &Vector3::new(0.0, -1.0, 0.0).to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "cloud_shadow_min",
-            GlobalShaderParameterType::FLOAT,
-            &1.0_f32.to_variant(), // min=1.0 → clamp always returns 1.0 → full brightness
-        );
-        rs.global_shader_parameter_add(
-            "cloud_diverge_angle",
-            GlobalShaderParameterType::FLOAT,
-            &10.0_f32.to_variant(),
-        );
+        add_if_missing(&mut rs, &existing, "cloud_noise",
+            GlobalShaderParameterType::SAMPLER2D, &tex.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_scale",
+            GlobalShaderParameterType::FLOAT, &100.0_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_world_y",
+            GlobalShaderParameterType::FLOAT, &50.0_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_speed",
+            GlobalShaderParameterType::FLOAT, &0.02_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_contrast",
+            GlobalShaderParameterType::FLOAT, &0.0_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_threshold",
+            GlobalShaderParameterType::FLOAT, &0.0_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_direction",
+            GlobalShaderParameterType::VEC2, &Vector2::new(1.0, 0.0).to_variant());
+        add_if_missing(&mut rs, &existing, "light_direction",
+            GlobalShaderParameterType::VEC3, &Vector3::new(0.0, -1.0, 0.0).to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_shadow_min",
+            GlobalShaderParameterType::FLOAT, &1.0_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "cloud_diverge_angle",
+            GlobalShaderParameterType::FLOAT, &10.0_f32.to_variant());
 
         // Wind system defaults (zero-effect: no wind displacement)
-        rs.global_shader_parameter_add(
-            "wind_noise",
-            GlobalShaderParameterType::SAMPLER2D,
-            &tex.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "wind_noise_threshold",
-            GlobalShaderParameterType::FLOAT,
-            &(-0.5_f32).to_variant(), // white tex → combined=1.0 → clamp(1.0-0.5)=0.5 → (0.5-0.5)*2=0
-        );
-        rs.global_shader_parameter_add(
-            "wind_noise_scale",
-            GlobalShaderParameterType::FLOAT,
-            &0.071_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "wind_noise_speed",
-            GlobalShaderParameterType::FLOAT,
-            &0.025_f32.to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "wind_noise_direction",
-            GlobalShaderParameterType::VEC2,
-            &Vector2::new(0.0, 1.0).to_variant(),
-        );
-        rs.global_shader_parameter_add(
-            "wind_diverge_angle",
-            GlobalShaderParameterType::FLOAT,
-            &10.0_f32.to_variant(),
-        );
+        add_if_missing(&mut rs, &existing, "wind_noise",
+            GlobalShaderParameterType::SAMPLER2D, &tex.to_variant());
+        add_if_missing(&mut rs, &existing, "wind_noise_threshold",
+            GlobalShaderParameterType::FLOAT, &(-0.5_f32).to_variant());
+        add_if_missing(&mut rs, &existing, "wind_noise_scale",
+            GlobalShaderParameterType::FLOAT, &0.071_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "wind_noise_speed",
+            GlobalShaderParameterType::FLOAT, &0.025_f32.to_variant());
+        add_if_missing(&mut rs, &existing, "wind_noise_direction",
+            GlobalShaderParameterType::VEC2, &Vector2::new(0.0, 1.0).to_variant());
+        add_if_missing(&mut rs, &existing, "wind_diverge_angle",
+            GlobalShaderParameterType::FLOAT, &10.0_f32.to_variant());
 
         godot_print!("PixyTerrain: Registered fallback environment globals");
     }
@@ -530,7 +556,7 @@ impl PixyTerrain {
         godot_warn!("PixyTerrain: Could not load terrain shader at {TERRAIN_SHADER_PATH}");
     }
 
-    /// Ensure shared grass material and QuadMesh exist.
+    /// Ensure shared grass material and cross-mesh exist.
     pub fn ensure_grass_material(&mut self) {
         if self.grass_material.is_some() {
             godot_print!("PixyTerrain: Grass material already exists, skipping");
@@ -578,17 +604,14 @@ impl PixyTerrain {
         mat.set_shader(&shader);
         self.grass_material = Some(mat.clone());
 
-        // Create shared QuadMesh with the material applied
-        let mut quad = QuadMesh::new_gd();
-        quad.set_size(self.grass_size);
-        quad.set_center_offset(Vector3::new(0.0, self.grass_size.y / 2.0, 0.0));
-        quad.set_material(&mat);
-        quad.surface_set_material(0, &mat);
-        self.grass_quad_mesh = Some(quad);
+        // Create shared cross-mesh (3-quad star) with the material applied
+        let mut cross_mesh = crate::grass_planter::build_cross_mesh(self.grass_size_world());
+        cross_mesh.surface_set_material(0, &mat);
+        self.grass_quad_mesh = Some(cross_mesh.upcast::<Mesh>());
 
         godot_print!(
-            "PixyTerrain: Created shared grass material and QuadMesh (size={})",
-            self.grass_size
+            "PixyTerrain: Created shared grass material and cross-mesh (size={})",
+            self.grass_size_world()
         );
     }
 
@@ -675,12 +698,11 @@ impl PixyTerrain {
         let tex_has_grass = self.tex_has_grass_array();
 
         let shadow_color = self.shadow_color;
-        let grass_size = self.grass_size;
+        let grass_size = self.grass_size_world();
         let grass_framerate = self.grass_framerate;
         let grass_quantised = self.grass_quantised;
         let world_space_sway = self.world_space_sway;
         let world_sway_angle = self.world_sway_angle;
-        let fake_perspective_scale = self.fake_perspective_scale;
         let view_space_sway = self.view_space_sway;
         let view_sway_speed = self.view_sway_speed;
         let view_sway_angle = self.view_sway_angle;
@@ -712,7 +734,6 @@ impl PixyTerrain {
             "quantised"                  => grass_quantised,
             "world_space_sway"           => world_space_sway,
             "world_sway_angle"           => world_sway_angle,
-            "fake_perspective_scale"     => fake_perspective_scale,
             "view_space_sway"            => view_space_sway,
             "view_sway_speed"            => view_sway_speed,
             "view_sway_angle"            => view_sway_angle,
@@ -727,10 +748,41 @@ impl PixyTerrain {
             "shadow_color"               => shadow_color,
         ]);
 
-        // Update QuadMesh size
-        if let Some(ref mut quad) = self.grass_quad_mesh {
-            quad.set_size(grass_size);
-            quad.set_center_offset(Vector3::new(0.0, grass_size.y / 2.0, 0.0));
+        // Rebuild cross-mesh when size changes
+        if self.grass_quad_mesh.is_some() {
+            let mat = self.grass_material.clone();
+            let mut cross_mesh = crate::grass_planter::build_cross_mesh(grass_size);
+            if let Some(ref m) = mat {
+                cross_mesh.surface_set_material(0, m);
+            }
+            self.grass_quad_mesh = Some(cross_mesh.upcast::<Mesh>());
+        }
+    }
+
+    /// Rebuild the shared cross-mesh and propagate it to all chunk grass planters.
+    fn refresh_grass_mesh(&mut self) {
+        self.force_grass_material_update();
+
+        // Propagate the new mesh to every chunk's grass MultiMesh
+        if let Some(ref new_mesh) = self.grass_quad_mesh {
+            let keys: Vec<[i32; 2]> = self.chunks.keys().cloned().collect();
+            for key in keys {
+                if let Some(chunk) = self.chunks.get(&key) {
+                    let chunk = chunk.clone();
+                    let children = chunk.bind().base().get_children();
+                    for i in 0..children.len() {
+                        if let Some(child) = children.get(i) {
+                            if let Ok(mmi) =
+                                child.try_cast::<godot::classes::MultiMeshInstance3D>()
+                            {
+                                if let Some(mut mm) = mmi.get_multimesh() {
+                                    mm.set_mesh(new_mesh);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -777,10 +829,15 @@ impl PixyTerrain {
     }
 
     fn get_grass_sprite_or_default(&self, index: usize) -> Option<Gd<Texture2D>> {
+        const DEFAULT_GRASS_SPRITES: [&str; 2] = [
+            "res://addons/pixy_terrain/resources/textures/grass/grass_round.png",
+            "res://addons/pixy_terrain/resources/textures/grass/grass_thin.png",
+        ];
+
         if let Some(tex) = get_variant_texture(&self.grass_sprites, index) {
             return Some(tex);
         }
-        load_default_texture("res://addons/pixy_terrain/resources/textures/grass_leaf_sprite.png")
+        load_default_texture(DEFAULT_GRASS_SPRITES[index % DEFAULT_GRASS_SPRITES.len()])
     }
 
     fn extract_ground_image(&self, index: usize) -> Option<Gd<Image>> {
@@ -822,21 +879,36 @@ impl PixyTerrain {
         }
     }
 
+    fn grass_size_world(&self) -> Vector2 {
+        Vector2::new(self.grass_width / 100.0, self.grass_height / 100.0)
+    }
+
     fn make_grass_config(&self) -> GrassConfig {
         GrassConfig {
             shared: self.make_shared_params(),
             subdivisions: self.grass_subdivisions,
-            grass_size: self.grass_size,
+            grass_size: self.grass_size_world(),
             ground_colors: std::array::from_fn(|i| self.ground_colors[i]),
             tex_has_grass: self.tex_has_grass_array(),
             grass_mesh: self.grass_mesh.clone(),
             grass_material: self.grass_material.clone(),
-            grass_quad_mesh: self
-                .grass_quad_mesh
-                .as_ref()
-                .map(|q| q.clone().upcast::<godot::classes::Mesh>()),
+            grass_quad_mesh: self.grass_quad_mesh.clone(),
             ground_images: std::array::from_fn(|i| self.extract_ground_image(i)),
             texture_scales: std::array::from_fn(|i| self.texture_scales[i]),
+        }
+    }
+
+    fn make_flower_config(&self) -> FlowerConfig {
+        FlowerConfig {
+            shared: self.make_shared_params(),
+            subdivisions: self.flower_subdivisions,
+            flower_mesh: self.flower_mesh.clone(),
+            flower_texture: self.flower_texture.clone(),
+            flower_color: self.flower_color,
+            flower_size: self.flower_size,
+            flower_bendiness: self.flower_bendiness,
+            light_steps: self.flower_light_steps,
+            enabled: self.flowers_enabled,
         }
     }
 
@@ -984,6 +1056,7 @@ impl PixyTerrain {
     ) {
         let terrain_config = self.make_terrain_config();
         let grass_config = self.make_grass_config();
+        let flower_config = self.make_flower_config();
         let noise = self.noise_hmap.clone();
         let material = self.terrain_material.clone();
 
@@ -1019,7 +1092,7 @@ impl PixyTerrain {
 
         chunk
             .bind_mut()
-            .initialize_terrain(regenerate, noise, material, grass_config);
+            .initialize_terrain(regenerate, noise, material, grass_config, flower_config);
 
         godot_print!("PixyTerrain: Added chunk at ({}, {})", coords.x, coords.y);
     }

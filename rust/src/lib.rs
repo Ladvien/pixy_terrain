@@ -2,6 +2,7 @@ use godot::prelude::*;
 
 mod chunk;
 mod editor_plugin;
+mod flower_planter;
 mod gizmo;
 mod grass_planter;
 mod marching_squares;
